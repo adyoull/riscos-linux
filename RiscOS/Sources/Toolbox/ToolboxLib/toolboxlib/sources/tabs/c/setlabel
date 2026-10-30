@@ -1,0 +1,58 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : setlabel.c
+ * Purpose     : Veneer for method Tabs_SetLabel
+ * Description : Sets the tab name of the given tab
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "tabs.h"
+
+
+
+
+/*
+ * Name        : tabs_set_label
+ * Description : Sets the tab name of the given tab
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ *               const char *text
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_set_label ( unsigned int flags,
+                                         ObjectId window,
+                                         ComponentId gadget,
+                                         int tab_index,
+                                         const char *text
+                                       )
+{
+_kernel_swi_regs r;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = Tabs_SetLabel;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) tab_index;
+  r.r[5] = (int) text;
+  return(_kernel_swi(Toolbox_ObjectMiscOp,&r,&r));
+}
+

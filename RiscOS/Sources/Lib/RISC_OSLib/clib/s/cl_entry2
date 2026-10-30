@@ -1,0 +1,86 @@
+; Copyright 2002 Pace Micro Technology plc
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+;-*- Mode: Assembler -*-
+;
+; Copyright (C) Acorn Computers Ltd., 1989.
+;
+; DO NOT ADD ENTRIES TO EXISTING CHUNKS WHICH HAVE BEEN RELEASED TO USERS!
+; Old versions of CLib will plant a ticking time bomb in apps by filling the
+; entries with garbage.
+; *ESPECIALLY* don't add new entries to this file, because it's already been
+; split in two in order to help fix past mistakes.
+;
+
+        ; C99
+        Entry   __fpclassifyf, , , unveneered, , , [FPREGARGS]
+        Entry   __fpclassifyd, , , unveneered, , , [FPREGARGS]
+        Entry   __signbitf, , , unveneered, , , [FPREGARGS]
+        Entry   __signbitd, , , unveneered, , , [FPREGARGS]
+        Entry   __copysignd, , , unveneered, , , [FPREGARGS]
+        Entry   __copysignf, , , unveneered, , , [FPREGARGS]
+        Entry   nan, imported, , unveneered
+        Entry   nanf, imported, , unveneered
+        Entry   nextafter, , , unveneered
+        Entry   nextafterf, , , unveneered
+        Entry   fdim, imported, , unveneered
+        Entry   fdimf, imported, , unveneered
+        Entry   fmax, , , unveneered
+        Entry   fmaxf, , , unveneered
+        Entry   fmin, , , unveneered
+        Entry   fminf, , , unveneered
+        Entry   fabsf, imported, , unveneered
+        Entry   hypot, , , unveneered
+        Entry   hypotf, , , unveneered
+
+        Entry   feclearexcept, imported, , unveneered
+        Entry   fegetexceptflag, imported, , unveneered
+        Entry   feraiseexcept, imported, , unveneered
+        Entry   fesetexceptflag, imported, , unveneered
+        Entry   fetestexcept, imported, , unveneered
+        Entry   fegetround, imported, , unveneered
+        Entry   fesetround, imported, , unveneered
+        Entry   fegetenv, imported, , unveneered
+        Entry   feholdexcept, imported, , unveneered
+        Entry   fesetenv, imported, , unveneered
+        Entry   feupdateenv, imported, , unveneered
+
+        Entry   _snprintf, imported, , unveneered
+        Entry   snprintf, imported, , unveneered
+        Entry   vsnprintf, imported, , unveneered
+        Entry   vfscanf, imported, , unveneered
+        Entry   vscanf, imported, , unveneered
+        Entry   vsscanf, imported, , unveneered
+
+        Entry   ceilf, imported, , unveneered
+        Entry   floorf, imported, , unveneered
+        Entry   nearbyint, , , unveneered
+        Entry   nearbyintf, , , unveneered
+        Entry   rint, imported, , unveneered
+        Entry   rintf, imported, , unveneered
+        Entry   lrint, imported, , unveneered
+        Entry   lrintf, imported, , unveneered
+        Entry   round, , , unveneered
+        Entry   roundf, , , unveneered
+        Entry   lround, , , unveneered
+        Entry   lroundf, , , unveneered
+        Entry   trunc, imported, , unveneered
+        Entry   truncf, imported, , unveneered
+        Entry   remainder, , , unveneered
+        Entry   remainderf, , , unveneered
+
+        Entry   llabs, , , unveneered
+        Entry   lldiv, , , unveneered
+
+        END

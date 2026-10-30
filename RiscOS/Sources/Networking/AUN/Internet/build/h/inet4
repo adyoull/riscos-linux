@@ -1,0 +1,94 @@
+/*
+ * Copyright (c) 2022, RISC OS Open Ltd
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#ifndef __inet4_h
+#define __inet4_h
+/*
+ * COMPAT_INET4 dependencies
+ * These definitions were previously used when COMPAT_INET4 was not active,
+ * in other words they are the "old" definitions, hence the "o" prefixes.
+ * They allow Internet to remain binary backwards compatible while
+ * the TCPIPLibs no longer need to support both options.
+ */
+
+/* From sys/socket.h */
+struct osockaddr {
+	u_short	sa_family;		/* address family */
+	char	sa_data[14];		/* up to 14 bytes of direct address */
+};
+
+struct omsghdr {
+	caddr_t	msg_name;		/* optional address */
+	int	msg_namelen;		/* size of address */
+	struct	iovec *msg_iov;		/* scatter/gather array */
+	int	msg_iovlen;		/* # elements in msg_iov */
+	caddr_t	msg_accrights;		/* access rights sent/received */
+	int	msg_accrightslen;
+};
+
+/* From netinet/in.h */
+struct osockaddr_in {
+	u_short	sin_family;
+	u_short	sin_port;
+	struct	in_addr sin_addr;
+	char	sin_zero[8];
+};
+
+/* From net/if.h */
+#define		OIFNAMSIZ	16
+
+struct	oifreq {
+	char	ifr_name[OIFNAMSIZ];		/* if name, e.g. "en0" */
+	union {
+		struct	osockaddr ifru_addr;
+		struct	osockaddr ifru_dstaddr;
+		struct	osockaddr ifru_broadaddr;
+		short	ifru_flags[2];
+		int	ifru_metric;
+		int	ifru_mtu;
+		int	ifru_phys;
+		int	ifru_media;
+		caddr_t ifru_data;
+	} ifr_ifru;
+};
+
+struct	oifconf {
+	int	ifc_len;		/* size of associated buffer */
+	union {
+		caddr_t ifcu_buf;
+		struct	oifreq *ifcu_req;
+	} ifc_ifcu;
+};
+
+/* From sys/sockio.h */
+#define	OSIOCGIFADDR	_IOWR('i', 13, struct oifreq)	/* get ifnet address */
+#define	OSIOCGIFDSTADDR	_IOWR('i', 15, struct oifreq)	/* get p-p address */
+#define	OSIOCGIFBRDADDR	_IOWR('i', 18, struct oifreq)	/* get broadcast addr */
+#define	OSIOCGIFCONF	_IOWR('i', 20, struct oifconf)	/* get ifnet list */
+#define	OSIOCGIFNETMASK	_IOWR('i', 21, struct oifreq)	/* get net addr mask */
+
+#endif /* __inet4_h */

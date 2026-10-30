@@ -1,0 +1,178 @@
+REM Copyright (c) 2021, RISC OS Open Ltd
+REM All rights reserved.
+REM
+REM Redistribution and use in source and binary forms, with or without
+REM modification, are permitted provided that the following conditions are met:
+REM     * Redistributions of source code must retain the above copyright
+REM       notice, this list of conditions and the following disclaimer.
+REM     * Redistributions in binary form must reproduce the above copyright
+REM       notice, this list of conditions and the following disclaimer in the
+REM       documentation and/or other materials provided with the distribution.
+REM     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+REM       may be used to endorse or promote products derived from this software
+REM       without specific prior written permission.
+REM
+REM THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+REM AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+REM IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+REM ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+REM LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+REM CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+REM SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+REM INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+REM CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+REM ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+REM POSSIBILITY OF SUCH DAMAGE.
+
+REM Test AbortTrap serious error handling (data aborts, via an abortable DA)
+
+ON ERROR ERROR EXT 0,REPORT$+" at "+STR$(ERL)
+da_size%=4096
+SYS "OS_Module",6,,,1024 TO ,,rma%
+
+FOR pass=0 TO 2 STEP 2
+P%=rma%
+[ OPT pass
+.da_handler%
+; R0 = DA handler reason, 5 = aborttrap
+; R1 = flags
+; R2 = buffer
+; R3 = required address
+; R4 = length
+; R5 = current end of DA (nonsense for sparse DAs)
+; R12 = param
+STMFD R13!,{R0-R6,R14}
+ADR R14,last_call%
+MRS R6,CPSR
+STMIA R14,{R0-R5,R6,R12}
+CMP R0,#4 ; Normal DA resize op?
+LDMLOFD R13!,{R0-R6,PC} ; Allow it
+CMP R0,#5 ; Abort op?
+BNE return_bad_reason
+LDMFD R13!,{R0-R6,R14}
+MSR CPSR_f,#(1<<28)
+ADR R0,serious_error
+MOV PC,LR
+
+.return_bad_reason
+LDMFD R13!,{R0-R6,R14}
+MSR CPSR_f,#(1<<28)
+ADR R0,bad_reason
+MOV PC,LR
+
+.bad_reason
+EQUD 0
+EQUS "Bad reason" : EQUB 0
+ALIGN
+
+.serious_error
+EQUD &80000000
+EQUS "Test serious error" : EQUB 0
+ALIGN
+
+.testcode%
+STR R13,temp_r13%
+STR R14,temp_r14%
+ADR R0,in_regs%
+LDMIA R0,{R0-R14}
+.testinstr%
+LDR R0,[R0]
+; If we're still here, the abort didn't trigger
+LDR R13,temp_r13%
+LDR PC,temp_r14%
+
+.temp_r13% EQUD 0
+.temp_r14% EQUD 0
+
+.last_call%
+.last_R0% EQUD 0
+.last_R1% EQUD 0
+.last_R2% EQUD 0
+.last_R3% EQUD 0
+.last_R4% EQUD 0
+.last_R5% EQUD 0
+.last_PSR% EQUD 0
+.last_R12% EQUD 0
+
+.in_regs%
+]
+NEXT pass
+
+seed%=-TIME
+PRINT "seed: ";seed%
+A%=RND(seed%)
+
+wp%=RND
+da_num%=0
+
+ON ERROR PROCerror
+
+PRINT "handler: ";~da_handler%
+PRINT "wp: ";~wp%
+PRINT "last_call: ";~last_call%
+
+!last_R0%=0
+!last_R1%=0
+!last_R2%=0
+!last_R3%=0
+!last_R4%=0
+!last_R5%=0
+!last_PSR%=0
+!last_R12%=0
+
+REM Create an abortable DA
+SYS "OS_DynamicArea",0,-1,0,-1,(1<<16),da_size%,da_handler%,wp%,"ATTest" TO ,da_num%,,da_base%
+
+PRINT "da_base: ";~da_base%
+
+REM Randomise input regs
+FOR A=1 TO 13
+in_regs%!(A*4)=RND
+NEXT A
+in_regs%!0=(RND AND &FFC)+da_base%
+
+REM Do the test
+CALL testcode%
+
+REM We shouldn't be here!
+PRINT "Failed"
+PROCend(1)
+
+DEF PROCerror
+ IF REPORT$="Test serious error" THEN
+  PROCcheckresult
+ ELSE
+  PRINT REPORT$;" at ";ERL : PROCend(1)
+ ENDIF
+ENDPROC
+
+DEF PROCcheckresult
+ REM Check registers match
+ in_regs%!(15*4)=testinstr%+8
+ SYS "OS_ChangeEnvironment",13 TO ,exc_regs%
+ FOR A=0 TO 15
+  IF in_regs%!(A*4)<>exc_regs%!(A*4) THEN PRINT "Wrong reg R";A;" expected ";~(in_regs%!(A*4));" actual ";~(exc_regs%!(A*4)) : PROCend(1)
+ NEXT A
+ REM Check recorded fault info
+ SYS "OS_ReadSysInfo",7 TO ,exc_pc%,exc_psr%,exc_far%
+ IF exc_pc%<>testinstr%+8 THEN PRINT "Wrong exception PC expected ";~(testinstr%+8);" actual ";~exc_pc% : PROCend(1)
+ IF (exc_psr% AND &1F)<>&10 THEN PRINT "Wrong exception PSR ";~exc_psr% : PROCend(1)
+ IF exc_far%<>!in_regs% THEN PRINT "Wrong exception FAR expected ";~(!in_regs%);" actual ";~exc_far% : PROCend(1)
+ PROCend(0)
+ENDPROC
+
+DEF PROCendtest
+ IF da_num%<>0 THEN PROClast : SYS "OS_DynamicArea",1,da_num% : da_num%=0
+ENDPROC
+
+DEF PROCend(E%)
+ PROCendtest
+ SYS "OS_Module",7,,rma%
+ IF E% THEN ERROR EXT 0,"Failed"
+ PRINT "Success"
+ END
+ENDPROC
+
+DEF PROClast
+ PRINT "last R0 ";~!last_R0%;" R1 ";~!last_R1%;" R2 ";~!last_R2%;" R3 ";~!last_R3%;" R4 ";~!last_R4%;" R5 ";~!last_R5%;" PSR ";~!last_PSR%;" R12 ";~!last_R12%
+ENDPROC

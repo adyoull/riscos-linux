@@ -1,0 +1,251 @@
+# Copyright (c) 2021, RISC OS Open Ltd
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met: 
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+#       may be used to endorse or promote products derived from this software
+#       without specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+# 
+
+DEFAULT()
+{
+	return aborttrap_ERROR_UNHANDLED;
+}
+
+# A8.6.53 LDM/LDMIA/LDMFD
+LDMIA_A1(Rn,W,reglist)
+{
+	return aborttrap_LDMIA(ctx,Rn,reglist,W);
+}
+
+# A8.6.54 LDMDA/FA
+LDMDA_A1(Rn,W,reglist)
+{
+	return aborttrap_LDMDA(ctx,Rn,reglist,W);
+}
+
+# A8.6.55 LDMDB/EA
+LDMDB_A1(Rn,W,reglist)
+{
+	return aborttrap_LDMDB(ctx,Rn,reglist,W);
+}
+
+# A8.6.56 LDMIB/ED
+LDMIB_A1(Rn,W,reglist)
+{
+	return aborttrap_LDMIB(ctx,Rn,reglist,W);
+}
+
+# A8.6.58 LDR (immediate, ARM)
+LDR_imm_A1(Rt,Rn,imm12,P,U,W)
+{
+	return aborttrap_LDR_imm(ctx,Rt,Rn,imm12,P,U,!P || W);
+}
+
+# A8.6.59 LDR (literal)
+LDR_lit_A1(Rt,imm12,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDR_lit(ctx,Rt,imm12,U);
+}
+
+# A8.6.60 LDR (register)
+LDR_reg_A1(Rt,Rn,imm5,type,Rm,P,U,W)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_LDR_reg(ctx,Rt,Rn,Rm,P,U,!P || W,shift_t,shift_n);
+}
+
+# A8.6.62 LDRB (immediate, ARM)
+LDRB_imm_A1(Rt,Rn,imm12,P,U,W)
+{
+	return aborttrap_LDRB_imm(ctx,Rt,Rn,imm12,P,U,!P || W);
+}
+
+# A8.6.63 LDRB (literal)
+LDRB_lit_A1(Rt,imm12,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDRB_lit(ctx,Rt,imm12,U);
+}
+
+# A8.6.64 LDRB (register)
+LDRB_reg_A1(Rt,Rn,imm5,type,Rm,P,U,W)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_LDRB_reg(ctx,Rt,Rn,Rm,P,U,!P || W,shift_t,shift_n);
+}
+
+# A8.6.65 LDRBT
+LDRBT_A1(Rt,Rn,imm12,U)
+{
+	return aborttrap_LDRBT_imm(ctx,Rt,Rn,imm12,true,U);
+}
+
+LDRBT_A2(Rt,Rn,imm5,type,Rm,U)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_LDRBT_reg(ctx,Rt,Rn,Rm,true,U,shift_t,shift_n);
+}
+
+# A8.6.86 LDRT
+LDRT_A1(Rt,Rn,imm12,U)
+{
+	return aborttrap_LDRT_imm(ctx,Rt,Rn,imm12,true,U);
+}
+
+LDRT_A2(Rt,Rn,imm5,type,Rm,U)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_LDRT_reg(ctx,Rt,Rn,Rm,true,U,shift_t,shift_n);
+}
+
+# A8.6.189 STM/STMIA/STMEA
+STMIA_A1(Rn,W,reglist)
+{
+	return aborttrap_STMIA(ctx,Rn,reglist,W);
+}
+
+# A8.6.190 STMDA/ED
+STMDA_A1(Rn,W,reglist)
+{
+	return aborttrap_STMDA(ctx,Rn,reglist,W);
+}
+
+# A8.6.191 STMDB/FD
+STMDB_A1(Rn,W,reglist)
+{
+	return aborttrap_STMDB(ctx,Rn,reglist,W);
+}
+
+# A8.6.192 STMIB/FA
+STMIB_A1(Rn,W,reglist)
+{
+	return aborttrap_STMIB(ctx,Rn,reglist,W);
+}
+
+# A8.6.194 STR (immediate, ARM)
+STR_imm_A1(Rt,Rn,imm12,P,U,W)
+{
+	return aborttrap_STR_imm(ctx,Rt,Rn,imm12,P,U,!P || W);
+}
+
+# A8.6.195 STR (register)
+STR_reg_A1(Rt,Rn,imm5,type,Rm,P,U,W)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_STR_reg(ctx,Rt,Rn,Rm,P,U,!P || W,shift_t,shift_n);
+}
+
+# A8.6.197 STRB (immediate, ARM)
+STRB_imm_A1(Rt,Rn,imm12,P,U,W)
+{
+	return aborttrap_STRB_imm(ctx,Rt,Rn,imm12,P,U,!P || W);
+}
+
+# A8.6.198 STRB (register)
+STRB_reg_A1(Rt,Rn,imm5,type,Rm,P,U,W)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_STRB_reg(ctx,Rt,Rn,Rm,P,U,!P || W,shift_t,shift_n);
+}
+
+# A8.6.199 STRBT
+STRBT_A1(Rt,Rn,imm12,U)
+{
+	return aborttrap_STRBT_imm(ctx,Rt,Rn,imm12,true,U);
+}
+
+STRBT_A2(Rt,Rn,imm5,type,Rm,U)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_STRBT_reg(ctx,Rt,Rn,Rm,true,U,shift_t,shift_n);
+}
+
+# A8.6.210 STRT
+STRT_A1(Rt,Rn,imm12,U)
+{
+	return aborttrap_STRT_imm(ctx,Rt,Rn,imm12,true,U);
+}
+
+STRT_A2(Rt,Rn,imm5,type,Rm,U)
+{
+	eshift shift_t;
+	uint32_t shift_n;
+	decodeimmshift(type,imm5,&shift_t,&shift_n);
+	return aborttrap_STRT_reg(ctx,Rt,Rn,Rm,true,U,shift_t,shift_n);
+}
+
+# A8.6.219 SWP, SWPB
+SWP_SWPB_A1(Rt,Rt2,Rn,B,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_SWP(ctx,Rt,Rt2,Rn,B);
+}
+
+# B6.1.2 LDM (exception return)
+LDM_exception_A1(Rn,reglist,P,U,W)
+{
+	return aborttrap_LDM_exception(ctx,Rn,reglist,W,U,(P==U));
+}
+
+# B6.1.3 LDM (user registers)
+LDM_user_A1(Rn,reglist,P,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDM_user(ctx,Rn,reglist,U,(P==U));
+}
+
+# B6.1.11 STM (user registers)
+STM_user_A1(Rn,reglist,P,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_STM_user(ctx,Rn,reglist,U,(P==U));
+}
+
+# A8.6.122 POP
+# Map to the underlying LDM/LDR instruction, it exhibits the same behaviour
+POP_A1 as if LDMIA_A1
+POP_A2 as if LDR_imm_A1
+
+# A8.6.123 PUSH
+# Map to the underlying STM/STR instruction, it exhibits the same behaviour
+PUSH_A1 as if STMDB_A1
+PUSH_A2 as if STR_imm_A1

@@ -1,0 +1,58 @@
+FMT1:DOS 1440K
+FMT2:DOS 720K
+FMT3:DOS 1200K
+FMT4:DOS 360K
+FMT5:DOS 180K
+FMT6:DOS 320K
+FMT7:DOS 160K
+FMT8:Atari 720K
+FMT9:Atari 360K
+
+FMTH1:DOS/Q - 1440K, DOS 3,5"-HD-Diskette
+FMTH2:DOS/M -  720K, DOS 3,5"-Diskette
+FMTH3:DOS/H - 1200K, DOS 5,25"-HD-Diskette
+FMTH4:DOS/N -  360K, DOS 5,25"-Diskette
+FMTH5:DOS/P -  180K, DOS 5,25"-Diskette
+FMTH6:DOS/T -  320K, DOS 5,25"-Diskette
+FMTH7:DOS/U -  160K, DOS 5,25"-Diskette
+FMTH8:Atari/M - 720K, Atari ST (DS), 3,5"-Diskette
+FMTH9:Atari/N - 360K, Atari ST (SS), 3,5"-Diskette
+
+DEFDNM:Namenlos
+
+NOMAP:Keine Zuordnung definiert
+DOSExt:DOS Erweiterung
+ROType:RISC OS Typ
+Prompt1:Führen Sie das Zielmedium ein und betätigen Sie die Leertaste.
+
+#{DictTokens}
+ERR00:Der FileSwitch-Args-Reason-Code ist unbekannt.
+ERR01:Der FileSwitch-File-Reason-Code ist unbekannt.
+ERR02:Der FileSwitch-Func-Reason-Code ist unbekannt.
+ERR04:Die DOS-FAT-Sektoren konnten nicht geladen werden.
+ERR06:Die Namenskonvertierung ist gescheitert.
+ERR07:Es ist ein DOS-Image-Lesefehler aufgetreten.
+ERR08:Es ist ein DOS-Image-Schreibfehler aufgetreten.
+ERR09:Die Cluster-Kette ist inkonsistent.
+ERR0A:Das DOS-Image ist ungültig.
+ERR0B:Das Dateiende wurde unerwartet erreicht.
+ERR0C:Der Dateiname ist ungültig, –%0” kann nicht konvertiert werden.
+ERR0D:Ein DOS-Extension-Zeichen ist ungültig.
+ERR0E:Die DOS-Extension ist länger als 3 Zeichen.
+ERR0F:DOS-Disketten haben keine Boot-Option.
+ERR10:Dieses Format wird nicht unterstützt.
+ERR11:Es ist ein unbekannter Tastatur-Lesefehler aufgetreten.
+ERR12:Der Cluster wird gerade benutzt.
+ERR15:Stack full
+ERR16:Disc too big
+ERR17:Access out of range
+
+ERRA5:Diese Operation des Dateisystems wird nicht unterstützt.
+ERRAC:Die Laufwerksspezifikation ist ungültig.
+ERRB3:Das Verzeichnis ist voll.
+ERRB4:Das Verzeichnis –%0” ist nicht leer.
+ERRC2:Die Datei –%0” ist offen.
+ERRC3:Das Objekt –%0” ist geschützt.
+ERRC4:Das Objekt existiert bereits.
+ERRC6:Es ist nicht genug Platz auf dem Medium.
+ERRFD:–%0” enthält Wildcards.

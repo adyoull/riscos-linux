@@ -1,0 +1,452 @@
+/*
+ * Copyright (c) 2021, RISC OS Open Ltd
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#include <stdlib.h>
+#include <string.h>
+#ifdef ABORTTRAP_DEBUG
+#include <stdio.h>
+#endif
+
+#include "kernel.h"
+#ifndef RISCOS_KERNEL
+#include "swis.h"
+#endif
+
+#ifdef USE_SYNCLIB
+#include "SyncLib/synclib.h"
+#endif
+
+#include "aborttrap.h"
+#include "aterrors.h"
+#include "../kerneliface.h"
+
+#ifdef USE_SYNCLIB
+static spinrwlock_t lock = SPINRW_INITIALISER;
+#endif
+
+typedef struct {
+	/* Handler parameters */
+	uint32_t base;  /* Inclusive */
+	uint32_t limit; /* Inclusive */
+	uint32_t routine;
+	uint32_t r12;
+	/* Highest limit value, out of this handler and all previous handlers in the list */
+	uint32_t limit_hwm; /* Inclusive */
+} aborttrap_handler_t;
+
+static aborttrap_handler_t * volatile handlers = NULL;
+static volatile int num_handlers = 0;
+
+extern _kernel_oserror *aborttrap_call_handler(int flags,uint8_t *buf,uint32_t addr,int len,int r12,int routine);
+
+/* Binary search to find the first handler with a base >= addr
+   This is used when finding the right point to insert/remove a handler */
+static int handler_find_by_base(uint32_t addr)
+{
+	int lo = 0, hi = num_handlers-1;
+	while (lo < hi)
+	{
+		int mid = (lo+hi)>>1;
+		if (handlers[mid].base >= addr)
+			hi = mid-1;
+		else
+			lo = mid+1;
+	}
+	/* It's possible we're one entry too early */
+	if ((lo < num_handlers) && (handlers[lo].base < addr))
+		lo++;
+	return lo;
+}
+
+/* Binary search to find the first handler with a limit_hwm >= addr
+   This is used when servicing requests, by finding the first handler that could
+   service the given address */
+static int handler_find_by_limit(uint32_t addr)
+{
+	int lo = 0, hi = num_handlers-1;
+	while (lo < hi)
+	{
+		int mid = (lo+hi)>>1;
+		if (handlers[mid].limit_hwm >= addr)
+			hi = mid-1;
+		else
+			lo = mid+1;
+	}
+	/* It's possible we're one entry too early */
+	if ((lo < num_handlers) && (handlers[lo].limit_hwm < addr))
+		lo++;
+	return lo;
+}
+
+static inline _kernel_oserror *mem_access_via_aborttrap(int flags,uint8_t *buf,uint32_t addr,int len)
+{
+	int idx = handler_find_by_limit(addr);
+	/* If idx is valid, we know the handler will satisfy 'base <= addr' */
+	while((len > 0) && (idx < num_handlers))
+	{
+		const aborttrap_handler_t *h = handlers+idx;
+		if (h->base > addr)
+		{
+			/* Handlers are sorted in increasing base address order
+			   We know the handler we started from had a base addr <= addr, so if we've run into one which is > addr, then we've hit an address range for which there are no handlers */
+			return aborttrap_ERROR_UNHANDLED;
+		}
+		if (h->limit >= addr)
+		{
+			/* Start of region is in handler */
+			int chunk = h->limit+1-addr;
+			if (len < chunk)
+				chunk = len;
+			_kernel_oserror *e = aborttrap_call_handler(flags,buf,addr,chunk,h->r12,h->routine);
+			if (e)
+			{
+				if (e->errnum & (1u<<31))
+				{
+					/* Handler wants to raise this error */
+					return e;
+				}
+				/* Non-serious error (e.g. handler can't cope with this request); see if there's another handler which can cope */
+			}
+			else
+			{
+				/* Chunk transferred OK */
+				addr += chunk;
+				buf += chunk;
+				len -= chunk;
+			}
+		}
+		idx++;
+	}
+	if (len > 0)
+	{
+		/* No handler; we can't handle this abort */
+		return aborttrap_ERROR_UNHANDLED;
+	}
+	return NULL;
+}
+
+static inline _kernel_oserror *mem_access_internal(uint8_t *buf,uint32_t addr,int len,int flags)
+{
+#ifndef RISCOS_KERNEL
+	int mem24_flags=0;
+	if ((flags & AbortTrap_Reason_Mask) == AbortTrap_Reason_MemMap)
+	{
+		if (flags & AbortTrap_MemMap_UserX)
+			mem24_flags |= CMA_Partially_UserXN;
+		if (flags & AbortTrap_MemMap_UserW)
+			mem24_flags |= CMA_Completely_UserW;
+		if (flags & AbortTrap_MemMap_UserR)
+			mem24_flags |= CMA_Completely_UserR;
+		if (flags & AbortTrap_MemMap_PrivX)
+			mem24_flags |= CMA_Partially_PrivXN;
+		if (flags & AbortTrap_MemMap_PrivW)
+			mem24_flags |= CMA_Completely_PrivW;
+		if (flags & AbortTrap_MemMap_PrivR)
+			mem24_flags |= CMA_Completely_PrivR;
+	}
+	else
+	{
+		if ((flags & AbortTrap_Reason_Mask) == AbortTrap_Reason_Store)
+			mem24_flags = CMA_Completely_UserW;
+		else
+			mem24_flags = CMA_Completely_UserR;
+		if (flags & AbortTrap_LoadStore_Privileged)
+			mem24_flags *= CMA_Completely_PrivR/CMA_Completely_UserR;
+	}
+#else
+	int mempermission_flags = 0;
+	if ((flags & AbortTrap_Reason_Mask) == AbortTrap_Reason_MemMap)
+	{
+		mempermission_flags = (flags & (AbortTrap_MemMap_UserX + AbortTrap_MemMap_UserW + AbortTrap_MemMap_UserR + AbortTrap_MemMap_PrivX + AbortTrap_MemMap_PrivW + AbortTrap_MemMap_PrivR)) >> 4;
+	}
+	else
+	{
+		if ((flags & AbortTrap_Reason_Mask) == AbortTrap_Reason_Store)
+			mempermission_flags = MemPermission_UserW;
+		else
+			mempermission_flags = MemPermission_UserR;
+		if (flags & AbortTrap_LoadStore_Privileged)
+			mempermission_flags *= MemPermission_PrivR/MemPermission_UserR;
+	}
+#endif
+	while (len > 0)
+	{
+#ifndef RISCOS_KERNEL
+		if(addr < 512<<20)
+		{
+			/* Application space, skip to avoid fighting against lazy task swapping */
+			return aborttrap_ERROR(Appspace);
+		}
+#endif
+		int chunk = len;
+		/* Keep things simple by avoiding crossing page boundaries */
+		uint32_t limit = (addr + 4096) & ~4095;
+		if (limit-addr < chunk)
+			chunk = limit-addr;
+		/* Check for direct memory access */
+		bool have_permission;
+		_kernel_oserror *e;
+		int flags2 = flags;
+#ifndef RISCOS_KERNEL
+		uint32_t access;
+		e = _swix(OS_Memory,_INR(0,2)|_OUT(1),OSMemReason_CheckMemoryAccess,addr,addr+chunk,&access);
+		if (e)
+			return e;
+		access ^= CMA_Partially_UserXN | CMA_Partially_PrivXN; /* Invert so that they become "completely executable" */
+		have_permission = (access & mem24_flags) == mem24_flags;
+#else
+		/* Get the page flags by reverse-engineering the page table entry
+		   By looking up via the page tables, this should help avoid recursive aborts if the CAM is corrupt
+		   Another option would be to use the CP15 page table lookup registers, where implemented */
+		uint32_t pageflags = RISCOS_LogToPhys((const void*)addr).pageflags;
+		if (pageflags == (uint32_t)-1)
+		{
+			have_permission = false;
+		}
+		else
+		{
+			uint32_t permissions = AP_To_Permissions(pageflags & 0xF);
+			have_permission = (permissions & mempermission_flags) == mempermission_flags;
+			/* Special handling for AP1 MemMap requests: If usermode read access is being requested, and AP1 is being emulated, and the page is already mapped as AP1, add in usermode execute access to the requested permissions.
+			   This is necessary to stop us getting stuck in an infinite abort loop, due to the OS looking at the emulated permissions and thinking everything's fine, causing it to skip calling any AbortTrap handlers and try re-executing the instruction without making any changes.
+			   By asking for execute permission, we should also ensure that any well-written AbortTrap handler will avoid mapping the memory as AP1 (e.g. anything that uses OS_Memory 18 won't select the emulated AP1) */
+			if (have_permission /* We think everything's fine */
+			 && ((pageflags & 0xF) == 1) /* But it's AP1 */
+			 && (permissions == (MemPermission_UserR+MemPermission_PrivX+MemPermission_PrivW+MemPermission_PrivR)) /* With AP1 emulation */
+			 && ((flags2 & (AbortTrap_Reason_Mask | AbortTrap_MemMap_UserR)) == (AbortTrap_Reason_MemMap | AbortTrap_MemMap_UserR))) /* And MemMap is asking for user read permission */
+			{
+				have_permission = false; /* Then we don't have the permissions */
+				flags2 |= AbortTrap_MemMap_UserX; /* And we should ask for execute permission (for this page) */
+			}
+		}
+#endif
+
+		if (have_permission)
+		{
+			/* Direct access is possible */
+			switch(flags & AbortTrap_Reason_Mask)
+			{
+			case AbortTrap_Reason_Store:
+				memcpy((void*)addr,buf,chunk);
+				break;
+			case AbortTrap_Reason_Load:
+				memcpy(buf,(void*)addr,chunk);
+				break;
+			case AbortTrap_Reason_MemMap:
+				/* Page is already mapped with suitable permissions; do nothing */
+				break;
+			}
+		}
+		else
+		{
+			/* Check aborttrap */
+			e = mem_access_via_aborttrap(flags2,buf,addr,chunk);
+			if (e)
+				return e;
+		}
+		addr += chunk;
+		buf += chunk;
+		len -= chunk;
+	}
+	return NULL;
+}
+
+_kernel_oserror *aborttrap_mem_access(void *buf,uint32_t addr,int len,int flags)
+{
+#ifdef USE_SYNCLIB
+	spinrw_read_lock(&lock);
+#endif
+	_kernel_oserror *e = mem_access_internal((uint8_t *) buf,addr,len,flags);
+#ifdef USE_SYNCLIB
+	spinrw_read_unlock_noyield(&lock);
+#endif
+	return e;
+}
+
+_kernel_oserror *aborttrap_swi(int reason,uint32_t base,uint32_t limit,uint32_t routine,uint32_t r12)
+{
+	aborttrap_handler_t *new_handlers,*old;
+	int idx,count,new_count;
+	/* Adjust range to be inclusive-inclusive */
+	limit--;
+#ifndef USE_SYNCLIB
+	int old_irqs = _kernel_irqs_disabled();
+#endif
+	/* Awkwardness to avoid memory allocation while the spinlock is held */
+	while (true)
+	{
+#ifdef USE_SYNCLIB
+		spinrw_read_lock(&lock);
+#endif
+		count = num_handlers;
+#ifdef USE_SYNCLIB
+		spinrw_read_unlock_noyield(&lock);
+#endif
+		if (reason == OSAbortTrap_Register)
+		{
+			new_count = count+1;
+		}
+		else
+		{
+			if (!count)
+			{
+				/* Handler definitely doesn't exist */
+				return TranslateError(&ErrorBlock_BadParameters);
+			}
+			new_count = count-1;
+		}
+		if (new_count > 0)
+		{
+			_kernel_oserror *e;
+			new_handlers = (aborttrap_handler_t *) kalloc(sizeof(aborttrap_handler_t)*(count+1), &e);
+			if (!new_handlers)
+			{
+				return e;
+			}
+		}
+		else
+			new_handlers = NULL;
+#ifdef USE_SYNCLIB
+		/* try_lock to avoid deadlocks if something's gone wrong */
+		if (!spinrw_write_try_lock(&lock))
+		{
+			if (new_handlers) free(new_handlers);
+			return aborttrap_ERROR(LockFail);
+		}
+#else
+		_kernel_irqs_off();
+#endif
+		if (count != num_handlers)
+		{
+			if (new_handlers) free(new_handlers);
+			/* Go round again */
+#ifdef USE_SYNCLIB
+			spinrw_write_unlock_noyield(&lock);
+#else
+			if (!old_irqs)
+				_kernel_irqs_on();
+#endif
+		}
+		else
+		{
+			break;
+		}
+	}
+	idx = handler_find_by_base(base);
+	if (reason == OSAbortTrap_Deregister)
+	{
+		/* Find the exact entry to remove */
+		while (idx < count)
+		{
+			aborttrap_handler_t *h = &handlers[idx];
+			if (h->base != base)
+			{
+				idx = count;
+				break;
+			}
+			if ((h->limit == limit) && (h->routine == routine) && (h->r12 == r12))
+			{
+				break;
+			}
+			idx++;
+		}
+		if (idx == count)
+		{
+#ifdef USE_SYNCLIB
+			spinrw_write_unlock_noyield(&lock);
+#else
+			if (!old_irqs)
+				_kernel_irqs_on();
+#endif
+			if (new_handlers)
+				free(new_handlers);
+			return TranslateError(&ErrorBlock_BadParameters);
+		}
+	}
+
+	/* Copy over the initial entries */
+	memcpy(new_handlers, handlers, sizeof(aborttrap_handler_t)*idx);
+	/* Add in the new entry */
+	int source_idx = idx;
+	if (reason == OSAbortTrap_Register)
+	{
+		new_handlers[idx].base = base;
+		new_handlers[idx].limit = limit;
+		new_handlers[idx].routine = routine;
+		new_handlers[idx].r12 = r12;
+		if (idx && (new_handlers[idx-1].limit_hwm > limit))
+			new_handlers[idx].limit_hwm = new_handlers[idx-1].limit_hwm;
+		else
+			new_handlers[idx].limit_hwm = limit;
+		idx++;
+	}
+	else
+		source_idx++;
+	/* Copy over the remaining entries, updating the HWM values */
+	while (source_idx < count)
+	{
+		new_handlers[idx] = handlers[source_idx];
+		if (idx && (new_handlers[idx-1].limit_hwm > new_handlers[idx].limit))
+			new_handlers[idx].limit_hwm = new_handlers[idx-1].limit_hwm;
+		else
+			new_handlers[idx].limit_hwm = new_handlers[idx].limit;
+		idx++;
+		source_idx++;
+	}
+
+	old = handlers;
+	handlers = new_handlers;
+	num_handlers = new_count;
+#ifdef USE_SYNCLIB
+	spinrw_write_unlock_noyield(&lock);
+#else
+	if (!old_irqs)
+		_kernel_irqs_on();
+#endif
+	if (old)
+		free(old);
+
+	return NULL;
+}
+
+#ifdef ABORTTRAP_DEBUG
+void aborttrap_list_handlers(void)
+{
+#ifdef USE_SYNCLIB
+	spinrw_read_lock(&lock);
+#endif
+	printf("Base     Limit    Routine  R12      Limit_HWM\n");
+	for(int i=0;i<num_handlers;i++)
+	{
+		const aborttrap_handler_t *h = handlers+i;
+		printf("%08x %08x %08x %08x %08x\n",h->base,h->limit,h->routine,h->r12,h->limit_hwm);
+	}
+#ifdef USE_SYNCLIB
+	spinrw_read_unlock_noyield(&lock);
+#endif
+}
+#endif

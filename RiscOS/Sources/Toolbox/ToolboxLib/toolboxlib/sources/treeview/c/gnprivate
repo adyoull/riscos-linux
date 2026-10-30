@@ -1,0 +1,59 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : gnprivate.c
+ * Purpose     : Veneer for method TreeView_GetNodePrivateWord
+ * Description : Gets the private word of the current node
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "treeview.h"
+
+
+
+
+/*
+ * Name        : treeview_get_node_private_word
+ * Description : Gets the private word of the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : void * *private_word
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_node_private_word ( unsigned int flags,
+                                                         ObjectId window,
+                                                         ComponentId gadget,
+                                                         void * *private_word
+                                                       )
+{
+_kernel_swi_regs r;
+_kernel_oserror *e;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = TreeView_GetNodePrivateWord;
+  r.r[3] = (int) gadget;
+  if((e = _kernel_swi(Toolbox_ObjectMiscOp,&r,&r)) == NULL)
+  {
+    if(private_word != NULL) *private_word = (void *) r.r[0];
+  }
+
+  return(e);
+}
+

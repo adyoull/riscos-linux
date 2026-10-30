@@ -1,0 +1,78 @@
+REM Copyright 1997 Acorn Computers Ltd
+REM
+REM Licensed under the Apache License, Version 2.0 (the "License");
+REM you may not use this file except in compliance with the License.
+REM You may obtain a copy of the License at
+REM
+REM     http://www.apache.org/licenses/LICENSE-2.0
+REM
+REM Unless required by applicable law or agreed to in writing, software
+REM distributed under the License is distributed on an "AS IS" BASIS,
+REM WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+REM See the License for the specific language governing permissions and
+REM limitations under the License.
+REM
+REM > PS2Test2
+REM This program prints out calls to KeyV
+REM This program prints out the values received
+DIM buffer 1023, MC%1000, L%-1
+FOR I%=8 TO 10 STEP 2
+P%=MC%
+[OPTI%
+.keyv
+          TEQ       r0, #1    ; key up
+          TEQNE     r0, #2    ; key down
+          MOVNE     pc, r14
+          STMFD     r13!, {r0,r1,r14}
+          BL        insert
+          LDR       r0, [r13, #4]        ; get stacked r1
+          BL        insert
+          LDMFD     r13!, {r0,r1,pc}
+
+.insert
+          STMFD     r13!, {r1, r14}
+          LDR       r14, insptr
+          LDR       r1, bufferptr
+          STR       r0, [r1, r14, LSL #2]
+          ADD       r14, r14, #1
+          AND       r14, r14, #255
+          LDR       r1, remptr
+          TEQ       r14, r1
+          STRNE     r14, insptr
+          LDMFD     r13!, {r1, pc}
+
+.getword
+          LDR       r0, insptr
+          LDR       r2, remptr
+          TEQ       r0, r2
+          MVNEQ     r0, #0
+          MOVEQ     pc, r14
+          ADR       r1, buffer
+          LDR       r0, [r1, r2, LSL #2]
+          ADD       r2, r2, #1
+          AND       r2, r2, #255
+          STR       r2, remptr
+          MOV       pc, r14
+
+.bufferptr EQUD     buffer
+.insptr   EQUD      0
+.remptr   EQUD      0
+]:NEXT
+ON ERROR ON ERROR OFF:SYS"XOS_Release",19,keyv,0:REPORT:PRINT " at line ";ERL:END
+SYS"OS_Claim",19,keyv,0
+MODE27
+REPEAT
+ B%=USRgetword
+ IF B%<>-1 THEN
+  C%=USRgetword
+  IF C%=-1 THEN
+   PRINT '"Single call &";FNH(B%);
+  ELSE
+   COLOUR B%
+   PRINT " ";~FNH(C%);
+  ENDIF
+ ENDIF
+UNTIL 0
+END
+
+DEF FNH(X%)=RIGHT$("000"+STR$~X%,4)

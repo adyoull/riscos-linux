@@ -1,0 +1,424 @@
+REM Copyright (c) 2023, RISC OS Open Ltd
+REM All rights reserved.
+REM
+REM Redistribution and use in source and binary forms, with or without
+REM modification, are permitted provided that the following conditions are met:
+REM     * Redistributions of source code must retain the above copyright
+REM       notice, this list of conditions and the following disclaimer.
+REM     * Redistributions in binary form must reproduce the above copyright
+REM       notice, this list of conditions and the following disclaimer in the
+REM       documentation and/or other materials provided with the distribution.
+REM     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+REM       may be used to endorse or promote products derived from this software
+REM       without specific prior written permission.
+REM
+REM THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+REM AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+REM IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+REM ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+REM LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+REM CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+REM SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+REM INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+REM CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+REM ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+REM POSSIBILITY OF SUCH DAMAGE.
+
+REM Test OS_Exit argument handling and pass through to exit/error environment handlers
+REM This test passes on RISC OS 3.11, RISC OS 3.70, RISC OS 4.02, RISC OS 5.28, RISC OS 6.14
+REM The test fails on many versions of RISC OS 5.29 due to R1 & R2 being corrupted when calling the exit handler
+
+exit_unknown = 0
+exit_passthrough = 1
+exit_exit = 2
+exit_error = 3
+exit_error_any = exit_error + 256
+ABEX%=&58454241
+
+ON ERROR ERROR EXT 0,REPORT$+" at "+STR$(ERL)
+DIM code% 2048
+
+FOR pass=0 TO 2 STEP 2
+P%=code%
+[ OPT pass
+.testcode%
+; Remember state to allow return to BASIC
+STR R13,basic_r13%
+STR R14,basic_r14%
+
+; Claim exit and error environment handlers
+MOV R0,#6
+ADR R1,error_handler%
+LDR R2,handler_arg%
+ADR R3,error_buf%
+SWI "OS_ChangeEnvironment"
+STR R1,prev_error_r1%
+STR R2,prev_error_r2%
+STR R3,prev_error_r3%
+MOV R0,#11
+ADR R1,exit_handler%
+LDR R2,handler_arg%
+SWI "OS_ChangeEnvironment"
+STR R1,prev_exit_r1%
+STR R2,prev_exit_r2%
+
+; Run the test
+ADR R0,in_regs%
+LDMIA R0,{R0-R14}
+SWI "OS_Exit"
+
+; If we're still here, something is seriously broken
+STR R0,out_regs%
+MOV R0,#exit_passthrough
+; (fall through)
+
+.returnpath
+STR R0,exit_path%
+; Capture R1-R14, PSR
+ADR R0,out_regs%+4
+STMIA R0,{R1-R14}
+
+; Restore previous exit and error environment handlers
+MOV R0,#6
+LDR R1,prev_error_r1%
+LDR R2,prev_error_r2%
+LDR R3,prev_error_r3%
+SWI "OS_ChangeEnvironment"
+MOV R0,#11
+LDR R1,prev_exit_r1%
+LDR R2,prev_exit_r2%
+SWI "OS_ChangeEnvironment"
+
+; Return to BASIC
+CMP R0,R0 ; CLRV
+LDR R13,basic_r13%
+LDR PC,basic_r14%
+
+.error_handler%
+STR R0,out_regs%
+MOV R0,#exit_error
+B returnpath
+
+.exit_handler%
+STR R0,out_regs%
+MOV R0,#exit_exit
+B returnpath
+
+.basic_r13% EQUD 0
+.basic_r14% EQUD 0
+.handler_arg% EQUD 0
+.prev_error_r1% EQUD 0
+.prev_error_r2% EQUD 0
+.prev_error_r3% EQUD 0
+.prev_exit_r1% EQUD 0
+.prev_exit_r2% EQUD 0
+.exit_path% EQUD 0
+
+.test_error%
+EQUD 0
+EQUS "Test error" : EQUB 0
+ALIGN
+
+.in_regs%
+]
+out_regs%=in_regs%+15*4
+error_buf%=out_regs%+15*4
+expected_regs%=error_buf%+260
+NEXT pass
+
+seed%=-TIME
+PRINT "seed: ";seed%
+A%=RND(seed%)
+
+wp%=RND
+da_num%=0
+
+ON ERROR PROCerror
+
+PRINT "code: ";~code%
+RCLimit%=256
+OSCLI("Set Sys$RCLimit "+STR$(RCLimit%))
+
+DATA "valid_error",     "abex",     "zero_rc",     "exit_exit"
+DATA "valid_error",     "abex",     "nonzero_rc",  "exit_exit"
+DATA "valid_error",     "abex",     "large_rc",    "exit_error"
+DATA "valid_error",     "abex",     "negative_rc", "exit_error"
+DATA "valid_error",     "not_abex", "zero_rc",     "exit_zero"
+DATA "valid_error",     "not_abex", "nonzero_rc",  "exit_zero"
+DATA "valid_error",     "not_abex", "large_rc",    "exit_zero"
+DATA "valid_error",     "not_abex", "negative_rc", "exit_zero"
+
+DATA "zero_error",      "abex",     "zero_rc",     "exit_exit"
+DATA "zero_error",      "abex",     "nonzero_rc",  "exit_exit"
+DATA "zero_error",      "abex",     "large_rc",    "exit_error_any"
+DATA "zero_error",      "abex",     "negative_rc", "exit_error_any"
+DATA "zero_error",      "not_abex", "zero_rc",     "exit_zero"
+DATA "zero_error",      "not_abex", "nonzero_rc",  "exit_zero"
+DATA "zero_error",      "not_abex", "large_rc",    "exit_zero"
+DATA "zero_error",      "not_abex", "negative_rc", "exit_zero"
+
+DATA "unaligned_error", "abex",     "zero_rc",     "exit_zero"
+DATA "unaligned_error", "abex",     "nonzero_rc",  "exit_zero"
+DATA "unaligned_error", "abex",     "large_rc",    "exit_zero"
+DATA "unaligned_error", "abex",     "negative_rc", "exit_zero"
+DATA "unaligned_error", "not_abex", "zero_rc",     "exit_zero"
+DATA "unaligned_error", "not_abex", "nonzero_rc",  "exit_zero"
+DATA "unaligned_error", "not_abex", "large_rc",    "exit_zero"
+DATA "unaligned_error", "not_abex", "negative_rc", "exit_zero"
+
+DATA "invalid_error",   "abex",     "zero_rc",     "exit_exit"
+DATA "invalid_error",   "abex",     "nonzero_rc",  "exit_exit"
+DATA "invalid_error",   "abex",     "large_rc",    "exit_error_any"
+DATA "invalid_error",   "abex",     "negative_rc", "exit_error_any"
+DATA "invalid_error",   "not_abex", "zero_rc",     "exit_zero"
+DATA "invalid_error",   "not_abex", "nonzero_rc",  "exit_zero"
+DATA "invalid_error",   "not_abex", "large_rc",    "exit_zero"
+DATA "invalid_error",   "not_abex", "negative_rc", "exit_zero"
+
+DATA "addrexc_error",   "abex",     "zero_rc",     "exit_zero"
+DATA "addrexc_error",   "abex",     "nonzero_rc",  "exit_zero"
+DATA "addrexc_error",   "abex",     "large_rc",    "exit_zero"
+DATA "addrexc_error",   "abex",     "negative_rc", "exit_zero"
+DATA "addrexc_error",   "not_abex", "zero_rc",     "exit_zero"
+DATA "addrexc_error",   "not_abex", "nonzero_rc",  "exit_zero"
+DATA "addrexc_error",   "not_abex", "large_rc",    "exit_zero"
+DATA "addrexc_error",   "not_abex", "negative_rc", "exit_zero"
+
+DATA "","","",""
+
+SYS &6D+(1<<17),0 TO feat%;flags%
+is32bit%=((flags% AND 1)=0) AND ((feat% AND (1<<6))<>0)
+PRINT "32bit: ";is32bit%
+
+SYS "OS_Module",20,0,-1 TO ,,,,,,osver%
+ro6%=(osver% >= &60000) AND (osver% < &70000)
+PRINT "RISC OS 6: ";ro6%
+
+REM Is this a new version of RISC OS 5 which corrupts R3 on exit, and R1-R3 on error, and substitutes bad error pointers with the builtin "bad return code" error?
+REM For now assume this applies to all versions of RISC OS 5.29+
+newro5%=(osver% >= &52900) AND (osver% < &60000)
+PRINT "New RISC OS 5: ";newro5%
+
+SYS "OS_ChangeEnvironment",14 TO ,app_limit%
+
+result%=0
+REPEAT
+ READ error$,abex$,rc$,outcome$
+ IF error$="" THEN PROCend(result%)
+ combinations=EVAL("FN"+error$)*EVAL("FN"+abex$)*EVAL("FN"+rc$)
+ IF combinations>0 THEN
+  PRINT error$;",";abex$;",";rc$;",";outcome$;": ";combinations;"..."
+  fail%=FALSE
+  WHILE combinations>0 AND fail%=FALSE
+   combinations=combinations-1
+   PROCreset_test
+   _=EVAL("FN"+error$)
+   _=EVAL("FN"+abex$)
+   _=EVAL("FN"+rc$)
+   CALL testcode%
+   FOR A=0 TO 14
+    expected_regs%!(A*4)=in_regs%!(A*4)
+   NEXT A
+   _=EVAL("FN"+outcome$)
+  ENDWHILE
+  IF fail% THEN result%=1
+ ENDIF
+UNTIL FALSE
+
+DEF FNvalid_error
+ in_regs%!0=test_error%
+=1
+
+DEF FNzero_error
+ in_regs%!0=0
+=1
+
+DEF FNunaligned_error
+ in_regs%!0=test_error%+RND(3)
+=4
+
+DEF FNinvalid_error
+ REM Use the unmapped space at the end of application space
+ in_regs%!0=app_limit%
+=1
+
+DEF FNaddrexc_error
+ IF is32bit% OR ro6% THEN =0
+ in_regs%!0=test_error% OR &FC000000
+=1
+
+DEF FNabex
+ in_regs%!4=ABEX%
+=1
+
+DEF FNnot_abex
+ REPEAT
+  in_regs%!4=RND
+ UNTIL in_regs%!4<>ABEX%
+=4
+
+DEF FNzero_rc
+ in_regs%!8=0
+=1
+
+DEF FNnonzero_rc
+ REM Just cycle through all values?
+ IF in_regs%!8<1 OR in_regs%!8>RCLimit% THEN in_regs%!8=0
+ in_regs%!8=(in_regs%!8)+1
+=RCLimit%
+
+DEF FNlarge_rc
+ REPEAT
+  in_regs%!8=RND AND &7FFFFFFF
+ UNTIL in_regs%!8 > RCLimit%
+=16
+
+DEF FNnegative_rc
+ in_regs%!8=RND OR &80000000
+=16
+
+DEF FNexit_exit
+ PROCcheckresults(exit_exit)
+=0
+
+DEF FNexit_zero
+ expected_regs%!8=0
+ PROCcheckresults(exit_exit)
+=0
+
+DEF FNexit_error
+ PROCcheckresults(exit_error)
+=0
+
+DEF FNexit_error_any
+ PROCcheckresults(exit_error_any)
+=0
+
+DEF PROCerror
+ PRINT REPORT$;" at ";ERL : PROCend(1)
+ENDPROC
+
+DEF PROCcheckresults(expected)
+ IF (expected AND 255)<>!exit_path% THEN PRINT "Wrong exit path; expected ";(expected AND 255);", got ";!exit_path% : fail%=TRUE
+ CASE !exit_path% OF
+  WHEN exit_error:
+   REM Required: R0 is the handler arg
+   expected_regs%!0=!handler_arg%
+   preserved%=1
+   IF (expected AND exit_error_any) <> exit_error_any THEN
+    REM Check registers match
+
+    IF ro6% THEN
+     REM Observed: R3-R8, R10-R14 are preserved
+     preserved% = preserved% OR &7DF8
+    ELSE
+     IF newro5% THEN
+      REM Observed: R4-R14 are preserved
+      REM (R3 might be preserved, but that's only because the current implementation of TaskControl_ResetStacks isn't corrupting it)
+      preserved% = preserved% OR &7FF0
+     ELSE
+      REM Observed: R1 = 6, R2-R14 are preserved
+      expected_regs%!4=6
+      preserved% = preserved% OR &7FFE
+     ENDIF
+    ENDIF
+
+    FOR A=0 TO 14
+     IF (preserved% AND (1<<A))<>0 AND expected_regs%!(A*4)<>out_regs%!(A*4) THEN PRINT "Wrong reg R";A;" expected ";~(expected_regs%!(A*4));" actual ";~(out_regs%!(A*4)) : fail%=TRUE
+    NEXT A
+    REM Check error matches
+    IF error_buf%!4<>test_error%!0 THEN PRINT "Wrong error number; expected &";STR$~(!test_error%);", got &";STR$~(error_buf%!4) : fail%=TRUE
+    expected_text$=FNstr(test_error%+4)
+    actual_text$=FNstr(error_buf%+8)
+    IF expected_text$<>actual_text$ THEN PRINT "Wrong error text; expected '";expected_text$;"', got '";actual_text$;"'" : fail%=TRUE
+   ELSE
+    REM exit_error_any
+
+    REM For this case the error might have come from anywhere in the system, e.g. an abort when the OS examines our garbage error pointer
+
+    REM Check that R0 is correct
+    FOR A=0 TO 14
+     IF (preserved% AND (1<<A))<>0 AND expected_regs%!(A*4)<>out_regs%!(A*4) THEN PRINT "Wrong reg R";A;" expected ";~(expected_regs%!(A*4));" actual ";~(out_regs%!(A*4)) : fail%=TRUE
+    NEXT A
+
+    actual_text$=FNstr(error_buf%+8)
+    IF newro5% THEN
+     REM New versions of RISC OS 5 replace bad exit error pointers with the builtin "bad return code" error (&1E2)
+     IF error_buf%!4<>&1E2 THEN PRINT "Unexpected error &";STR$~(error_buf%!4);" '";actual_text$;"'" : fail%=TRUE
+     REM Check that it's the correct variant (too large or negative), assuming English text
+     IF (in_regs%!8)<0 THEN expected_text$="Negative return code" ELSE expected_text$="Return code limit exceeded"
+     IF expected_text$<>actual_text$ THEN PRINT "Wrong error text; expected '";expected_text$;"', got '";actual_text$;"'" : fail%=TRUE
+    ELSE
+     REM On other OS versions the error will either be a serious error (likely a data abort), or the RISC OS 5 "bad error pointer" error (&116)
+     IF ((error_buf%!4) AND &80000000)=0 AND error_buf%!4<>&116 THEN PRINT "Unexpected error &";STR$~(error_buf%!4);" '";actual_text$;"'" : fail%=TRUE
+    ENDIF
+
+   ENDIF
+
+  WHEN exit_exit:
+   REM Check registers match
+   preserved%=0
+
+   REM Observed: Depending on OS version, R0 is either zero, or a usermode PSR, or preserved
+   IF ro6% THEN
+    preserved%=preserved% OR 1
+   ELSE
+    REM Assume it's zero or usermode PSR. Just check for some bits we'd expect to be zero.
+    IF (!out_regs%) AND &EF THEN PRINT "Unexpected R0 value ";~(!out_regs%) : fail%=TRUE
+   ENDIF
+
+   REM Relied upon: R1 preserved, R2 is the effective exit code
+   preserved% = preserved% OR 6
+
+   IF ro6% THEN
+    REM RISC OS 6 doesn't preserve R3-R11
+    REM (Actually R8 does appear to be preserved, but assume we can't rely on that)
+   ELSE
+    IF newro5% THEN
+     REM Observed: R4-R11 preserved
+     REM (R3 might be preserved, but that's only because the current implementation of TaskControl_ResetStacks isn't corrupting it)
+     preserved% = preserved% OR &FF0
+    ELSE
+     REM Observed: R3-R11 preserved
+     preserved% = preserved% OR &FF8
+    ENDIF
+   ENDIF
+
+   REM Observed: R13-R14 preserved
+   preserved% = preserved% OR (3<<13)
+
+   REM Observed: R9 corrupted (gets replaced with SWI number)
+   IF NOT is32bit% THEN expected_regs%!(9*4)=&11
+
+   REM Required: R12 is the handler arg
+   expected_regs%!(12*4)=!handler_arg%
+   preserved% = preserved% OR (1<<12)
+
+   FOR A=0 TO 14
+    IF (preserved% AND (1<<A))<>0 AND expected_regs%!(A*4)<>out_regs%!(A*4) THEN PRINT "Wrong reg R";A;" expected ";~(expected_regs%!(A*4));" actual ";~(out_regs%!(A*4)) : fail%=TRUE
+   NEXT A
+ ENDCASE
+ENDPROC
+
+DEF PROCend(E%)
+ IF E% THEN ERROR EXT 0,"Failed"
+ PRINT "Success"
+ END
+ENDPROC
+
+DEF PROCreset_test
+ REM Randomise input regs
+ FOR A=0 TO 14
+ in_regs%!(A*4)=RND
+ NEXT A
+ !handler_arg%=RND
+ !test_error%=&7FFF00 + RND(255) : REM Random user error number
+ REM Reset state
+ !exit_path%=exit_unknown
+ error_buf%!4=&7FFF00 : REM A user error number which won't be picked above
+ $(error_buf%+8)="None" + CHR$(0)
+ENDPROC
+
+DEF FNstr(A%)
+ SYS "OS_IntOn",A% TO A$
+=A$

@@ -1,0 +1,67 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+*  Lan Manager client
+*
+*  RPC.H - Header for C.RPC functions
+*
+*/
+
+/* Add a server's shares and description to the lists the OmniClient browser shows. */
+extern err_t RPC_EnumerateShares(char *server);
+
+/* Add the servers of a workgroup to the lists the OmniClient browser shows. */
+extern err_t RPC_EnumerateServers(char *workgroup);
+
+/* Find the primary domain controller of a domain by a NetBIOS name query, waiting up to 1.5 seconds.
+ *
+ * Parameters:
+ *   domain  domain or workgroup name
+ *
+ * Returns: the controller's name in a static buffer that the next call overwrites, or NULL if none answered.
+ */
+extern char *RPC_GetDomainController(char *domain);
+
+/* Check a user's password with a server and return the user's home directory. */
+extern err_t RPC_LogonUser(char *server, char *user, char *password, char **pHomeDir);
+
+/* Return a name for the LanMan_NameOp SWI: this machine's name, the workgroup, or a workgroup's master browser or
+ * primary domain controller found by a NetBIOS name query.
+ *
+ * Parameters:
+ *   reason    NAMEOP_GETLOCAL, NAMEOP_GETWG, NAMEOP_GETBROWSER or NAMEOP_GETDC
+ *   name_in   workgroup or domain for the two queries, or NULL for the current workgroup
+ *   name_out  receives the name; must hold 16 bytes
+ *
+ * Returns: OK, EBADPARAM for an unknown reason, or ECANTFINDNAME if no server answered the query.
+ */
+extern err_t RPC_NameOp(int reason, char *name_in, char *name_out);
+
+#define NAMEOP_GETLOCAL   0
+#define NAMEOP_GETWG      1
+#define NAMEOP_GETBROWSER 2
+#define NAMEOP_GETDC      3
+
+/* Run a transaction on a named pipe of a server, for the LanMan_Transact SWI. */
+extern err_t RPC_Transact(char *servername, char *share_name, void *Transaction_Params);
+
+extern char RPC_DebugMsg[];
+extern int RPC_ErrorCount;
+
+/* Initialise the RPC subsystem - zero the error count and clear the debug-message buffer.
+ *
+ * Returns: true always.
+ */
+extern bool RPC_Init(void);

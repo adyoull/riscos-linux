@@ -1,0 +1,77 @@
+; Copyright 2022 RISC OS Open Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+
+; OS_TaskControl
+;
+; In:
+;  R0 = reason code
+; Out:
+;  Depends on reason code
+;
+; Reason 0: Get stack reset code
+; In:
+;  R0 = 0
+; Out:
+;  R0 = Pointer to stack reset routine
+
+TaskControlSWI
+        CMP     r0, #0
+        ADREQ   r0, TaskControl_ResetStacks
+        ExitSWIHandler EQ
+        ADRL    r0, ErrorBlock_BadParameters
+      [ International
+        Push    "lr"
+        BL      TranslateError
+        Pull    "lr"
+      ]
+        ORR     lr, lr, #V_bit
+        ExitSWIHandler
+
+; In:
+;  Any privileged mode with at least some stack space available
+;
+; Out:
+;  R0-R3, R14 corrupt
+;  All privileged mode stack pointers reset (ABT, IRQ, SVC, UND)
+;  The routine will also perform some other important recovery operations, such
+;  as resetting the IRQsema and CDASemaphore internal kernel variables.
+TaskControl_ResetStacks
+        ; Reset some important variables
+        LDR     r0, =ZeroPage
+        MOV     r1, #0
+        STR     r1, [r0, #IRQsema]
+        STR     r1, [r0, #CDASemaphore]
+        ; Reset the stacks
+        pvMRS   r0, CPSR
+        BIC     r1, r0, #M32_bits
+        ORR     r2, r1, #ABT32_mode
+        pvMSR   CPSR_c, r2
+        LDR     r13, =ABTSTK
+        ORR     r2, r1, #IRQ32_mode
+        pvMSR   CPSR_c, r2
+        LDR     r13, =IRQSTK
+        ORR     r2, r1, #SVC32_mode
+        pvMSR   CPSR_c, r2
+        LDR     r13, =SVCSTK
+        ORR     r2, r1, #UND32_mode
+        pvMSR   CPSR_c, r2
+        LDR     r13, =UNDSTK
+        ; Return
+        pvMSR   CPSR_c, r0
+        MOV     pc, lr
+
+        LTORG
+
+        END

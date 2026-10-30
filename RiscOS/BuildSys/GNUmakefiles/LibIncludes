@@ -1,0 +1,27 @@
+# Makefile fragment for library header search paths
+
+INCLUDED_LIBINCLUDES = YES
+
+# Library include paths, for where there's a historical precedent for the
+# subdirectory to be omitted. These definitions are equally valid for
+# application and module components, even though they typically require
+# different library binaries at the link step. They are also useful for
+# building libraries that depend upon other libraries, despite there not being
+# any link step for such components.
+
+CONINC     = -I${LIBDIR}/ConfigLib
+IMAGEINC   = -I${LIBDIR}/ImageLib
+JSINC      = -I${LIBDIR}/JSLib
+OSINC      = -I${LIBDIR}/OSLib/Core -I${LIBDIR}/OSLib/Computer -I${LIBDIR}/OSLib/User -I${LIBDIR}/OSLib/Toolbox -I${LIBDIR}/OSLib/Core/oslib -I${LIBDIR}/OSLib/Computer/oslib -I${LIBDIR}/OSLib/User/oslib -I${LIBDIR}/OSLib/Toolbox/oslib
+MBEDTLSINC = -I${LIBDIR}/mbedTLS
+NSPRINC    = -I${LIBDIR}/NSPRLib
+RINC       = -I${LIBDIR}/RISC_OSLib
+SDIOINC    = -I${LIBDIR}/SDIOLib
+TBOXINC    = -I${LIBDIR}/tboxlibs
+ifneq (GNU,${TOOLCHAIN})
+TCPIPINC   = -I${LIBDIR}/TCPIPLibs
+endif
+USBINC     = -I${LIBDIR}/USB
+ZINC       = -I${LIBDIR}/zlib
+
+# EOF

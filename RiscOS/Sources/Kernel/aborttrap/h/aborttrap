@@ -1,0 +1,167 @@
+/*
+ * Copyright (c) 2021, RISC OS Open Ltd
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#ifndef ABORTTRAP_H
+#define ABORTTRAP_H
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include "Global/OSMisc.h"
+
+#include "../psr.h"
+#include "atcontext.h"
+
+#include "../kerneliface.h"
+
+typedef enum {
+	dfsr_v3,
+	dfsr_xscale,
+	dfsr_v6
+} edfsr_type;
+
+extern edfsr_type dfsr_type;
+extern bool loadwritepc_interworking;
+
+/* ARMv3-v5 FSR fields */
+#define DFSRv3_DOMAIN	0x000000f0
+#define DFSRv3_FS	0x0000000f
+
+/* Fault status values (just the common ones, from the ARMv7 ARM) */
+#define DFSRv3_FS_ALIGNMENT0		0x1 /* Two values which alignment */
+#define DFSRv3_FS_ALIGNMENT1		0x3 /* faults can be reported under */
+#define DFSRv3_FS_TRANSLATION_SECTION	0x5
+#define DFSRv3_FS_TRANSLATION_PAGE	0x7
+#define DFSRv3_FS_DOMAIN_SECTION	0x9
+#define DFSRv3_FS_DOMAIN_PAGE		0xb
+#define DFSRv3_FS_EXT_WALK_L1		0xc
+#define DFSRv3_FS_EXT_WALK_L2		0xe
+#define DFSRv3_FS_PERMISSION_SECTION	0xd
+#define DFSRv3_FS_PERMISSION_PAGE	0xf
+
+/* Extra fields in XScale */
+#define DFSRvX_X	0x00000400 /* FS extension bit. We don't really care about it. */
+#define DFSRvX_D	0x00000200 /* Debug event; FS30 & DOMAIN will be undefined if it's a debug event */
+
+/* VMSAv6+ DFSR fields */
+
+/* Common bits */
+#define DFSRv6_ExT	0x00001000
+#define DFSRv6_WnR	0x00000800
+#define DFSRv6_LPAE	0x00000200
+
+/* Short descriptor bits */
+#define DFSRv6_FS4	0x00000400
+#define DFSRv6_DOMAIN	0x000000f0
+#define DFSRv6_FS30	0x0000000f
+
+#define DFSRv6_FS			(DFSRv6_FS4 | DFSRv6_FS30)
+#define DFSRv6_FS_ALIGNMENT		0x1
+#define DFSRv6_FS_DEBUG			0x2
+#define DFSRv6_FS_ACCESSFLAG_L1		0x3
+#define DFSRv6_FS_ACCESSFLAG_L2		0x6
+#define DFSRv6_FS_ICACHE_MAINT		0x4
+#define DFSRv6_FS_TRANSLATION_L1	0x5
+#define DFSRv6_FS_TRANSLATION_L2	0x7
+#define DFSRv6_FS_SYNC_EXT		0x8
+#define DFSRv6_FS_DOMAIN_L1		0x9
+#define DFSRv6_FS_DOMAIN_L2		0xb
+#define DFSRv6_FS_SYNC_EXT_WALK_L1	0xc
+#define DFSRv6_FS_SYNC_EXT_WALK_L2	0xe
+#define DFSRv6_FS_PERMISSION_L1		0xd
+#define DFSRv6_FS_PERMISSION_L2		0xf
+#define DFSRv6_FS_TLB_CONFLICT		(0x0 + DFSRv6_FS4)
+#define DFSRv6_FS_ASYNC_EXT		(0x6 + DFSRv6_FS4)
+#define DFSRv6_FS_ASYNC_PARITY		(0x8 + DFSRv6_FS4)
+#define DFSRv6_FS_SYNC_PARITY		(0x9 + DFSRv6_FS4)
+#define DFSRv6_FS_PARITY_WALK_L1	(0xc + DFSRv6_FS4)
+#define DFSRv6_FS_PARITY_WALK_L2	(0xe + DFSRv6_FS4)
+
+/* Long descriptor bits */
+#define DFSRv6_STATUS	0x0000003f
+
+#define DFSRv6_STATUS_TRANSLATION_L1		0x05
+#define DFSRv6_STATUS_TRANSLATION_L2		0x06
+#define DFSRv6_STATUS_TRANSLATION_L3		0x07
+#define DFSRv6_STATUS_ACCESSFLAG_L1		0x09
+#define DFSRv6_STATUS_ACCESSFLAG_L2		0x0a
+#define DFSRv6_STATUS_ACCESSFLAG_L3		0x0b
+#define DFSRv6_STATUS_PERMISSION_L1		0x0d
+#define DFSRv6_STATUS_PERMISSION_L2		0x0e
+#define DFSRv6_STATUS_PERMISSION_L3		0x0f
+#define DFSRv6_STATUS_SYNC_EXT			0x10
+#define DFSRv6_STATUS_ASYNC_EXT			0x11
+#define DFSRv6_STATUS_SYNC_EXT_WALK_L1		0x15
+#define DFSRv6_STATUS_SYNC_EXT_WALK_L2		0x16
+#define DFSRv6_STATUS_SYNC_EXT_WALK_L3		0x17
+#define DFSRv6_STATUS_SYNC_PARITY		0x18
+#define DFSRv6_STATUS_ASYNC_PARITY		0x19
+#define DFSRv6_STATUS_SYNC_PARITY_WALK_L1	0x1d
+#define DFSRv6_STATUS_SYNC_PARITY_WALK_L2	0x1e
+#define DFSRv6_STATUS_SYNC_PARITY_WALK_L3	0x1f
+#define DFSRv6_STATUS_ALIGNMENT			0x21
+#define DFSRv6_STATUS_DEBUG			0x22
+#define DFSRv6_STATUS_TLB_CONFLICT		0x30
+#define DFSRv6_STATUS_DOMAIN_L1			0x3d
+#define DFSRv6_STATUS_DOMAIN_L2			0x3e
+#define DFSRv6_STATUS_DOMAIN_L3			0x3f
+
+/* Log buffer */
+
+#ifdef ABORTTRAP_DEBUG
+#define LOG_SIZE 1024
+typedef struct {
+	uint32_t pc;
+	uint32_t psr;
+	uint32_t opcode;
+	_kernel_oserror *result;
+} logentry;
+
+extern logentry logbuf[LOG_SIZE];
+extern uint32_t logidx;
+
+extern void aborttrap_list_handlers(void);
+#endif
+
+extern void aborttrap_init(void);
+
+extern _kernel_oserror *aborttrap_MemMap(abtcontext_t *ctx,uint32_t addr,int len,int align,int flags);
+
+#define RETURNTYPE _kernel_oserror *
+#define PARAMDECL abtcontext_t *ctx,const uint32_t OPCODE
+#define PARAMS ctx,OPCODE
+#define PARAMSCOMMA ,
+
+/* Handlers */
+extern RETURNTYPE aborttrap_arm(PARAMDECL);
+
+extern _kernel_oserror *aborttrap_handler(abtcontext_t *ctx);
+
+extern _kernel_oserror *aborttrap_swi(int reason,uint32_t base,uint32_t limit,uint32_t routine,uint32_t r12);
+
+#endif

@@ -1,0 +1,208 @@
+Adding SMB 3.1.1 support to LanManFS
+====================================
+
+LanManFS offers the SMB dialects 2.0.2, 2.1, 3.0 and 3.0.2 in its NEGOTIATE request (SMB2_Negotiate in c/SMB2), and a
+modern server picks 3.0.2 (dialect 0x0302). That works against every server LanManFS has been tested with, but 3.1.1
+(dialect 0x0311) is the dialect Microsoft targets with its security defaults, and a hardened server may refuse anything
+older. This document is for a developer who wants to add 3.1.1 support.
+
+What 3.1.1 provides
+-------------------
+
+There are five protocol-level changes between 3.0.2 and 3.1.1. The first three are mandatory for any 3.1.1
+implementation; the last two are optional:
+
+  1. The dialect 0x0311.
+
+  2. NEGOTIATE request and response carry a list of "negotiate contexts" after the dialect list. At minimum a 3.1.1
+     client sends the PreauthIntegrityCapabilities context.
+
+  3. Pre-authentication integrity: a running SHA-512 hash of the NEGOTIATE and SESSION_SETUP messages feeds into key
+     derivation. It defeats downgrade and tampering attacks against the handshake.
+
+  4. Encryption, with the cipher negotiated through a negotiate context: AES-128-GCM and AES-256-GCM/CCM as well as the
+     AES-128-CCM that 3.0 defines. LanManFS implements no encryption at any dialect: it advertises no encryption
+     capability, so it cannot use a share or server that requires encryption. Encryption is needed only for such shares
+     and can otherwise be left out.
+
+  5. Compression of payloads (LZ77, LZ77+Huffman, LZNT1) via a separate transform header. It is optional, and of little
+     expected benefit for the workloads typical of RISC OS users.
+
+RDMA and multi-channel, which SMB 3 also offers, do not apply here: RDMA needs hardware that is not available, and
+multi-channel needs several connections to one server, while LanManFS opens one.
+
+The smallest useful upgrade is items 1, 2 and 3, which is enough to be a valid 3.1.1 client and to negotiate cleanly with
+any server that requires 3.1.1. Encryption can follow if a real need emerges: some hardened Windows configurations and
+some macOS shares require it, though no server LanManFS has been tested with does.
+
+Encryption is the larger piece of work. AES-GCM and AES-CCM themselves are available from mbedTLS, which is already
+linked for signing, but the transform header wraps every encrypted SMB2 message, and the send and receive paths assume
+a plain SMB2 header at the start of each message. Both forms have to coexist for the life of the connection, because
+encryption may be required on one share and not on another over the same session.
+
+Pre-authentication integrity in detail
+--------------------------------------
+
+This is the main addition, and it touches every code path between NEGOTIATE and the session being established. The
+running state is a 64-byte hash value (PreauthIntegrityHashValue in MS-SMB2), kept per connection for NEGOTIATE and
+then per session for SESSION_SETUP:
+
+      connection hash := 64 zero bytes
+      connection hash := SHA-512( hash || NEGOTIATE request )
+      connection hash := SHA-512( hash || NEGOTIATE response )
+
+      session hash    := connection hash
+      for each SESSION_SETUP round trip:
+          session hash := SHA-512( hash || SESSION_SETUP request )
+          if the response is STATUS_MORE_PROCESSING_REQUIRED:
+              session hash := SHA-512( hash || SESSION_SETUP response )
+
+When the final SESSION_SETUP response returns STATUS_SUCCESS, the session hash as it stands (which does not include
+that final response) becomes the "context" input to the SP800-108 KDF that produces the session keys. Signing, when
+the server requires it, uses the derived key as it does for 3.0.2; only the inputs to the KDF change.
+
+A few practical points where the specification is easy to misread:
+
+  - "Message" means the entire SMB2 message including the SMB2 header, exactly as it appears on the wire: not the
+    four-byte Direct TCP length prefix, but everything from the SMB2 protocol identifier onwards.
+
+  - The hash chain covers both directions, request then response.
+
+  - With NTLMSSP, the first SESSION_SETUP response is STATUS_MORE_PROCESSING_REQUIRED and is hashed in; the final
+    STATUS_SUCCESS response is not.
+
+  - The final SESSION_SETUP response is signed with the freshly derived signing key, and SMB2_SessionSetup verifies
+    that signature when the server requires signing. If the hash chain is wrong, this is where the failure shows: the
+    signature check fails, or the server rejects the first signed request, with no further indication.
+
+Implementation shape:
+
+  - SMB2_Server (h/SMB2) gains `uint8_t preauth_hash[64];`, zeroed when the server record is set up.
+
+  - SMB2_Negotiate and SMB2_SessionSetup, which hold the request and reply buffers around each SMB2_SendRecv, update the
+    hash when the negotiated dialect (SMB2_Server's `dialect`) is 0x0311. Hashing there rather than in SMB2_SendRecv
+    keeps the chain to exactly the handshake messages and leaves out the final SESSION_SETUP response.
+
+  - mbedTLS provides SHA-512 (mbedtls_sha512_starts, mbedtls_sha512_update, mbedtls_sha512_finish); its RISC OS
+    configuration enables MBEDTLS_SHA512_C.
+
+NEGOTIATE format changes
+------------------------
+
+The fixed part of the SMB2 NEGOTIATE request is 36 bytes (MS-SMB2 2.2.3): StructureSize, DialectCount, SecurityMode,
+Reserved, Capabilities, ClientGuid, and at offset 28 an 8-byte field followed by the dialect list. Up to 3.0.2 that
+field is ClientStartTime, which LanManFS sends as zero. When 0x0311 is offered it becomes:
+
+      offset  length  field
+      ------  ------  -----
+      28      4       NegotiateContextOffset  (from the start of the header)
+      32      2       NegotiateContextCount
+      34      2       Reserved2               (zero)
+
+The contexts follow the dialect list, starting on an 8-byte boundary. Each is an 8-byte header (ContextType 2 bytes,
+DataLength 2 bytes, Reserved 4 bytes) followed by its data, and each context after the first starts on an 8-byte
+boundary. A minimal 3.1.1 client sends one context, and may add others:
+
+  PreauthIntegrityCapabilities (mandatory):
+      HashAlgorithmCount  = 1
+      SaltLength          = 32 (any length is permitted; Windows clients
+                                send 32 bytes)
+      HashAlgorithms[]    = { SHA512 = 0x0001 }
+      Salt[]              = SaltLength random bytes
+
+  EncryptionCapabilities (optional; omit unless encryption is implemented):
+      CipherCount         = N
+      Ciphers[]           = a subset of:
+                              AES-128-CCM = 0x0001
+                              AES-128-GCM = 0x0002
+                              AES-256-CCM = 0x0003
+                              AES-256-GCM = 0x0004
+      listed most-preferred first.
+
+  CompressionCapabilities: not sent, since LanManFS does not compress.
+
+  NetnameNegotiateContextId (optional):
+      The server name the client is connecting to, as a UTF-16LE string,
+      for virtual-hosting setups. Cheap to add but not required.
+
+Parsing the response is the symmetric operation: walk the contexts, find PreauthIntegrityCapabilities, and confirm that
+the server selected SHA-512 (the only defined choice, but check anyway). If EncryptionCapabilities was sent, the
+response's chosen cipher says which to use, or none if the server declined encryption.
+
+KDF input changes
+-----------------
+
+For SMB 3.0 and 3.0.2, MS-SMB2 3.1.4.2 gives these label and context strings:
+
+      SigningKey        label "SMB2AESCMAC\0"   context "SmbSign\0"
+      ApplicationKey    label "SMB2APP\0"       context "SmbRpc\0"
+      EncryptionKey C2S label "SMB2AESCCM\0"    context "ServerIn \0"
+      EncryptionKey S2C label "SMB2AESCCM\0"    context "ServerOut\0"
+
+LanManFS derives only the signing key, inline in SMB2_SessionSetup, by calling KDFLib's sp800_108_counter_hmac_sha256
+with the first pair. With no encryption and no use of the application key, the other three are not derived.
+
+For SMB 3.1.1 the labels change, and the context becomes the session's pre-authentication hash:
+
+      SigningKey        label "SMBSigningKey\0"   context preauth_hash[64]
+      ApplicationKey    label "SMBAppKey\0"       context preauth_hash[64]
+      EncryptionKey C2S label "SMBC2SCipherKey\0" context preauth_hash[64]
+      EncryptionKey S2C label "SMBS2CCipherKey\0" context preauth_hash[64]
+
+sp800_108_counter_hmac_sha256 already takes the label and the context as buffers with lengths, so the arguments at the
+derivation site change, keyed on the negotiated dialect. Nothing is negotiated about the labels: the dialect fixes them.
+The derivation also has to move. SMB2_SessionSetup derives the signing key before it builds the final SESSION_SETUP
+request, but the 3.1.1 context is the hash that includes that request, so for 3.1.1 the key is derived after the final
+request has been built and hashed. It still comes before the check of the final response's signature.
+
+Note: if signing fails at the first SMB2 command after SESSION_SETUP returns success, check these causes in order: a
+wrong context buffer in the KDF call, a wrong label string (a stray or missing NUL, or a case mismatch), or a hash chain
+that did not include exactly the right sequence of messages. Print the KDF inputs (the session base key, label, context
+and output length) at the call site and compare them by hand with a known-good Wireshark capture.
+
+Where the changes land in this codebase
+---------------------------------------
+
+  c/SMB2:
+    SMB2_Negotiate: add 0x0311 to the offered dialect list, write the negotiate contexts, parse the response's
+    contexts, and start the hash chain.
+    SMB2_SessionSetup: extend the hash chain over each round trip, and for 3.1.1 derive the signing key with the 3.1.1
+    labels and context after building and hashing the final request, not before it as for 3.0.2.
+
+  h/SMB2:
+    SMB2_Server gains `uint8_t preauth_hash[64];` (and a per-session copy if a server ever carries more than one
+    session).
+
+  h/SMB2Defs:
+    SMB2_DIALECT_0311 already exists. Add the negotiate-context offsets and sizes and the ContextType values, and the
+    cipher values only if encryption is implemented.
+
+  c/SMB:
+    No changes expected: the SMB2 layer negotiates the dialect, and the connection code above it does not depend on
+    which one was chosen.
+
+  c/Auth and SPNEGOLib:
+    No changes: NTLMSSP is unaffected by the dialect.
+
+Testing matrix
+--------------
+
+Mandatory for sign-off:
+
+  1. Windows 11 or later (current release): negotiation, share access, copy in and out, *Free.
+  2. Samba 4.x on a Linux machine: the same.
+  3. macOS Sonoma or later, SMB file sharing: the same.
+  4. A NAS appliance whose firmware predates 3.1.1. This is the regression test: 3.0.2 must still work with 3.1.1
+     offered as well, and such a server should pick 3.0.2 through the normal dialect negotiation.
+
+If encryption is implemented, repeat the matrix with encryption required on each server. The transform header path
+needs at least one positive test (an encrypted READ) and one negative test (a decryption failure detected).
+
+Reporter output to capture during testing (verbose tier):
+
+  - The NEGOTIATE response, raw bytes.
+  - The pre-authentication hash value when SESSION_SETUP returns STATUS_SUCCESS.
+  - The KDF inputs (label, context, key length) and the derived key, for each key derived.
+
+When the observed behaviour does not match expectations, compare it with a Wireshark capture of a known-good Windows
+client running the same workload against the same server.

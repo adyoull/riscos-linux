@@ -1,0 +1,61 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : snsprite.c
+ * Purpose     : Veneer for method TreeView_SetNodeSprite
+ * Description : Specifies a sprite to use for a node in the tree
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "treeview.h"
+
+
+
+
+/*
+ * Name        : treeview_set_node_sprite
+ * Description : Specifies a sprite to use for a node in the tree
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               void *sprite_area
+ *               const char *sprite_name
+ *               const char *expanded_sprite_name
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_set_node_sprite ( unsigned int flags,
+                                                   ObjectId window,
+                                                   ComponentId gadget,
+                                                   void *sprite_area,
+                                                   const char *sprite_name,
+                                                   const char *expanded_sprite_name
+                                                 )
+{
+_kernel_swi_regs r;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = TreeView_SetNodeSprite;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) sprite_area;
+  r.r[5] = (int) sprite_name;
+  r.r[6] = (int) expanded_sprite_name;
+  return(_kernel_swi(Toolbox_ObjectMiscOp,&r,&r));
+}
+

@@ -1,0 +1,202 @@
+#------------------------------------------------------------------------------
+# Components file for IOMD32 build
+#------------------------------------------------------------------------------
+%BaseAddress   0xFC000000
+%Image         Build$ImageName
+%Log           Build$ImageName
+%Messages      Sources.Internat.Messages
+%Joiner        romlinker
+%JoinerFormat  romlinker
+
+# BBE Support
+BuildApps
+BuildExport
+BuildSystem             -options COMPONENTFILE=IOMD32 COMPONENTFILE2=Universal
+BuildEnvironment        -options ENVFILE=IOMD32
+BuildModules
+BuildTools
+
+#------------------------------------------------------------------------------
+# some headers
+#
+HdrSrc                -type EXP
+#------------------------------------------------------------------------------
+# we need the following exported for swis.h generation
+# change the type to EXP
+#
+CompressPNG           -type EXP
+DDEUtils              -type EXP
+Econet                -type EXP
+FileCore              -type EXP
+HostFS                -type EXP
+SATADriver            -type EXP
+SCSIDriver            -type EXP
+SCSIFS                -type EXP # After FileCore to allow FileCoreErr generation
+PCCardFS              -type EXP
+PCI                   -type EXP
+PDriver               -type EXP
+Portable              -type EXP
+VFPSupport            -type EXP
+
+# Kernel is first module in ROM seen as the UtilityModule
+HAL_IOMD
+Kernel                -at 0xFC008000
+Podule
+SharedRISC_OSLib
+FileSwitch
+ResourceFS
+Messages
+MessageTrans
+TerritoryManager
+# First 8 modules cannot be unplugged
+UK
+WindowManager         -options OPTIONS=Ursula
+# Desktop is the 11th module (default language)
+Desktop
+TaskManager
+ScreenModes
+VIDC20Video
+Mouse
+PS2Driver
+ADFSFiler
+BASIC105
+BASIC64
+BlendTable
+BufferManager
+ColourTrans
+Debugger
+DeviceFS
+DisplayManager
+DMAManager
+DragASprite
+DragAnObj
+DrawMod
+BBCEconet
+FileCore
+ADFS
+RamFS
+Filer
+FilerSWIs
+FSLock
+FontManager
+FPEmulator            -options FPE_APCS=3/32bit
+Free
+Hourglass
+IIC
+International
+InternationalKeyboard -options KEYBOARD=All
+ITable
+Joystick
+NetFS
+NetFiler
+NetPrint
+NetStatus
+Obey
+ParallelDeviceDriver
+Pinboard
+PipeFS
+RAMFSFiler
+ResourceFiler
+ROMFonts
+RTC
+ScreenBlanker
+ScrSaver              -options SCRSAVERAPP=No
+SerialDeviceDriver
+SerialDeviceSupport
+SerialMouse
+ShellCLI
+SoundDMA
+SoundChannels
+SoundScheduler
+SpriteExtend
+SpriteUtils
+Squash
+SuperSample
+SystemDevices
+TaskWindow
+WindowUtils
+FilterManager
+WaveSynth
+StringLib
+Percussion
+SharedSnd
+Filer_Action
+DOSFS                 -options PCMCIA=TRUE
+ColourPicker
+DrawFile
+BootCommands
+WindowScroll
+MManager
+Internet
+Resolver
+Net
+BootNet
+Freeway
+ShareFS
+MimeMap
+DHCP                  -options OPTIONS=-DMINIMUM_OPTIONS_LENGTH=4
+Edit
+Draw
+Paint
+Alarm
+Chars
+Help2
+
+#
+# Toolbox Modules/Libs
+#
+tboxlib
+ToolboxLib            -type EXP
+Toolbox
+Window
+ToolAction
+Menu
+Iconbar
+ColourDbox
+ColourMenu
+DCS_Quit
+FileInfo
+FontDbox
+FontMenu
+PrintDbox
+ProgInfo
+SaveAs
+Scale
+Gadgets
+#
+# CDFS
+#
+CDFSDriver
+ATAPI
+CDFS
+CDFSFiler
+
+UnSqzAIF
+InetRes -options TYPE=EmergencyUtils
+HeroNames
+
+# some libraries and bits
+#
+callx
+AsmUtils              -type EXP
+TCPIPheaders          -type EXP
+socklib
+inetlib
+unixlib
+xolib
+UnicodeLib            -type EXP
+ConfigLib             -type EXP
+OSLib
+DeskLib
+ModMallocLib
+PlainArgvLib
+RemoteDebug
+PDebug
+DDTLib
+Wild
+Trace
+DebugLib
+
+ABRelease
+
+# end

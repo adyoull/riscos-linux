@@ -1,0 +1,62 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : tfromw.c
+ * Purpose     : Veneer for method Tabs_TabFromWindow
+ * Description : Reads the index of the tab which has the given window associated with it
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "tabs.h"
+
+
+
+
+/*
+ * Name        : tabs_tab_from_window
+ * Description : Reads the index of the tab which has the given window associated with it
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               ObjectId nested_window
+ * Out         : int *tab_index
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_tab_from_window ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget,
+                                               ObjectId nested_window,
+                                               int *tab_index
+                                             )
+{
+_kernel_swi_regs r;
+_kernel_oserror *e;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = Tabs_TabFromWindow;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) nested_window;
+  if((e = _kernel_swi(Toolbox_ObjectMiscOp,&r,&r)) == NULL)
+  {
+    if(tab_index != NULL) *tab_index = (int) r.r[0];
+  }
+
+  return(e);
+}
+

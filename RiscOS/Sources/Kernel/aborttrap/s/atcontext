@@ -1,0 +1,496 @@
+; Copyright (c) 2021, RISC OS Open Ltd
+; All rights reserved.
+;
+; Redistribution and use in source and binary forms, with or without
+; modification, are permitted provided that the following conditions are met:
+;     * Redistributions of source code must retain the above copyright
+;       notice, this list of conditions and the following disclaimer.
+;     * Redistributions in binary form must reproduce the above copyright
+;       notice, this list of conditions and the following disclaimer in the
+;       documentation and/or other materials provided with the distribution.
+;     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+;       may be used to endorse or promote products derived from this software
+;       without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+; IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+; ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+; LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+; CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+; SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+; INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+; CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+; ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+; POSSIBILITY OF SUCH DAMAGE.
+;
+
+        GET     Hdr:ListOpts
+        GET     Hdr:Macros
+        GET     Hdr:System
+        GET     Hdr:CPU.Arch
+        GET     Hdr:APCS.APCS-32
+
+        AREA    |C$$Code|, CODE, READONLY
+
+                    ^ 0
+abtcontext_R        # 15*4
+abtcontext_SPSR     # 4
+abtcontext_DFAR     # 4
+abtcontext_DFSR     # 4
+abtcontext_ADFSR    # 4
+abtcontext_SPSR_svc # 4
+abtcontext_R13_svc  # 4
+abtcontext_R14_svc  # 4
+abtcontext_size     # 0
+
+false   * 0
+true    * 1
+
+; Access register for explicit mode
+
+; extern bool aborttrap_reg_read(abtcontext_t *ctx,int rn,eprocmode mode,uint32_t *val);
+        EXPORT  aborttrap_reg_read
+aborttrap_reg_read ROUT
+        TEQ     a2, #15
+        LDREQ   a1, [a1, #14*4] ; PC is LR_abt
+        BEQ     %FT90
+      [ NoARMv5
+        ORR     a3, a3, #2_10000 ; Force mode to 32 bits
+      ]
+        CMP     a2, #8
+        BLO     %FT80
+        CMP     a2, #12
+        BHI     %FT10
+        ; R8-R12, check if FIQ bank
+        CMP     a3, #FIQ32_mode
+        BNE     %FT80
+        ; FIQ needed
+        SetMode FIQ32_mode,a3
+        CMP     a2, #9
+        MOVLO   a1, r8
+        MOVEQ   a1, r9
+        CMP     a2, #10
+        MOVEQ   a1, r10
+        CMP     a2, #11
+        MOVEQ   a1, r11
+        MOVHI   a1, r12
+        SetMode ABT32_mode,a3
+        B       %FT90
+10
+        ; R13/R14 needed
+        CMP     a3, #ABT32_mode
+        BNE     %FT20
+        CMP     a2, #13
+        BEQ     %FT80
+        ; R14_abt isn't available
+        MOV     a1, #false
+        MOV     pc, lr
+20
+        ; Non-ABT R13/R14 needed
+        CMP     a3, #SVC32_mode
+        ADDEQ   a1, a1, #abtcontext_R13_svc-13*4
+        BEQ     %FT80
+        CMP     a3, #USR32_mode
+      [ NoARMv4
+        BEQ     %FT70
+      |
+        MOVEQ   a3, #SYS32_mode
+      ]
+        CMP     a2, #13
+        MRS     a2, CPSR
+        AND     ip, a2, #I32_bit+F32_bit
+        ORR     a3, a3, ip
+        MSR     CPSR_c, a3
+        MOVEQ   a1, r13
+        MOVNE   a1, r14
+        MSR     CPSR_c, a2
+        B       %FT90
+
+      [ NoARMv4
+70
+        CMP     a2, #13
+        STMEQIA a4, {r13}^
+        STMNEIA a4, {r14}^
+        B       %FT95
+      ]
+
+80
+        LDR     a1, [a1, a2, LSL #2]
+90
+        STR     a1, [a4]
+95      MOV     a1, #true
+        MOV     pc, lr
+
+; extern bool aborttrap_reg_write(abtcontext_t *ctx,int rn,eprocmode mode,uint32_t val);
+        EXPORT  aborttrap_reg_write
+aborttrap_reg_write ROUT
+        TEQ     a2, #15
+        STREQ   a4, [a1, #14*4] ; PC is LR_abt
+        BEQ     %FT90
+      [ NoARMv5
+        ORR     a3, a3, #2_10000 ; Force mode to 32 bits
+      ]
+        CMP     a2, #8
+        BLO     %FT80
+        CMP     a2, #12
+        BHI     %FT10
+        ; R8-R12, check if FIQ bank
+        CMP     a3, #FIQ32_mode
+        BNE     %FT80
+        ; FIQ needed
+        SetMode FIQ32_mode,a3
+        CMP     a2, #9
+        MOVLO   r8, a4
+        MOVEQ   r9, a4
+        CMP     a2, #10
+        MOVEQ   r10, a4
+        CMP     a2, #11
+        MOVEQ   r11, a4
+        MOVHI   r12, a4
+        SetMode ABT32_mode,a3
+        B       %FT90
+10
+        ; R13/R14 needed
+        CMP     a3, #ABT32_mode
+        BNE     %FT20
+        CMP     a2, #13
+        BEQ     %FT80
+        ; R14_abt isn't available
+        MOV     a1, #false
+        MOV     pc, lr
+20
+        ; Non-ABT R13/R14 needed
+        CMP     a3, #SVC32_mode
+        ADDEQ   a1, a1, #abtcontext_R13_svc-13*4
+        BEQ     %FT80
+        CMP     a3, #USR32_mode
+      [ NoARMv4
+        BEQ     %FT70
+      |
+        MOVEQ   a3, #SYS32_mode
+      ]
+        CMP     a2, #13
+        MRS     a2, CPSR
+        AND     ip, a2, #I32_bit+F32_bit
+        ORR     a3, a3, ip
+        MSR     CPSR_c, a3
+        MOVEQ   r13, a4
+        MOVNE   r14, a4
+        MSR     CPSR_c, a2
+        B       %FT90
+
+      [ NoARMv4
+70
+        CMP     a2, #13
+        STR     a4, [sp, #-4]!
+        LDMEQIA sp, {r13}^
+        LDMNEIA sp, {r14}^
+        MOV     a1, #true
+        ADD     sp, sp, #4
+        MOV     pc, lr
+      ]
+
+80
+        STR     a4, [a1, a2, LSL #2]
+90
+        MOV     a1, #true
+        MOV     pc, lr
+
+; Access register for current mode (source of exception)
+; extern bool aborttrap_reg_read_current(abtcontext_t *ctx,int rn,uint32_t *val);
+        EXPORT  aborttrap_reg_read_current
+aborttrap_reg_read_current
+        MOV     a4, a3
+        LDR     a3, [a1, #abtcontext_SPSR]
+        AND     a3, a3, #M32_bits
+        B       aborttrap_reg_read
+
+; extern bool aborttrap_reg_write_current(abtcontext_t *ctx,int rn,uint32_t val);
+        EXPORT  aborttrap_reg_write_current
+aborttrap_reg_write_current
+        MOV     a4, a3
+        LDR     a3, [a1, #abtcontext_SPSR]
+        AND     a3, a3, #M32_bits
+        B       aborttrap_reg_write
+
+; Access register for user mode
+; extern bool aborttrap_reg_read_USR(abtcontext_t *ctx,int rn,uint32_t *val);
+        EXPORT  aborttrap_reg_read_USR
+aborttrap_reg_read_USR
+        MOV     a4, a3
+        MOV     a3, #USR32_mode
+        B       aborttrap_reg_read
+
+; extern bool aborttrap_reg_write_USR(abtcontext_t *ctx,int rn,uint32_t val);
+        EXPORT  aborttrap_reg_write_USR
+aborttrap_reg_write_USR
+        MOV     a4, a3
+        MOV     a3, #USR32_mode
+        B       aborttrap_reg_write
+
+; CPSR/SPSR access
+
+; extern uint32_t aborttrap_cpsr_read(abtcontext_t *ctx);
+        EXPORT  aborttrap_cpsr_read
+aborttrap_cpsr_read
+        LDR     a1, [a1, #abtcontext_SPSR]
+        MOV     pc, lr
+
+; extern void aborttrap_cpsr_write(abtcontext_t *ctx,uint32_t val);
+        EXPORT  aborttrap_cpsr_write
+aborttrap_cpsr_write
+        STR     a2, [a1, #abtcontext_SPSR]
+        MOV     pc, lr
+
+; extern bool aborttrap_spsr_read_current(abtcontext_t *ctx,uint32_t *val)
+        EXPORT  aborttrap_spsr_read_current
+aborttrap_spsr_read_current
+        MOV     a3, a2
+        LDR     a2, [a1, #abtcontext_SPSR]
+        AND     a2, a2, #M32_bits
+        ; Fall through...
+; extern bool aborttrap_spsr_read(abtcontext_t *ctx,eprocmode mode,uint32_t *val)
+        EXPORT  aborttrap_spsr_read
+aborttrap_spsr_read
+        TEQ     a2, #SVC32_mode
+        LDREQ   a1, [a1, #abtcontext_SPSR_svc]
+        BEQ     %FT90
+        ; Check it's a valid mode
+        ; * SVC handled already
+        ; * ABT not possible (no way of getting the original SPSR_abt, or specifying an SPSR_abt to set on exit from the handler)
+        ; * Assume MON & HYP are inaccessible
+        TEQ     a2, #FIQ32_mode
+        TEQNE   a2, #IRQ32_mode
+        TEQNE   a2, #UND32_mode
+        MOVNE   a1, #false
+        MOVNE   pc, lr
+        MRS     a4, CPSR
+        BIC     ip, a4, #M32_bits
+        ORR     ip, ip, a2
+        MSR     CPSR_c, ip
+        MRS     a1, SPSR
+        MSR     CPSR_c, a4
+90
+        STR     a1, [a3]
+        MOV     a1, #true
+        MOV     pc, lr
+
+
+
+; extern bool aborttrap_spsr_write_current(abtcontext_t *ctx,uint32_t val)
+        EXPORT  aborttrap_spsr_write_current
+aborttrap_spsr_write_current
+        MOV     a3, a2
+        LDR     a2, [a1, #abtcontext_SPSR]
+        AND     a2, a2, #M32_bits
+        ; Fall through...
+; extern bool spsr_write(abtcontext_t *ctx,eprocmode mode,uint32_t val)
+        EXPORT  aborttrap_spsr_write
+aborttrap_spsr_write
+        TEQ     a2, #SVC32_mode
+        STREQ   a3, [a1, #abtcontext_SPSR_svc]
+        MOVEQ   a1, #true
+        MOVEQ   pc, lr
+        ; Check it's a valid mode
+        ; * SVC handled already
+        ; * ABT not possible (no way of getting the original SPSR_abt, or specifying an SPSR_abt to set on exit from the handler)
+        ; * Assume MON & HYP are inaccessible
+        TEQ     a2, #FIQ32_mode
+        TEQNE   a2, #IRQ32_mode
+        TEQNE   a2, #UND32_mode
+        MOVNE   a1, #false
+        MOVNE   pc, lr
+        MRS     a4, CPSR
+        BIC     ip, a4, #M32_bits
+        ORR     ip, ip, a2
+        MSR     CPSR_c, ip
+        MSR     SPSR_cxsf, a3
+        MSR     CPSR_c, a4
+        MOV     a1, #true
+        MOV     pc, lr
+
+; extern uint32_t aborttrap_dfsr_read(abtcontext_t *ctx);
+        EXPORT  aborttrap_dfsr_read
+aborttrap_dfsr_read
+        LDR     a1, [a1, #abtcontext_DFSR]
+        MOV     pc, lr
+
+; SCTLR access
+; extern uint32_t aborttrap_sctlr_read(abtcontext_t *ctx);
+        EXPORT  aborttrap_sctlr_read
+aborttrap_sctlr_read
+        MRC     p15, 0, a1, c1, c0, 0
+        MOV     pc, lr
+
+ [ SupportARMV
+; VFP/NEON register access
+
+        ; Ugly macro because there's no builtin way of using a numeric register
+        ; to reference S/D/etc. registers
+        MACRO
+        vfpop   $op, $regtype, $regno, $post
+        LCLS    reg
+        LCLA    regno2
+regno2  SETA    $regno
+      [ regno2 > 9
+reg     SETS    (:STR:(regno2/10)):RIGHT:1
+      ]
+reg     SETS    "$regtype$reg" :CC:((:STR:(regno2%10)):RIGHT:1)
+        $op     $reg $post
+        MEND
+
+        GBLA    count
+
+; extern bool aborttrap_vfp_s_read(abtcontext_t *ctx,int rn,uint32_t *val);
+        EXPORT  aborttrap_vfp_s_read
+aborttrap_vfp_s_read ROUT
+        CMP     a2, #32
+        MOVHS   a1, #false
+        MOVHS   pc, lr
+        MOV     a1, #true
+        ADD     pc, pc, a2, LSL #3
+        NOP
+count   SETA    0
+        WHILE   count < 32
+        vfpop   FSTS,S,count,",[a3]"
+        MOV     pc,lr
+count   SETA    count+1
+        WEND        
+
+; extern bool aborttrap_vfp_s_write(abtcontext_t *ctx,int rn,uint32_t val);
+        EXPORT  aborttrap_vfp_s_write
+aborttrap_vfp_s_write ROUT
+        CMP     a2, #32
+        MOVHS   a1, #false
+        MOVHS   pc, lr
+        MOV     a1, #true
+        ADD     pc, pc, a2, LSL #3
+        NOP
+count   SETA    0
+        WHILE   count < 32
+        vfpop   FMSR,S,count,",a3"
+        MOV     pc,lr
+count   SETA    count+1
+        WEND        
+
+    [ SupportARMV32
+MaxDRegs * 32
+    |
+MaxDRegs * 16
+    ]
+
+; extern bool aborttrap_vfp_d_read(abtcontext_t *ctx,int rn,uint64_t *val);
+        EXPORT  aborttrap_vfp_d_read
+aborttrap_vfp_d_read
+        CMP     a2, #MaxDRegs
+        MOVHS   a1, #false
+        MOVHS   pc, lr
+        MOV     a1, #true
+        ADD     pc, pc, a2, LSL #3
+        NOP
+count   SETA    0
+        WHILE   count < MaxDRegs
+        vfpop   FSTD,D,count,",[a3]"
+        MOV     pc,lr
+count   SETA    count+1
+        WEND        
+
+; extern bool aborttrap_vfp_d_write(abtcontext_t *ctx,int rn,uint64_t val);
+        EXPORT  aborttrap_vfp_d_write
+aborttrap_vfp_d_write
+        CMP     a2, #MaxDRegs
+        MOVHS   a1, #false
+        MOVHS   pc, lr
+        MOV     a1, #true
+        ADD     pc, pc, a2, LSL #3
+        NOP
+count   SETA    0
+        WHILE   count < MaxDRegs
+        vfpop   FMDRR,D,count,",a3,a4"
+        MOV     pc,lr
+count   SETA    count+1
+        WEND        
+ ]
+
+        IMPORT  aborttrap_handler
+
+        EXPORT  aborttrap_dataabort_veneer
+; In: R0 -> abort context (R0-R14, SPSR, DFAR, DFSR, ADFSR)
+ [ :DEF: standalone
+;     R12 = private word
+ ]
+; Out: R0 = 0 to claim, 1 to pass on, or V set & error pointer
+;      R1-R12 corruptible
+; Entered in ABT32
+aborttrap_dataabort_veneer ROUT
+        MOV     v4, lr
+        ; Drop into SVC mode
+        SetMode SVC32_mode,r1
+      [ :DEF: standalone ; For non-standalone, DAbPreVeneer will have already validated R13_svc
+        ; Check stack space
+        MOV     r10, r13, LSL #12
+        CMP     r10, #4096<<12
+        MOVLO   r0, #0
+        BLO     %FT90
+        ; Check SP alignment
+        TST     r13, #3
+        MOVNE   r0, #0
+        BNE     %FT90
+      ]
+        ; Preserve registers
+        MRS     r10, SPSR
+        MOV     r11, r13
+        Push    "r10,r11,r14"
+        ; Copy over main context
+        MOV     a2, #abtcontext_size-12
+10
+        SUBS    a2, a2, #4
+        LDR     a3, [a1, a2]
+        Push    "a3"
+        BNE     %BT10
+        ; Remember original
+        Push    "a1"
+        ; Now call main code
+        ADD     a1, sp, #4
+      [ :LNOT: :DEF: standalone
+        BL      aborttrap_handler
+      |
+        MOV     v1, sp, LSR #20
+        LDMIB   ip, {a3-a4} ; Grab relocation offsets straight from the source
+        MOV     v1, v1, LSL #20
+        LDMIA   v1, {v2-v3}
+        STMIA   v1, {a3-a4}
+        ADD     sl, v1, #540
+        MOV     fp, #0
+        BL      aborttrap_handler
+        STMIA   v1, {v2-v3}
+      ]
+        ; Copy over main context
+        Pull    "a4"
+        MOV     a2, #abtcontext_size-12
+80
+        SUBS    a2, a2, #4
+        Pull    "a3"
+        STR     a3, [a4], #4
+        BNE     %BT80
+        ; Restore the extra regs
+        LDMIA   sp, {r10,r13,r14}
+        MSR     SPSR_cxsf, r10
+90
+        ; Back to abort
+        SetMode ABT32_mode,r1
+        CMP     r0, #2
+        SETV    HS
+        MOV     pc, v4
+
+; extern _kernel_oserror *aborttrap_call_handler(int flags,uint8_t *buf,uint32_t addr,int len,int r12,int routine);
+        EXPORT  aborttrap_call_handler
+aborttrap_call_handler
+        Push    "lr"
+        MOV     lr,pc
+        LDMIB   r13,{r12,pc}
+        MOVVC   r0,#0
+        Pull    "pc"
+
+        END

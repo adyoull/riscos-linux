@@ -1,0 +1,90 @@
+/*
+ * Copyright (c) 2021, RISC OS Open Ltd
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#ifndef ABORTTRAP_CONTEXT_H
+#define ABORTTRAP_CONTEXT_H
+
+#include <stdbool.h>
+#include <stdint.h>
+#include "kernel.h"
+
+#include "Global/OSMem.h"
+
+#include "../psr.h"
+
+/* abtcontext_t is an opaque data structure containing the abort context */
+typedef struct abtcontext_s abtcontext_t;
+
+/* Integer register access */
+
+/* Access register for explicit mode */
+extern bool aborttrap_reg_read(abtcontext_t *ctx,int rn,eprocmode mode,uint32_t *val);
+extern bool aborttrap_reg_write(abtcontext_t *ctx,int rn,eprocmode mode,uint32_t val);
+
+/* Access register for current mode (source of exception) */
+extern bool aborttrap_reg_read_current(abtcontext_t *ctx,int rn,uint32_t *val);
+extern bool aborttrap_reg_write_current(abtcontext_t *ctx,int rn,uint32_t val);
+
+/* Access register for user mode */
+extern bool aborttrap_reg_read_USR(abtcontext_t *ctx,int rn,uint32_t *val);
+extern bool aborttrap_reg_write_USR(abtcontext_t *ctx,int rn,uint32_t val);
+
+/* CPSR access (for source of exception) */
+extern uint32_t aborttrap_cpsr_read(abtcontext_t *ctx);
+extern void aborttrap_cpsr_write(abtcontext_t *ctx,uint32_t val);
+
+/* SPSR access for explicit mode */
+extern bool aborttrap_spsr_read(abtcontext_t *ctx,eprocmode mode,uint32_t *val);
+extern bool aborttrap_spsr_write(abtcontext_t *ctx,eprocmode mode,uint32_t val);
+
+/* SPSR access for current mode (source of exception) */
+extern bool aborttrap_spsr_read_current(abtcontext_t *ctx,uint32_t *val);
+extern bool aborttrap_spsr_write_current(abtcontext_t *ctx,uint32_t val);
+
+/* Other special registers */
+extern uint32_t aborttrap_dfsr_read(abtcontext_t *ctx);
+
+/* SCTLR access
+   TODO - if we're not supporting ARMv6, could hard-code U bit at compile time, allowing compiler to optimise out the other paths */
+#define SCTLR_A (1<<1)
+#define SCTLR_U (1<<22)
+extern uint32_t aborttrap_sctlr_read(abtcontext_t *ctx);
+
+#ifdef ABORTTRAP_VFP
+/* VFP/NEON registers */
+extern bool aborttrap_vfp_s_read(abtcontext_t *ctx,int rn,uint32_t *val);
+extern bool aborttrap_vfp_s_write(abtcontext_t *ctx,int rn,uint32_t val);
+extern bool aborttrap_vfp_d_read(abtcontext_t *ctx,int rn,uint64_t *val);
+extern bool aborttrap_vfp_d_write(abtcontext_t *ctx,int rn,uint64_t val);
+#endif
+
+/* Memory access */
+
+/* Access is linear (i.e. ARMv6+ unaligned) */
+extern _kernel_oserror *aborttrap_mem_access(void *buf,uint32_t addr,int len,int flags);
+
+#endif

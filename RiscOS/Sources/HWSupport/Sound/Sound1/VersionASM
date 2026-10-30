@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "1.43"
+Module_Version          SETA    143
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "20 Jun 2023"
+Module_ApplicationDate  SETS    "20-Jun-23"
+Module_ComponentName    SETS    "Sound1"
+Module_FullVersion      SETS    "1.43"
+Module_HelpVersion      SETS    "1.43 (20 Jun 2023)"
+                        END

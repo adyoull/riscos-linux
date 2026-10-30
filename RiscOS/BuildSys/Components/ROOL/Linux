@@ -1,0 +1,220 @@
+#------------------------------------------------------------------------------
+# Components file for Linux build
+#------------------------------------------------------------------------------
+%BaseAddress   0x20800000
+%Image         Build$ImageName
+%Log           Build$ImageName
+%Messages      Sources.Internat.Messages
+%Joiner        romlinker
+%JoinerFormat  romlinker
+%noimagesize
+
+# BBE Support
+#BuildApps
+#BuildExport
+#BuildSystem             -options COMPONENTFILE=Linux COMPONENTFILE2=Universal
+#BuildEnvironment        -options ENVFILE=Linux
+#BuildModules
+#BuildTools
+
+#------------------------------------------------------------------------------
+# some headers
+#
+HdrSrc                -type HDR
+LinuxSyscalls         -type HDR
+SocketKVMFrontends    -type HDR
+CompressPNG           -type HDR
+#------------------------------------------------------------------------------
+# we need the following exported for swis.h generation
+# change the type to HDR
+#
+DDEUtils              -type HDR
+Econet                -type HDR
+# DDT                 -type HDR
+HostFS                -type HDR
+# SATADriver          -type HDR
+# SCSIDriver          -type HDR
+PCCardFS              -type HDR
+PDriver               -type HDR
+# PDumperDM           -type HDR
+# MakePSFont          -type HDR
+VFPSupport            -type HDR
+Podule                -type HDR
+
+# Kernel is first module in ROM seen as the UtilityModule
+HAL_Linux             -options ADDRESS=0x20800000 ADDRESS_RW=0x20804000
+Kernel                -at 0x20810000 -options ASFLAGS="-PD \"CMOS_Override SETS \\\"= FileLangCMOS,197,LanguageCMOS,1\\\"\""
+# (as IOMD32 since 2023: TerritoryManager is C, so the shared C library
+# comes first)
+SharedRISC_OSLib
+FileSwitch            -type C
+ResourceFS
+Messages
+MessageTrans
+# The C TerritoryManager needs CMHG's flags-capable SWI handlers (DDE 32);
+# the assembler one from the port does the same job with DDE 31
+TerritoryManagerAsm
+# First 8 modules cannot be unplugged
+UK
+WindowManager         -type C -options OPTIONS=Ursula
+## Desktop is the 11th module (default language)
+Desktop
+TaskManager
+ScreenModes
+# VIDC20Video
+# Mouse
+# PS2Driver
+# ADFSFiler
+BASIC105              -type C
+BASIC64               -type C
+BlendTable
+BufferManager         -type C
+ColourTrans
+Debugger              -type C
+DeviceFS              -type C
+DisplayManager
+DMAManager            -type HDR
+DragASprite
+DragAnObj
+DrawMod
+# BBCEconet
+FileCore
+ADFS -type HDR
+IXSupport
+SocketKVM
+RamFS
+Filer
+FilerSWIs
+FSLock
+FontManager
+FPEmulator            -type C -options FPE_APCS=3/32bit FPEANCHOR=0x20510000
+Free
+Hourglass
+# IIC
+International
+InternationalKeyboard -options KEYBOARD=All
+ITable
+# Joystick
+# NetFS
+# NetFiler
+# NetPrint
+# NetStatus
+Obey
+# ParallelDeviceDriver
+PortableHAL           -type C
+Pinboard
+PipeFS
+RAMFSFiler
+ResourceFiler
+ROMFonts
+RTSupport             -type HDR
+RTC -type HDR
+ScreenBlanker
+ScrSaver              -options SCRSAVERAPP=No
+SerialDeviceDriver    -type HDR
+SerialDeviceSupport   -type HDR
+# SerialMouse
+ShellCLI
+SoundDMA_HAL          -type C
+SoundControl          -type HDR
+SoundChannels
+SoundScheduler
+SpriteExtend
+SpriteUtils
+Squash
+SuperSample
+SystemDevices
+TaskWindow            -type C
+WindowUtils
+FilterManager
+WaveSynth
+StringLib
+Percussion
+# SharedSnd
+Filer_Action
+DOSFS                 -options PCMCIA=TRUE
+ColourPicker
+DrawFile
+BootCommands
+# AUNMsgs
+# MManager
+LinuxInternet
+# Internet            -type HDR
+Resolver
+# Net
+# BootNet
+# Freeway
+# ShareFS
+MimeMap
+# LanManFS            -options OPTIONS=-DCHECK_ARMBOOT_EXISTS ROMSPRITES=TRUE
+# DHCP                -options OPTIONS=-DMINIMUM_OPTIONS_LENGTH=4
+Edit
+Draw
+Paint
+Alarm
+Chars
+Help2
+
+##
+## Toolbox Modules/Libs
+##
+tboxlib
+ToolboxLib            -type EXP
+Toolbox
+Window
+ToolAction
+Menu
+Iconbar
+ColourDbox
+ColourMenu
+DCS_Quit
+FileInfo
+FontDbox
+FontMenu
+PrintDbox
+ProgInfo
+SaveAs
+Scale
+Gadgets
+##
+## CDFS
+##
+# CDFSDriver
+# ATAPI
+# CDFS
+# CDFSFiler
+#
+UnSqzAIF
+ZeroPain
+LinuxCryptRandom
+# InetRes -options TYPE=EmergencyUtils
+HeroNames
+
+## some libraries and bits (enabled as in IOMD32 since 2023)
+##
+callx
+AsmUtils              -type EXP
+TCPIPheaders          -type HDR
+socklib               -type HDR
+inetlib
+unixlib               -type HDR
+UnicodeLib            -type HDR
+ConfigLib             -type EXP
+OSLib
+DeskLib
+ModMallocLib
+PlainArgvLib
+RemoteDebug           -type HDR
+PDebug
+DDTLib
+Wild
+Trace
+DebugLib              -type HDR
+
+# NVRAM               -type EXP
+# PortManager         -type EXP
+PCI                   -type HDR
+SCSIFS                -type HDR # Needed for header export, but depends on filecore headers
+#
+SharedRISC_OSLib_Headers -type HDR
+#ABRelease

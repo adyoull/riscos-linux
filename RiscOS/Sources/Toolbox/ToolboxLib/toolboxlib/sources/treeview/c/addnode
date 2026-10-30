@@ -1,0 +1,62 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : addnode.c
+ * Purpose     : Veneer for method TreeView_AddNode
+ * Description : Adds a new node adjacent to the current node
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "treeview.h"
+
+
+
+
+/*
+ * Name        : treeview_add_node
+ * Description : Adds a new node adjacent to the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               const char *text
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_add_node ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            const char *text,
+                                            int *id
+                                          )
+{
+_kernel_swi_regs r;
+_kernel_oserror *e;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = TreeView_AddNode;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) text;
+  if((e = _kernel_swi(Toolbox_ObjectMiscOp,&r,&r)) == NULL)
+  {
+    if(id != NULL) *id = (int) r.r[0];
+  }
+
+  return(e);
+}
+

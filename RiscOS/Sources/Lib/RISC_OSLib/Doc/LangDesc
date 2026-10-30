@@ -1,0 +1,87 @@
+Language Descriptors
+====================
+See also "Interfacing a language run-time system to the Acorn library kernel"
+in the PRM chapter entitled "The shared C library".
+
+Terminology
+-----------
+RTSK = 'Run Time Support Kernel', or maybe 'Run Time System Kernel'.
+
+RTSK$$Data
+----------
+RTSK$$Data areas are defined in
+   clib.s.cl_init and
+   clib.s.cl_mod_r
+plus an empty declaration in
+   kernel.s.k_mod_r
+
+clib.s.cl_init ends up being built into objects
+   o.clib             (with SharedLibrary={FALSE}) -> lib.ansilib
+   m_o.clib           (with SharedLibrary={FALSE}) -> lib.ansilibm
+   o.cl_stub_r        (with SharedLibrary={TRUE})  -> lib.stubs
+   o_rl.rl_stub_r     (with SharedLibrary={TRUE})  -> lib.rstubs
+   rm_o_rl.rl_stub_rm (with SharedLibrary={TRUE})  -> lib.romstubs
+   rm_o.cl_stub_rm    (with SharedLibrary={TRUE})  -> lib.romcstubs
+
+clib.s.cl_mod_r is only built into object
+   rm_o.cl_modbody
+but that's linked into
+      lib.clib (soft-load SharedCLibrary)
+  and aof.CLib (ROM SharedCLibrary without RISC_OSLib parts)
+  and aof.RISC_OSLib (ROM SharedRISC_OSLib)
+
+So you end up with an RTSK$$Data section in every type of binary.
+
+Note that this means there's a language descriptor in both the shared library
+*and* the client; one copy describes code in the client and the other in the
+shared library. This is necessary so that backtraces (and functions like
+_kernel_procname() and _kernel_language()) work correctly when parsing
+pointers from the shared library as well as those in the client.
+
+The language descriptor
+-----------------------
+The _kernel_languagedescription has already been extended at least once
+before. Entries must both
+a) lie within the descriptor's declared size
+b) be non-zero
+to be considered valid to be called (see 'CallInitProcs').
+
+In order to extend it any missing entries must be padded with zeros
+before appending new entries on the end.
+
+Procedures in the descriptor
+----------------------------
+Of the function pointers in the _kernel_languagedescription block, the
+following are called without regard to any "current" language:
+
+  InitProc
+  FinaliseProc
+  FastEventProc
+
+InitProc and FastEventProc are ignored for any language descriptions in
+the shared library (the pointers in clib.s.cl_mod_r are 0 or absent, but
+they wouldn't be called even if they weren't).
+
+The others are only called after searching a "current" PC value to
+determine if it falls in the code area described by the members
+"codestart" and "codeend".
+
+Constructors/destructors
+------------------------
+These procedures will in future need to check for whether the PC was inside
+a constructor or destructor function as well:
+
+  name (this one's just read, never called)
+  TrapProc
+  UncaughtTrapProc
+  EventProc
+  UnhandledEventProc
+  UnwindProc
+  NameProc
+
+It's conceivable that the shared C library could one day contain
+routines written in C++, or otherwise statically link with a library
+that has its own static constructors. Therefore, we should be recording
+constructors and destructors for both the client and the shared library,
+and the proposal is that the shared library constructors should fire
+before client constructors, and in reverse for destructors.

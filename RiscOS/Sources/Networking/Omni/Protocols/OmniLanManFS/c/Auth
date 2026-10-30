@@ -1,0 +1,316 @@
+/*
+ * Copyright (c) 2015, Colin Granville
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <time.h>
+#include <string.h>
+
+#include "DebugLib/DebugLib.h"
+
+#include "Auth.h"
+#include "global.h"
+#include "md4.h"
+#include "md5.h"
+#include "Tick.h"
+
+/* Based on RFC 2104. */
+typedef struct {
+  MD5_CTX MD5ctx;
+  unsigned char k_opad[64]; // outer padding - key XOR opad, retained for the second pass
+} HMAC_MD5_CTX;
+
+/* Initialise an HMAC-MD5 context with the given key.
+ *
+ * HMAC-MD5 is MD5(K XOR opad, MD5(K XOR ipad, text)), where ipad = 0x36 x 64 and opad = 0x5c x 64.  Keys longer than
+ * 64 bytes are first reduced to MD5(key); shorter keys are zero-padded to 64 bytes.
+ *
+ * Parameters:
+ *   ctx      HMAC-MD5 context to initialise
+ *   key      key bytes (may be replaced internally by MD5(key))
+ *   key_len  length of key
+ */
+static void HMAC_MD5Init(HMAC_MD5_CTX *ctx, unsigned char *key, int key_len) {
+  unsigned char k_ipad[65]; // inner padding - key XOR ipad, only needed within this call
+  unsigned char tk[16];
+  int i;
+  MD5_CTX tctx;
+
+  /* Long keys are reduced to MD5(key) first; short keys get implicitly zero-padded by the memset
+   * below.
+   */
+  if (key_len > 64) {
+    MD5Init(&tctx);
+    MD5Update(&tctx, key, key_len);
+    MD5Final(tk, &tctx);
+
+    key = tk;
+    key_len = 16;
+  }
+
+  /* Build (K XOR ipad) and (K XOR opad) into separate 64-byte buffers.  We seed both with the key
+   * (zero-padded), then XOR the constants over the full 64 bytes.
+   */
+  memset(k_ipad, 0, sizeof k_ipad);
+  memset(ctx->k_opad, 0, sizeof ctx->k_opad);
+  memcpy(k_ipad, key, key_len);
+  memcpy(ctx->k_opad, key, key_len);
+
+  for (i = 0; i < 64; i++) {
+    k_ipad[i] ^= 0x36;
+    ctx->k_opad[i] ^= 0x5c;
+  }
+
+  /* Inner hash starts now; outer hash deferred until Final since it needs the inner result. */
+  MD5Init(&ctx->MD5ctx);
+  MD5Update(&ctx->MD5ctx, k_ipad, 64);
+}
+
+/* Feed message bytes into the HMAC-MD5 inner hash.
+ *
+ * Parameters:
+ *   ctx       HMAC-MD5 context
+ *   text      message bytes
+ *   text_len  length of text
+ */
+static void HMAC_MD5Update(HMAC_MD5_CTX *ctx, const unsigned char *text, int text_len) {
+  MD5Update(&ctx->MD5ctx, (void *)text, text_len);
+}
+
+/* Finalise HMAC-MD5 and produce the 16-byte digest.
+ *
+ * Parameters:
+ *   digest  receives the 16-byte HMAC-MD5 result
+ *   ctx     HMAC-MD5 context
+ */
+static void HMAC_MD5Final(unsigned char digest[16], HMAC_MD5_CTX *ctx) {
+  // Inner pass completes; digest holds MD5(K XOR ipad, text)
+  MD5Final(digest, &ctx->MD5ctx);
+
+  // Outer pass: MD5(K XOR opad, inner_digest)
+  MD5Init(&ctx->MD5ctx);
+  MD5Update(&ctx->MD5ctx, ctx->k_opad, 64);
+  MD5Update(&ctx->MD5ctx, digest, 16);
+  MD5Final(digest, &ctx->MD5ctx);
+}
+
+#define US_UPPERCASE 1
+#define US_ADD_ZERO  2
+
+/* Convert a Latin-1 string to UTF-16LE for NTLMSSP, optionally upper-casing, NUL-terminating, or both.
+ *
+ * Parameters:
+ *   flags  bitmask: US_UPPERCASE to uppercase, US_ADD_ZERO to null-terminate
+ *   s      source string (Latin-1)
+ *   size   number of characters to convert
+ *   out    destination (must be at least size*2 bytes, or (size+1)*2 with US_ADD_ZERO)
+ */
+static void UnicodeString(unsigned int flags, const char *s, size_t size, unsigned short *out) {
+  size_t i;
+
+  if (out == 0) {
+    return;
+  }
+  for (i = 0; i < size; i++) {
+    out[i] = (flags & US_UPPERCASE) ? toupper(s[i]) : s[i];
+  }
+  if (flags & US_ADD_ZERO) {
+    out[i] = 0;
+  }
+}
+
+/* Compute the NTOWFv1 (NT One-Way Function v1) password hash, defined as MD4(UTF-16LE(password)).
+ *
+ * Parameters:
+ *   password   plaintext password (Latin-1)
+ *   pass_size  length of password
+ *   digestout  receives the 16-byte NT hash
+ */
+static void Auth_NTOWFv1(const char *password, size_t pass_size, unsigned char digestout[16]) {
+  /* VLA sized with a +1 floor because a zero-length VLA crashes Norcroft. */
+  unsigned short ustr[pass_size + 1];
+  MD4_CTX ctx;
+
+  MD4Init(&ctx);
+
+  UnicodeString(0, password, pass_size, ustr);
+  if (pass_size) {
+    MD4Update(&ctx, (void *)ustr, pass_size * sizeof(unsigned short));
+  }
+
+  MD4Final(digestout, &ctx);
+}
+
+void Auth_LMOWFv2(const char *password, size_t pass_size, const char *username, size_t user_size, const char *userdomain, size_t dom_size,
+                  unsigned char digestout[16]) {
+  /* ustr is reused for both username and domain encodes, so size to whichever is longer; +1 floor because a zero-size
+   * VLA crashes Norcroft.  Sizing to user_size alone would overflow when dom_size > user_size (e.g. a DOMAIN\user
+   * split that leaves a short user half and a longer domain half).
+   */
+  size_t max_size = (user_size > dom_size) ? user_size : dom_size;
+  unsigned short ustr[max_size + 1];
+  HMAC_MD5_CTX ctx;
+
+  Auth_NTOWFv1(password, pass_size, digestout);
+
+  HMAC_MD5Init(&ctx, digestout, 16);
+
+  UnicodeString(US_UPPERCASE, username, user_size, ustr);
+  HMAC_MD5Update(&ctx, (void *)ustr, user_size * sizeof(unsigned short));
+
+  UnicodeString(0, userdomain, dom_size, ustr);
+  HMAC_MD5Update(&ctx, (void *)ustr, dom_size * sizeof(unsigned short));
+
+  HMAC_MD5Final(digestout, &ctx);
+}
+
+/* Fill "out" with "n" bytes for use as an NTLM client challenge.
+ *
+ * The client challenge is a freshness nonce: it must not repeat between authentication attempts and
+ * should be hard for an on-path observer to predict.  The previous code did srand(time(NULL)) then
+ * rand() on every call, which reseeds from a one-second clock: two logons in the same second produced
+ * an identical challenge, and the sequence was trivially predictable.  There is no CSPRNG wired up on
+ * RISC OS, so mix several independent sources: the centisecond monotonic timer, wall-clock time, a
+ * call counter that guarantees uniqueness even within one timer tick, and two live addresses.  The mix
+ * is hashed with MD5 and the leading bytes are taken.
+ *
+ * Parameters:
+ *   out  receives the challenge bytes
+ *   n    number of bytes wanted (capped at the 16-byte MD5 digest size)
+ */
+static void Auth_ClientChallenge(unsigned char *out, size_t n) {
+  static unsigned int counter = 0;
+  struct {
+    unsigned int mono;
+    unsigned int wall;
+    unsigned int counter;
+    const void *stackp;
+    const void *heapp;
+  } seed;
+  MD5_CTX ctx;
+  unsigned char digest[16];
+
+  /* Fill the seed from several sources that differ between calls and between machines. */
+  seed.mono = LM_Tick();
+  seed.wall = (unsigned int)time(NULL);
+  seed.counter = ++counter;
+  seed.stackp = &seed;
+  seed.heapp = out;
+
+  /* Hash the seed, so the output shows nothing of the clock or the addresses. */
+  MD5Init(&ctx);
+  MD5Update(&ctx, (unsigned char *)&seed, sizeof(seed));
+  MD5Final(digest, &ctx);
+
+  /* Hand back as much of the digest as was asked for, up to its 16 bytes. */
+  if (n > sizeof(digest)) {
+    n = sizeof(digest);
+  }
+  memcpy(out, digest, n);
+}
+
+void Auth_LMv2ChallengeResponse(const unsigned char lmowfv2digest[16], const unsigned char serverchallenge[8],
+                                unsigned char responseout[24]) {
+  unsigned char *clientchallenge = responseout + 16;
+  HMAC_MD5_CTX ctx;
+
+  /* Output layout: [0..15] = HMAC, [16..23] = client challenge.  Generate the challenge in place. */
+  Auth_ClientChallenge(clientchallenge, 8);
+
+  /* HMAC-MD5 of (serverchallenge || clientchallenge) keyed on the LMv2 password hash. */
+  HMAC_MD5Init(&ctx, (unsigned char *)lmowfv2digest, 16);
+  HMAC_MD5Update(&ctx, serverchallenge, 8);
+  HMAC_MD5Update(&ctx, clientchallenge, 8);
+  HMAC_MD5Final(responseout, &ctx);
+}
+
+/* Return the current time as a Windows FILETIME (100ns intervals since 1601).
+ *
+ * Returns: 64-bit FILETIME value
+ */
+static unsigned long long SMBTime(void) {
+  unsigned long long tm = time(NULL);
+
+  /* Shift Unix epoch (1970) to Windows FILETIME epoch (1601), that's 11644473600 seconds, then
+   * scale to 100ns ticks.  The extra -2 days is an empirically-derived RISC OS time(NULL) skew.
+   */
+  tm = (tm + 11644473600ull - 2 * 24 * 3600) * 10000000;
+  return tm;
+}
+
+void Auth_NTv2ChallengeResponseEx(const unsigned char ntowfv2digest[16], const unsigned char serverchallenge[8],
+                                  const unsigned char *target_info, unsigned short target_info_len, unsigned long long server_timestamp,
+                                  unsigned char *responseout, int responseout_max, unsigned short *responseoutsize) {
+  unsigned char *p = responseout + 16; // leave 16 bytes at the front for NTProofStr
+  unsigned long long tm;
+  int blob_len;
+  HMAC_MD5_CTX ctx;
+
+  *responseoutsize = 0;
+
+  /* Client blob header: RespType, HiRespType, 6 reserved bytes */
+  *p++ = 1;
+  *p++ = 1;
+  memset(p, 0, 6);
+  p += 6;
+
+  /* Timestamp: prefer the server's MsvAvTimestamp when provided, otherwise local wall clock */
+  tm = (server_timestamp != 0) ? server_timestamp : SMBTime();
+  memcpy(p, &tm, 8);
+  p += 8;
+
+  /* Client challenge: 8 random bytes */
+  Auth_ClientChallenge(p, 8);
+  p += 8;
+
+  /* Reserved (4 bytes) */
+  memset(p, 0, 4);
+  p += 4;
+
+  /* Echo back the server's target info */
+  if (target_info != NULL && target_info_len > 0) {
+    if (p + target_info_len > responseout + responseout_max - 8) {
+      return;
+    }
+    memcpy(p, target_info, target_info_len);
+    p += target_info_len;
+  }
+
+  /* End padding (4 bytes) */
+  memset(p, 0, 4);
+  p += 4;
+
+  blob_len = (int)(p - responseout);
+  *responseoutsize = (unsigned short)blob_len;
+
+  /* NTProofStr = HMAC_MD5(NTOWFv2, ServerChallenge + ClientBlob) */
+  HMAC_MD5Init(&ctx, (unsigned char *)ntowfv2digest, 16);
+  HMAC_MD5Update(&ctx, serverchallenge, 8);
+  HMAC_MD5Update(&ctx, responseout + 16, blob_len - 16);
+  HMAC_MD5Final(responseout, &ctx);
+}

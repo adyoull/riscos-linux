@@ -1,0 +1,59 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : getsel.c
+ * Purpose     : Veneer for method Tabs_GetSelected
+ * Description : Reads which tab index is the one currently selected
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "tabs.h"
+
+
+
+
+/*
+ * Name        : tabs_get_selected
+ * Description : Reads which tab index is the one currently selected
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *tab_index
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_get_selected ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            int *tab_index
+                                          )
+{
+_kernel_swi_regs r;
+_kernel_oserror *e;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = Tabs_GetSelected;
+  r.r[3] = (int) gadget;
+  if((e = _kernel_swi(Toolbox_ObjectMiscOp,&r,&r)) == NULL)
+  {
+    if(tab_index != NULL) *tab_index = (int) r.r[0];
+  }
+
+  return(e);
+}
+

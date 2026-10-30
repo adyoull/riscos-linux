@@ -1,0 +1,1589 @@
+/* Copyright 1996 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* SprWindow.c
+ *
+ *  Paint: Arthur 2 sprite editor
+ *   Sprite window handling
+ *
+ *  Author: A.P. Thompson
+ *
+ * Upgraded to RISCOSlib - DAHE - 16 Aug 1989
+ *  DAHE, 28 Aug 89 - internationalisation
+ */
+
+#include <swis.h>
+#include "Global/FileTypes.h"
+#include "Global/OsBytes.h"
+
+#include "akbd.h"
+#include "bbc.h"
+#include "help.h"
+#include "xferrecv.h"
+#include "werr.h"
+#include "wimpt.h"
+
+#include "ftrace.h"
+#include "m.h"
+#include "main.h"
+#include "Menus.h"
+#include "MenuD.h"
+#include "PSprite.h"
+#include "SprWindow.h"
+#include "ToolWindow.h"
+#include "Tools.h"
+#include "Colours.h"
+#include "ColourPanel.h"
+#include "PaintLib.h"
+
+/**************************************************************************
+ *                                                                        *
+ *  Static variables.                                                     *
+ *                                                                        *
+ **************************************************************************/
+
+main_template sprwindow_template;
+static os_regset savedVDUstate;
+
+/*int main_current_options.zoom.mul = 1;
+int main_current_options.zoom.div = 1;
+int main_current_options.grid.colour = 255;*/
+
+static wimp_w lastnullholder = -1;
+static int scrolltime = 0;
+static BOOL hasfocus = FALSE;
+
+/***************************************
+ *                                     *
+ *  Set the extent of a file window.   *
+ *                                     *
+ ***************************************/
+
+void sprwindow_set_work_extent (main_window *window, BOOL open)
+
+{ /* The open parameter avoid getting two open requests in some circumstances */
+  sprwindow_set_work_extent_custom (window, open, -1, -1);
+}
+
+/********************************************************
+ *                                                      *
+ *  Set the extent of a file window to a custom size.   *
+ *                                                      *
+ ********************************************************/
+
+void sprwindow_set_work_extent_custom (main_window *window, BOOL open, int minwidth, int minheight)
+
+{ /* The open parameter avoid getting two open requests in some circumstances */
+  wimp_wstate currinfo;
+  wimp_redrawstr newext;
+  sprite_info sinfo;
+
+  ftracef0 ("sprwindow_set_work_extent_custom\n");
+  wimpt_noerr (wimp_get_wind_state (window->handle, &currinfo));
+
+  psprite_read_size (window->data->sprite.sprite, &sinfo);
+
+  sinfo.width = sinfo.width * window->data->sprite.blobsize.scale_xmul /
+                              window->data->sprite.blobsize.scale_xdiv;
+
+  sinfo.height= sinfo.height * window->data->sprite.blobsize.scale_ymul /
+                               window->data->sprite.blobsize.scale_ydiv;
+
+  if (sinfo.width < minwidth)
+    sinfo.width = minwidth;
+  if (sinfo.height < minheight)
+    sinfo.height = minheight;
+
+  sinfo.width  &= ~((1 << bbc_modevar (-1, bbc_XEigFactor)) - 1);
+  sinfo.height &= ~((1 << bbc_modevar (-1, bbc_YEigFactor)) - 1);
+
+  newext.w      = window->handle;
+  newext.box.y1 = 0;
+  newext.box.y0 = -sinfo.height;
+  newext.box.x0 = 0;
+  newext.box.x1 = sinfo.width;
+
+  ftracef2 ("Resetting sprite window extent to (%d, %d)\n",
+      newext.box.x1, newext.box.y0);
+
+  wimpt_noerr (wimp_set_extent (&newext));
+  if (open) wimpt_noerr (wimp_open_wind (&currinfo.o)); /*force resize*/
+  main_force_redraw (window->handle);
+}
+
+/****************************************************
+ *                                                  *
+ *  Scroll a sprite window at the specified speeds. *
+ *                                                  *
+ ****************************************************/
+
+void sprwindow_scroll (main_window *window, int scrollx, int scrolly)
+
+{ wimp_wstate currinfo;
+  ftracef0 ("sprwindow_scroll\n");
+
+  int oldscrollx = scrollx;
+  int oldscrolly = scrolly;
+  int elapsed;
+
+  /* Adjust scrolling speed according to CPU speed */
+  os_swix1r(OS_ReadMonotonicTime, 0, &elapsed);
+
+  if (scrolltime > 0)
+  { elapsed -= scrolltime;
+    /* Divide these by a bigger constant to slow down the scroll rate */
+    scrollx = (scrollx * elapsed) / 3;
+    scrolly = (scrolly * elapsed) / 3;
+    /* The scrolling will only go ahead when enough time's passed to scroll in every direction requested */
+    /* The elapsed >= 8 clause is like a frame rate cap to avoid excess CPU load and flicker */
+    if (!((scrollx || scrolly) && elapsed >= 8  && (scrollx || !oldscrollx) && (scrolly || !oldscrolly)))
+    { /* Do nothing until more time has elapsed */
+      return;
+    }
+  }
+  else
+  { scrolltime = elapsed;
+    /* Do nothing until more time has elapsed */
+    return;
+  }
+
+  wimpt_noerr (wimp_get_wind_state (window->handle, &currinfo));
+
+  int oldx = currinfo.o.x;
+  int oldy = currinfo.o.y;
+
+  /* Apply the scrolling */
+  currinfo.o.x += scrollx;
+  currinfo.o.y += scrolly;
+  ftracef3 ("scrollx: %d oldx: %d currinfo.o.x: %d\n", scrollx, oldx, currinfo.o.x);
+  ftracef3 ("scrolly: %d oldy: %d currinfo.o.y: %d\n", scrolly, oldy, currinfo.o.y);
+
+  wimpt_noerr (wimp_open_wind (&currinfo.o)); /* force resize */
+  /* Find out how much the window really scrolled by */
+  wimpt_noerr (wimp_get_wind_state (window->handle, &currinfo));
+  scrollx = (currinfo.o.x - oldx) / window->data->sprite.sprite->mode.scale_xmul;
+  scrolly = (currinfo.o.y - oldy) / window->data->sprite.sprite->mode.scale_ymul;
+  if (scrollx || scrolly)
+  { /* Reset the timer */
+    scrolltime += elapsed;
+  }
+}
+
+/***********************************************************
+ *                                                         *
+ *  Stop the auto-scroll timer used in sprwindow_scroll () *
+ *                                                         *
+ ***********************************************************/
+
+void sprwindow_stop_scroll (void)
+
+{ scrolltime = 0;
+}
+
+/******************************************************
+ * Reset the titles of all windows open on the sprite *
+ ******************************************************/
+
+void sprwindow_set_window_titles (main_sprite *sprite)
+
+{ char title[TITLE_LIMIT];
+  char *name;
+  int nviews = 0;
+  main_sprite_window *sprwind;
+
+  ftracef0 ("sprwindow_set_window_titles\n");
+  for (sprwind = sprite->windows; sprwind != NULL; sprwind = sprwind->link)
+    nviews++;
+
+  name = COPY_N (title, psprite_address (sprite)->name, NAME_LIMIT);
+  if (nviews != 1) sprintf (title + strlen (name), " %d", nviews);
+  ftracef2 ("%d views; name is \"%.12s\"\n", nviews,
+      psprite_address (sprite)->name);
+
+  for (sprwind = sprite->windows; sprwind != NULL; sprwind = sprwind->link)
+  { main_window *window = sprwind->window;
+    wimp_wstate currinfo;
+    wimp_redrawstr r;
+
+    strcpy (sprwind->title, title);
+    wimpt_noerr (wimp_get_wind_state (window->handle, &currinfo));
+    r.w = window->handle;
+    wimp_getwindowoutline (&r);
+
+    r.w = -1;
+    r.box.y0 = currinfo.o.box.y1;
+    wimp_force_redraw (&r);
+  }
+  ftracef0 ("sprwindow_set_window_titles done\n");
+}
+
+/***************************************
+ *                                     *
+ *  Swap VDU output to given sprite.   *
+ *                                     *
+ ***************************************/
+
+void sprwindow_swap_output_to_sprite (main_sprite *sprite)
+
+{ ftracef0 ("sprwindow_swap_output_to_sprite\n");
+  savedVDUstate.r[0] = 0x23C;
+  savedVDUstate.r[1] = (int) sprite->file->spritearea;
+  savedVDUstate.r[2] = (int) psprite_address (sprite);
+  savedVDUstate.r[3] = 0;
+  ftracef4 ("Existing xeig: %d yeig: %d log2BPP: %d log2BPC: %d\n",
+      bbc_modevar (-1, bbc_XEigFactor), bbc_modevar (-1, bbc_YEigFactor),
+      bbc_modevar (-1, bbc_Log2BPP), bbc_modevar (-1, bbc_Log2BPC));
+  wimpt_complain (os_swix (OS_SpriteOp, &savedVDUstate));
+  ftracef4 ("New xeig: %d yeig: %d log2BPP: %d log2BPC: %d\n",
+      bbc_modevar (-1, bbc_XEigFactor), bbc_modevar (-1, bbc_YEigFactor),
+      bbc_modevar (-1, bbc_Log2BPP), bbc_modevar (-1, bbc_Log2BPC));
+  os_swi1 (OS_ChangedBox, 2);
+  os_swi1 (OS_ChangedBox, 1); /*enable changed box calcs*/
+}
+
+/***************************************
+ *                                     *
+ *  Remove wastage from a sprite       *
+ *                                     *
+ ***************************************/
+
+void sprwindow_remove_wastage (main_sprite *sprite)
+
+{ sprite_id id;
+
+  ftracef0 ("sprwindow_remove_wastage\n");
+  id.tag = sprite_id_addr;
+  id.s.addr = psprite_address (sprite);
+  wimpt_complain (sprite_removewastage (sprite->file->spritearea, &id));
+}
+
+/**********************************************
+ *                                            *
+ *  Swap VDU output to given sprite's mask.   *
+ *                                            *
+ **********************************************/
+
+int sprwindow_swap_output_to_mask (main_sprite *sprite, int statesaved)
+
+{ ftracef0 ("sprwindow_swap_output_to_mask\n");
+  if (psprite_hasmask (sprite))
+  { os_regset  regs;
+    os_regset *state = statesaved ? &regs : &savedVDUstate;
+
+    state->r[0] = 0x23D;
+    state->r[1] = (int) sprite->file->spritearea;
+    state->r[2] = (int) psprite_address (sprite);
+    state->r[3] = 0;
+    ftracef4 ("Existing xeig: %d yeig: %d log2BPP: %d log2BPC: %d\n",
+      bbc_modevar (-1, bbc_XEigFactor), bbc_modevar (-1, bbc_YEigFactor),
+      bbc_modevar (-1, bbc_Log2BPP), bbc_modevar (-1, bbc_Log2BPC));
+    wimpt_complain (os_swix (OS_SpriteOp, state));
+    ftracef4 ("New xeig: %d yeig: %d log2BPP: %d log2BPC: %d\n",
+      bbc_modevar (-1, bbc_XEigFactor), bbc_modevar (-1, bbc_YEigFactor),
+      bbc_modevar (-1, bbc_Log2BPP), bbc_modevar (-1, bbc_Log2BPC));
+    os_swix1 (OS_ChangedBox, 2);
+    os_swix1 (OS_ChangedBox, 1);          /* enable changed box calcs */
+    return 1;
+  }
+  else return 0;
+}
+
+/********************************
+ *                              *
+ *  restore VDU output state.   *
+ *                              *
+ ********************************/
+
+void sprwindow_swap_output_to_screen (void)
+
+{ ftracef0 ("sprwindow_swap_output_to_screen\n");
+  os_regset regs = savedVDUstate;
+  /* Check R2. For the screen it should be zero. If it's the address of a *
+   * sprite, someone may have forgotten to restore the state!             */
+  ftracef2 ("savedVDUstate.r[0]: %x savedVDUstate.r[2]: %x\n",
+      savedVDUstate.r[0], savedVDUstate.r[2]);
+  ftracef4 ("Existing xeig: %d yeig: %d log2BPP: %d log2BPC: %d\n",
+      bbc_modevar (-1, bbc_XEigFactor), bbc_modevar (-1, bbc_YEigFactor),
+      bbc_modevar (-1, bbc_Log2BPP), bbc_modevar (-1, bbc_Log2BPC));
+  wimpt_complain (os_swix (OS_SpriteOp, &regs));
+  ftracef4 ("New xeig: %d yeig: %d log2BPP: %d log2BPC: %d\n",
+      bbc_modevar (-1, bbc_XEigFactor), bbc_modevar (-1, bbc_YEigFactor),
+      bbc_modevar (-1, bbc_Log2BPP), bbc_modevar (-1, bbc_Log2BPC));
+  ftracef1 ("r[2] on exit: %x\n", regs.r[2]);
+}
+
+/**************************************************
+ *                                                *
+ * Force redraw of all copies of sprite on screen *
+ *                                                *
+ **************************************************/
+
+void sprwindow_redisplay (main_sprite *sprite, wimp_box *area)
+
+{ main_sprite_window *window;
+  wimp_winfo curr;
+  wimp_redrawstr redraw;
+  int filersprite_x, filersprite_y;
+
+  ftracef0 ("sprwindow_redisplay\n");
+  for (window = sprite->windows; window != NULL; window = window->link)
+  { curr.w = window->window->handle;
+    wimpt_noerr (paintlib_get_wind_info (&curr));
+
+    if (area != NULL)
+    { redraw.box.x0 = area->x0*window->blobsize.scale_xmul/
+          window->blobsize.scale_xdiv;
+      redraw.box.y0 = curr.info.ex.y0 +
+          area->y0*window->blobsize.scale_ymul/window->blobsize.scale_ydiv;
+      redraw.box.x1 = area->x1*window->blobsize.scale_xmul/
+          window->blobsize.scale_xdiv;
+      redraw.box.y1 = curr.info.ex.y0 +
+          area->y1*window->blobsize.scale_ymul/window->blobsize.scale_ydiv;
+    }
+    else
+      redraw.box = main_big_extent;
+
+    redraw.w = window->window->handle;
+
+    ftracef5 ("forcing redraw of window 0x%X, ((%d, %d), (%d, %d))\n",
+        redraw.w, redraw.box.x0, redraw.box.y0,
+        redraw.box.x1, redraw.box.y1);
+    wimpt_noerr (wimp_force_redraw (&redraw));
+  }
+
+  /* now invalidate area in filer window */
+  curr.w = sprite->file->window->handle;
+  wimpt_noerr (paintlib_get_wind_info (&curr));
+
+  int w, h, iconwidth, iconheight;
+  if (sprite->file->fullinfo)
+  { w = main_FILER_FullInfoWidth;
+    h = main_FILER_FullInfoHeight;
+    iconwidth = iconheight = 3*main_FILER_TextHeight-main_FILER_Border;
+  }
+  else
+  { w = main_FILER_TotalWidth;
+    h = main_FILER_TotalHeight;
+    iconwidth = main_FILER_XSize;
+    iconheight = main_FILER_YSize;
+  }
+  filersprite_x = curr.info.box.x1-curr.info.box.x0;
+  if (filersprite_x < w)
+    filersprite_x = w;
+  filersprite_x /= w;  /* no of sprites per line */
+
+  filersprite_y = sprite->spriteno/filersprite_x;
+  filersprite_x = sprite->spriteno % filersprite_x;
+
+  redraw.box.x0 = filersprite_x*w + main_FILER_Border/2;
+  redraw.box.x1 = redraw.box.x0+iconwidth;
+  redraw.box.y1 = -(filersprite_y*h + main_FILER_Border/2);
+  redraw.box.y0 = redraw.box.y1-iconheight;
+
+  redraw.w = curr.w;
+
+  wimpt_noerr (wimp_force_redraw (&redraw));
+}
+
+void sprwindow_invalidate (main_sprite *sprite)
+
+{ ftracef0 ("sprwindow_invalidate\n");
+  if (sprite->file->fullinfo)
+  { wimp_redrawstr redraw;
+    int filersprite_x, filersprite_y;
+    wimp_winfo curr;
+    int w = main_FILER_FullInfoWidth;
+    int h = main_FILER_FullInfoHeight;
+
+    curr.w = sprite->file->window->handle;
+    wimpt_noerr (paintlib_get_wind_info (&curr));
+
+    filersprite_x = curr.info.box.x1-curr.info.box.x0;
+    if (filersprite_x < w)
+      filersprite_x = w;
+    filersprite_x /= w;  /* no of sprites per line */
+
+    filersprite_y = sprite->spriteno/filersprite_x;
+    filersprite_x = sprite->spriteno % filersprite_x;
+
+    redraw.box.x0 = filersprite_x*w;
+    redraw.box.x1 = redraw.box.x0 + w;
+    redraw.box.y1 = -filersprite_y*h;
+    redraw.box.y0 = redraw.box.y1 - h;
+    redraw.w = sprite->file->window->handle;
+
+    wimpt_noerr (wimp_force_redraw (&redraw));
+  }
+}
+
+/**********************************************************************
+ *                                                                    *
+ *  Window event handler for sprite windows.                          *
+ *                                                                    *
+ **********************************************************************/
+
+void sprwindow_claim_idle_events (main_window *window)
+
+{ ftracef0 ("sprwindow_claim_idle_events\n");
+  window->data->sprite.sprite->needsnull = 1;
+  wimp_w claimer = win_idle_event_claimer ();
+
+  /* Don't overwrite the lastnullholder with this window otherwise nulls *
+   * will carry on after the current tool stops (if                      *
+   * sprwindow_claim_idle_events() was already called).                  */
+  if (claimer != window->handle)
+    lastnullholder = claimer;
+
+  main_claim_idle (window->handle);
+}
+
+void sprwindow_release_idle_events (main_sprite *sprite)
+
+{ main_sprite_window *list;
+  wimp_w claimer = win_idle_event_claimer ();
+
+  ftracef0 ("sprwindow_release_idle_events\n");
+  sprite->needsnull = 0;
+
+  for (list = sprite->windows; list != NULL; list = list->link)
+    if (list->window->handle == claimer)
+    { main_claim_idle (lastnullholder);
+      break;
+    }
+  /* Reset the timer used in window auto-scrolling */
+  sprwindow_stop_scroll ();
+}
+
+static BOOL cant_extend_stack_buffer (char **b, int *s)
+
+{ ftracef0 ("cant_extend_stack_buffer\n");
+  b = b; s = s;
+  werr (FALSE, msgs_lookup ("PntE1"));
+  return 0;
+}
+
+static BOOL check_palette_type (int type, char *name)
+
+{ ftracef0 ("check_palette_type\n");
+  if (type != FileType_Palette && type != -1)
+  { werr (FALSE, msgs_lookup (name == NULL? "PntE2": "PntE3"), name);
+    return FALSE;
+  }
+  return type == FileType_Palette;
+}
+
+static unsigned int greatest_common_divisor (unsigned int a, unsigned int b)
+
+{ if (!a)
+    return b;
+  if (!b)
+    return a;
+  if (a == b)
+    return a;
+
+  unsigned int g = 0;
+  while (!((a & 1) || (b & 1)))
+  { a >>= 1;
+    b >>= 1;
+    g++;
+  }
+
+  while (a)
+  { if (!(a & 1))
+      a >>= 1;
+    else if (!(b & 1))
+      b >>= 1;
+    else
+    { unsigned int t;
+      if (a < b)
+      { t = (b - a) >> 1;
+        b = t;
+      }
+      else
+      { t = (a - b) >> 1;
+        a = t;
+      }
+    }
+  }
+
+  return b << g;
+}
+
+void sprwindow_event_handler (wimp_eventstr *e, void *handle)
+
+{ main_window *window = (main_window *) handle;
+  BOOL read_only = window->data->sprite.read_only;
+  zoom_resize_start *resize_start = &window->data->sprite.resizestart;
+
+  ftracef3
+      ("sprwindow_event_handler: event type %d, main_window 0x%X, w 0x%X\n",
+      e->e, window, window->handle);
+
+  switch (e->e)
+  { case wimp_ENULL:
+    if (!read_only)
+    { main_sprite *sprite;
+      wimp_mousestr mouse;
+      wimpt_noerr (wimp_get_point_info (&mouse));
+      sprite = window->data->sprite.sprite;
+
+      ftracef2 ("mouse located at w 0x%X, i 0x%X\n", mouse.w, mouse.i);
+      if (mouse.w == window->handle && mouse.i == -1 && sprite->needsnull)
+        toolwindow_current_tool->null_action (window, &mouse);
+    }
+    break;
+
+    case wimp_EOPEN:
+    { /*Zoom with Ctrl+resize window (resize the window, but adjust the
+        zoom so same area stays visible)*/
+      static int lastx1 = 0;
+      static int lasty1 = 0;
+
+      int requestedwidth = e->data.o.box.x1 - e->data.o.box.x0;
+      int requestedheight = e->data.o.box.y0 - e->data.o.box.y1;
+      /*Prevent the user from making the window narrow enough to squash
+        the buttons. With the colour panel present, this is possible for
+        very short sprite names*/
+      requestedwidth  = MAX(window->data->sprite.minwidth, requestedwidth);
+      requestedheight = abs(requestedheight);
+
+      int r1 = 0;
+      int r2 = 255;
+      os_byte (OsByte_RW_KeybStatus, &r1, &r2);
+
+      /*If Ctrl pressed, adjust the zoom level*/
+      if (r1 & 0x40)
+      { /*If the window size has doubled, we would double the zoom level
+          to match*/
+        /* If Shift pressed, we'll zoom in coarse steps of the form 1:x or x:1 */
+        BOOL coarsezoom = r1 & 8;
+        wimp_mousestr mouse;
+        wimpt_noerr (wimp_get_point_info (&mouse));
+        wimp_wstate currinfo;
+        wimpt_noerr (wimp_get_wind_state (window->handle, &currinfo));
+        int oldwidth = resize_start->window_width;
+        int oldheight = resize_start->window_height;
+        int oldspritewidth = resize_start->sprite_width;
+        int oldspriteheight = resize_start->sprite_height;
+        int lastwidth = currinfo.o.box.x1 - currinfo.o.box.x0;
+        int lastheight = abs(currinfo.o.box.y1 - currinfo.o.box.y0);
+        int lastzoommul = window->data->sprite.blobsize.scale_xmul;
+        int lastzoomdiv = window->data->sprite.blobsize.scale_xdiv;
+        psprite_info sinfo;
+
+        psprite_read_full_info (window->data->sprite.sprite, &sinfo);
+        int swidth = sinfo.width;
+        int sheight = sinfo.height;
+        /* Convert sprite dimensions to OS Units */
+        int ldx = bbc_modevar (sinfo.mode, bbc_XEigFactor);
+        int ldy = bbc_modevar (sinfo.mode, bbc_YEigFactor);
+        swidth <<= ldx;
+        sheight <<= ldy;
+        int lastspritewidth = swidth;
+        int lastspriteheight = sheight;
+        /* Now convert to on-screen zoomed dimensions in OS Units */
+        if (lastzoomdiv)
+        { lastspritewidth = lastspritewidth * lastzoommul / lastzoomdiv;
+          lastspriteheight = lastspriteheight * lastzoommul / lastzoomdiv;
+        }
+
+        if (!oldwidth && !oldheight)
+        { oldwidth = resize_start->window_width = lastwidth;
+          oldheight = resize_start->window_height = lastheight;
+          resize_start->zoommul = (unsigned long long)lastzoommul;
+          resize_start->zoomdiv = (unsigned long long)lastzoomdiv;
+          oldspritewidth = resize_start->sprite_width = lastspritewidth;
+          oldspriteheight = resize_start->sprite_height = lastspriteheight;
+        }
+
+        int newwidth = requestedwidth;
+        int newheight = requestedheight;
+
+        BOOL mxchanged = abs(mouse.x - resize_start->mx) > 0;
+        BOOL mychanged = abs(mouse.y - resize_start->my) > 0;
+        BOOL useheight = FALSE;
+        if ((mxchanged || mychanged) && oldwidth && oldheight && newwidth && newheight)
+        { /* We compare the new window width to the old sprite width. This
+             way, if the sprite was smaller than the window, it will expand
+             to fit it and minimize any background coloured margin.
+             If you prefer the margin be zoomed at the same rate as the
+             sprite, comment out the next two if statements.*/
+          if (oldwidth > oldspritewidth)
+            oldwidth = oldspritewidth;
+          if (oldheight > oldspriteheight)
+            oldheight = oldspriteheight;
+
+          int dwidth = newwidth - oldwidth;
+          int dheight = newheight - oldheight;
+          unsigned int zoommul = (unsigned)resize_start->zoommul;
+          unsigned int zoomdiv = (unsigned)resize_start->zoomdiv;
+          unsigned int oldzoommul = zoommul;
+          unsigned int oldzoomdiv = zoomdiv;
+
+          if (dwidth || dheight)
+          { if (resize_start->window_width == 0)
+            { useheight = TRUE;
+            }
+            else if (resize_start->window_height == 0)
+            { /* useheight is FALSE */
+            }
+            else
+            { unsigned int widthratio = 10000 * newwidth / oldwidth;
+              unsigned int heightratio = 10000 * newheight / oldheight;
+              if (widthratio <= heightratio)
+              { zoommul *= (unsigned)newwidth;
+                zoomdiv *= (unsigned)oldwidth;
+              }
+              else
+              { zoommul *= (unsigned)newheight;
+                zoomdiv *= (unsigned)oldheight;
+                useheight = TRUE;
+              }
+            }
+
+            if (coarsezoom)
+            { if (zoommul > zoomdiv)
+              { if (zoomdiv < 1)
+                  zoomdiv = 1;
+                zoommul /= zoomdiv;
+                zoomdiv = 1;
+              }
+              else
+              { if (zoommul < 1)
+                  zoommul = 1;
+                zoomdiv /= zoommul;
+                zoommul = 1;
+              }
+            }
+
+            unsigned int gcd;
+
+            do
+            {
+              /*Put the zoom values into their lowest terms */
+              gcd = greatest_common_divisor (zoommul, zoomdiv);
+              if (gcd > 0)
+              {
+                zoommul /= gcd;
+                zoomdiv /= gcd;
+              }
+              else
+              {
+                ftracef2("gcd() zero for ", zoommul, zoomdiv);
+              }
+
+              if (zoommul < 1)
+                zoommul = 1;
+              if (zoomdiv < 1)
+                zoomdiv = 1;
+
+              /* Round the zoom values down, if necessary.
+                 If we don't do this, it just becomes 999:999 and no zoom
+                 resize is possible at all.*/
+              if (zoommul > MAXZOOMFACTOR || zoomdiv > MAXZOOMFACTOR)
+              {
+                zoommul = zoommul * 2 / 3;
+                zoomdiv = zoomdiv * 2 / 3;
+                if (zoommul < 1)
+                  zoommul = 1;
+                if (zoomdiv < 1)
+                  zoomdiv = 1;
+              }
+              else break;
+
+            } while (TRUE);
+
+            lastx1 = currinfo.o.box.x1;
+            lasty1 = currinfo.o.box.y1;
+
+            /* We want the same area of the sprite to stay visible as the window is resized,
+               but rounding can cause it to be less or slightly more sometimes. What we can do is
+               using the new zoom factors calculate the new number of pixels visible along x and y.
+               If the adjusted dimensions are bigger than the last window size when the user
+               is actually trying to shrink the window, or smaller when they are trying to enlarge
+               the window, then we will abort the whole zoom/resize operation because they need to
+               drag further to reach a zoom level that can be accurately represented.
+               We should be safe from overflow here as the restrictions on zoom 
+               factors from 1 to MAXZOOMFACTOR protects us.*/
+            unsigned int targetwidth = (unsigned int)(
+              ((unsigned long long)oldwidth * (unsigned long long)zoommul
+              * (unsigned long long)oldzoomdiv) /
+              ((unsigned long long)oldzoommul * (unsigned long long)zoomdiv));
+            unsigned int targetheight = (unsigned int)(
+              ((unsigned long long)oldheight * 
+              (unsigned long long)zoommul * (unsigned long long)oldzoomdiv) /
+              ((unsigned long long)oldzoommul * (unsigned long long)zoomdiv));
+
+            /* Pseudocode: 
+               if (user making window smaller) AND (!useheight AND targetwidth > lastwidth) THEN abort the resize until they drag the window further
+               if (user making window smaller) AND (useheight AND targetheight > lastheight) THEN abort the resize until they drag the window further
+               if (user making window bigger) AND (!useheight AND targetwidth < lastwidth) THEN abort the resize until they drag the window further
+               if (user making window bigger) AND (useheight AND targetheight < lastheight) THEN abort the resize until they drag the window further
+             */
+
+            /* zoomingout is true if user making window smaller */
+            BOOL zoomingout = (useheight && requestedheight < lastheight) ||
+                              (!useheight && requestedwidth < lastwidth);
+            /* zoomingIn is true if user making window bigger */
+            BOOL zoomingin = (useheight && requestedheight > lastheight) ||
+                             (!useheight && requestedwidth > lastwidth);
+            /* We will abort the resize operation if the window has not been
+               dragged far enough to reach the next representable zoom level */
+            BOOL abortresize = FALSE;
+
+            /* The following 2 lines of code constrain both window
+               dimensions meaning the user cannot drag to expose a
+               differently shaped area of the sprite while Ctrl is held.
+               If you'd prefer the dragging to be less constrained then
+               only set newheight if useHeight is true and only set
+               newwidth if it's false.*/
+            newwidth = targetwidth;
+            newheight = targetheight;
+
+            if (useheight)
+            { if ((zoomingout && targetheight >= lastheight) ||
+                  (zoomingin && targetheight <= lastheight))
+                abortresize = TRUE;
+            }
+            else
+            { if ((zoomingout && targetwidth >= lastwidth) ||
+                  (zoomingin && targetwidth <= lastwidth))
+                abortresize = TRUE;
+            }
+
+            if (abortresize)
+            { /* Abort the resize until they drag the window further */
+              newwidth = lastwidth;
+              newheight = lastheight;
+              zoommul = lastzoommul;
+              zoomdiv = lastzoomdiv;
+            }
+            else
+            { /* We need to check if the sprite was smaller than the window
+                 If so, we may want to adjust the size of the margin
+                 These are on-screen widths of sprite (actual width * zoom) */
+              int newspritewidth = swidth * zoommul / zoomdiv;
+              if (newspritewidth < newwidth)
+                newwidth = newspritewidth; /*remove any black border if possible*/
+              /* These are on-screen heights of sprite (actual height * zoom) */
+              int newspriteheight = sheight * zoommul / zoomdiv;
+              if (newspriteheight < newheight)
+                newheight = newspriteheight; /*remove any black border if possible*/
+            }
+
+            /*Apply the zoom*/
+            window->data->sprite.blobsize.scale_xdiv = zoomdiv;
+            window->data->sprite.blobsize.scale_xmul = zoommul;
+            if (!abortresize)
+            { menus_showmag_getstate (&window->data->sprite, newwidth, newheight, FALSE);
+              menus_insdel_frig ();
+            }
+            resize_start->mx = mouse.x;
+            resize_start->my = mouse.y;
+          }
+        }
+      }
+      else
+      { /* Ctrl was not pressed. Regular resize, so do it as normal,
+           then update our drag-to-zoom's initial state. */
+
+        /* Just make sure the window's wide enough for the colour panel */
+        e->data.o.box.x1 = requestedwidth + e->data.o.box.x0;
+
+        wimpt_complain (wimp_open_wind (&e->data.o));
+
+        lastx1 = 0;
+        lasty1 = 0;
+
+        ftracef0 ("Resetting Ctrl-Resize zoom resize_start on open window (Ctrl not pressed).\n");
+        wimp_wstate currinfo;
+        wimpt_noerr (wimp_get_wind_state (window->handle, &currinfo));
+        resize_start->window_width = currinfo.o.box.x1 - currinfo.o.box.x0;
+        resize_start->window_height = currinfo.o.box.y1 - currinfo.o.box.y0;
+        resize_start->zoommul = (unsigned long long)window->data->sprite.blobsize.scale_xmul;
+        resize_start->zoomdiv = (unsigned long long)window->data->sprite.blobsize.scale_xdiv;
+        resize_start->offsetx = -1;
+        resize_start->offsety = -1;
+        resize_start->mx = -1;
+        resize_start->my = -1;
+        psprite_info sinfo;
+        psprite_read_full_info (window->data->sprite.sprite, &sinfo);
+        int spritewidth = sinfo.width;
+        int spriteheight = sinfo.height;
+        /* Convert sprite dimensions to OS Units */
+        int ldx = bbc_modevar (sinfo.mode, bbc_XEigFactor);
+        int ldy = bbc_modevar (sinfo.mode, bbc_YEigFactor);
+        spritewidth <<= ldx;
+        spriteheight <<= ldy;
+        /* Now convert to on-screen zoomed dimensions in OS Units */
+        if (resize_start->zoomdiv)
+        { spritewidth = (int)((unsigned long long)spritewidth * resize_start->zoommul / resize_start->zoomdiv);
+          spriteheight = (int)((unsigned long long)spriteheight * resize_start->zoommul / resize_start->zoomdiv);
+        }
+        resize_start->sprite_width = spritewidth;
+        resize_start->sprite_height = spriteheight;
+      }
+    }
+    break;
+
+    case wimp_EREDRAW:
+    { int more, x, y, gridcol = window->data->sprite.gridcol;
+      wimp_redrawstr rds;
+      wimp_winfo curr;
+      main_scaling_block *scale = &window->data->sprite.blobsize;
+      main_sprite *sprite = window->data->sprite.sprite;
+      main_sprite *translucentlayer = tools_get_layer (sprite);
+      sprite_info sinfo;
+
+      psprite_read_size (sprite, &sinfo);
+
+      sinfo.width  = sinfo.width * scale->scale_xmul/scale->scale_xdiv;
+      sinfo.height = sinfo.height * scale->scale_ymul/scale->scale_ydiv;
+
+      rds.w = e->data.o.w;
+      wimpt_noerr (wimp_redraw_wind (&rds, &more));
+
+      curr.w = e->data.o.w;
+      wimpt_noerr (paintlib_get_wind_info (&curr));
+
+      /*Screen coords of work area origin*/
+      x = rds.box.x0 - rds.scx;
+      y = rds.box.y1 - rds.scy + curr.info.ex.y0;
+
+      /*redraw is replot sprite at current scale, at bottom left of extent
+        plus redrawing of any tool lines currently active */
+
+      if (gridcol == 255) gridcol = 256;
+        /*we know this will wrap conveniently */
+
+      while (more)
+      { wimp_setcolour (gridcol | 1 << 7); /*Fix G-RO-9612 JRC 21 Nov '91
+            Fill the background with gridcolour, not white.*/
+        /*bbc_rectanglefill (x, y, curr.info.ex.x1 - curr.info.ex.x0,
+            curr.info.ex.y1 - curr.info.ex.y0);*/
+        bbc_clg (); /*JRC*/
+
+        /*Fill in the mask E C F.*/
+        if (psprite_transparency_type (sprite) != transparency_type_none)
+        { int x0, y0, x1, y1;
+
+          psprite_ecf (0);
+
+          /*Clipping rectangle is (rds.g.x0, rds.g.y0, rds.g.x1, rds.g.y1);
+            sprite location is (x, y, x + sinfo.width, y + sinfo.height). To
+            fix MED-xxxx, we must get the intersecting box. JRC 7th Dec
+            1994*/
+          x0 = MAX (x, rds.g.x0);
+          y0 = MAX (y, rds.g.y0);
+          x1 = MIN (rds.g.x1, x + sinfo.width);
+          y1 = MIN (rds.g.y1, y + sinfo.height);
+          if (x0 < x1 && y0 < y1)
+          {  ftracef4 ("bbc_rectanglefill (%d, %d, %d, %d)\n",
+                 x0, y0, x1 - x0 - 1, y1 - y0 - 1);
+              bbc_rectanglefill (x0, y0, x1 - x0, y1 - y0);
+          }
+        }
+
+        wimpt_noerr (psprite_plot_scaled (x, y, sprite, scale, 0));
+
+        /* Plot any additional layer (currently only ever 1, used by
+           translucent brushes) on top of the base sprite now */
+        if (translucentlayer != NULL)
+        { main_ttab *oldttab = translucentlayer->transtab;
+          unsigned char translucency = 255 - (unsigned char)translucentlayer->gcol.alpha;
+          /* We may need a different translation table to plot sprite to screen than onto another sprite */
+          translucentlayer->transtab = tools_get_layer_screen_transtab (sprite);
+          os_error *err = psprite_plot_scaled_m (x, y, translucentlayer, scale, 0, 0, translucency);
+          translucentlayer->transtab = oldttab;
+          wimpt_noerr (err);
+        }
+
+        if (gridcol != 256 &&
+            sprite->mode.scale_xmul*scale->scale_xmul >=
+              sprwindow_MIN_GRID*sprite->mode.scale_xdiv*scale->scale_xdiv &&
+            sprite->mode.scale_ymul*scale->scale_ymul >=
+              sprwindow_MIN_GRID*sprite->mode.scale_ydiv*scale->scale_ydiv)
+        { int p, pr, g, gr, rlim, d, n;
+
+          wimp_setcolour (gridcol);
+
+          /*calculate the pixel dimension in integer & fractional parts*/
+          rlim = scale->scale_xdiv;
+          pr   = sprite->mode.scale_xmul*scale->scale_xmul;
+          p    = pr/rlim;
+          d    = rds.g.x0 - x;           /* distance from edge of sprite */
+          n    = d*rlim/pr;              /* number of pixels from edge */
+          pr   = pr - p*rlim;
+          /* pixel size is p+pr/rlim; now calculate where to start */
+          gr = n*pr%rlim;
+
+          for (g = x + n*p + n*pr/rlim; g <= rds.g.x1; g += p)
+          { bbc_move (g, rds.g.y0);
+            bbc_draw (g, rds.g.y1);
+            gr += pr; if (gr >= rlim) { g++; gr -= rlim; }
+          }
+
+          rlim = scale->scale_ydiv;
+          pr   = sprite->mode.scale_ymul * scale->scale_ymul;
+          p    = pr/rlim;
+          d    = rds.g.y0 - y;
+          n    = d*rlim/pr;
+          pr   = pr - p*rlim;
+          gr   = n*pr%rlim;
+
+          for (g = y + n*p + n*pr/rlim; g <= rds.g.y1; g += p)
+          { bbc_move (rds.g.x0, g);
+            bbc_draw (rds.g.x1, g);
+            gr += pr;
+            if (gr >= rlim)
+            { g++;
+              gr -= rlim;
+            }
+          }
+        }
+
+        if (!read_only)
+          toolwindow_current_tool->redraw_action (window, x, y);
+        wimpt_noerr (wimp_get_rectangle (&rds, &more));
+      }
+    }
+    break;
+
+    case wimp_EBUT:
+      /* First make sure any outstanding layer merge was handled */
+      if (!e->data.but.m.bbits & (wimp_BDRAGLEFT | wimp_BDRAGRIGHT))
+        tools_merge_layer_onto (window->data->sprite.sprite);
+
+      if ((e->data.but.m.bbits & (wimp_BLEFT | wimp_BRIGHT)) ||
+          (e->data.but.m.bbits & (wimp_BDRAGLEFT | wimp_BDRAGRIGHT)))
+      { wimp_caretstr caretstr;
+        wimp_get_caret_pos (&caretstr);
+        BOOL hasfocus = caretstr.w == window->handle;
+
+        if (!hasfocus)
+        { /* See if any Paint window has the focus. If it does,
+             or the "extra click" option is disabled, we will
+             allow tool use on this click. */
+          hasfocus = main_has_window (caretstr.w);
+          caretstr.w = window->handle;
+          caretstr.i = -1;
+          caretstr.x = 0;
+          caretstr.y = 0;
+          caretstr.height = 0; /* Invisible caret */
+          caretstr.index = 0;
+
+          wimpt_noerr (wimp_set_caret_pos (&caretstr));
+          wimp_msgstr msg;
+          msg.hdr.size = 24;
+          msg.hdr.your_ref = 0;
+          msg.hdr.action = wimp_MCLAIMENTITY;
+          msg.data.claimentity.flags = wimp_MCLAIMENTITY_flags_caretselect;
+          wimpt_noerr (wimp_sendmessage (wimp_ESEND, &msg, 0));
+          /* If an extra, separate, click is required to set the input focus,
+             as per advanced options, then do nothing further until next click. */
+          if (!hasfocus && main_current_options.advanced.extra_click_focus)
+            break;
+        }
+        /* Read keyboard state to detect Shift+click. */
+        int r1 = 0;
+        int r2 = 255;
+        os_byte (OsByte_RW_KeybStatus, &r1, &r2);
+        /* If Shift is pressed... */
+        if (r1 & 8)
+        { if (e->data.but.m.bbits & wimp_BLEFT)
+          { /* Shift+Select click selects as foreground colour */
+            menus_select_colour (window, FALSE, TRUE);
+            break;
+          }
+          else if (e->data.but.m.bbits & wimp_BRIGHT)
+          { /* Shift+Adjust click selects as background colour */
+            menus_select_colour (window, TRUE, TRUE);
+            break;
+          }
+        }
+      }
+      /* Perform tool action if writeable */
+      if (!read_only) toolwindow_current_tool->click_action (window, &e->data.but.m);
+    break;
+
+    case wimp_EKEY:
+    { char fake_menu_hit[] = "\0\0\0\0";
+      main_sprite *sprite = window->data->sprite.sprite;
+      sprite_area **sarea = &sprite->file->spritearea;
+      sprite_id sid;
+      char name [NAME_LIMIT + 1];
+      wimp_mousestr mouse;
+
+      /* First make sure any outstanding layer merge was handled */
+      tools_merge_layer_onto (window->data->sprite.sprite);
+
+      sid.tag = sprite_id_name;
+      sid.s.name = COPY_N (name, psprite_address (sprite)->name, NAME_LIMIT);
+        /*doesn't flex*/
+
+      switch (e->data.key.chcode)
+      { case akbd_Fn + 1: /* F1 to show / hide grid */
+          window->data->sprite.gridcol =
+            window->data->sprite.gridcol == 255?
+            main_current_options.grid.colour: 255;
+          main_current_options.grid.show = window->data->sprite.gridcol !=
+            255;
+          main_force_redraw (window->handle);
+        break;
+        case akbd_Fn + 1 + akbd_Ctl: /* Ctrl-F1 to show tools */
+          toolwindow_display (/*at pointer?*/ TRUE);
+          main_current_options.tools.show_tools = TRUE;
+        break;
+        case akbd_Fn + 1 + akbd_Ctl + akbd_Sh: /* Ctrl-Shift-F1 to show colours */
+          colours_create_window (window->data->sprite.sprite, FALSE);
+          main_current_options.colours.show_colours = TRUE;
+        break;
+#if 0 /* dboxtcol currently won't work without a parent menu tree */
+        case 'P' - 64: /* Ctrl-P to edit palette */
+          if (psprite_haspal (window->data->sprite.sprite))
+          { fake_menu_hit[0] = s_Paint;
+            fake_menu_hit[1] = s_Paint_Edit_Pal;
+            fake_menu_hit[2] = 1;
+            menus_sprite_handler (window, fake_menu_hit);
+          }
+        break;
+#endif
+        case akbd_Fn + 3: /* F3 to save */
+          /*If there is only one sprite, offer to save the whole sprite
+              file. This acts as a counterpart to the code that opens a
+              sprite window if there is only one sprite. J R C 7th Feb 1995*/
+          if (window->data->sprite.sprite->file->spritearea->number == 1)
+            menus_save_file (window->data->sprite.sprite->file->window, TRUE);
+          else
+            menus_save_sprite (window->data->sprite.sprite);
+        break;
+        case akbd_Fn + 3 + akbd_Ctl: /* Ctrl-F3 to save palette */
+          if (psprite_haspal (window->data->sprite.sprite))
+          { fake_menu_hit[0] = s_Save;
+            fake_menu_hit[1] = s_Save_Palette;
+            fake_menu_hit[2] = 1;
+            menus_sprite_handler (window, fake_menu_hit);
+          }
+        break;
+        case akbd_Fn + 2: /* F2 to flip vertically */
+          ftracef0 ("flip x\n");
+          wimpt_complain (sprite_flip_x (*sarea, &sid));
+          main_force_redraw (window->handle);
+        break;
+        case akbd_Fn + 2 + akbd_Sh: /* Shift-F2 to flip horizontally */
+          ftracef0 ("flip y\n");
+          wimpt_complain (sprite_flip_y (*sarea, &sid));
+          main_force_redraw (window->handle);
+        break;
+        case 'R' - 64: /* Ctrl-R to rotate */ 
+          menus_transform_dbox (window, s_Edit_Rotate);
+        break;
+        case akbd_Fn + 4: /* F4 to scale x */
+          menus_transform_dbox (window, s_Edit_Scale_X);
+        break;
+        case akbd_Fn + akbd_Sh + 4: /* Shift-F4 to scale y */
+          menus_transform_dbox (window, s_Edit_Scale_Y);
+        break;
+        case 'H' - 64: /* Ctrl-H to shear */
+          menus_transform_dbox (window, s_Edit_Shear);
+        break;
+        case 'D' - 64: /* Ctrl-D to adjust DPI */
+          menus_edit_dpi (window->data->sprite.sprite, &sid);
+        break;
+        case akbd_Fn + 5: /* F5 to insert columns */
+          menus_insdel (window, TRUE, TRUE, TRUE, TRUE);
+        break;
+        case akbd_Fn + 5 + akbd_Sh: /* Shift-F5 to delete columns */
+          menus_insdel (window, TRUE, FALSE, TRUE, TRUE);
+        break;
+        case akbd_Fn + 6: /* F6 to insert rows */
+          menus_insdel (window, FALSE, TRUE, TRUE, TRUE);
+        break;
+        case akbd_Fn + 6 + akbd_Sh: /* Shift-F6 to delete rows */
+          menus_insdel (window, FALSE, FALSE, TRUE, TRUE);
+        break;
+        case akbd_Fn + 8:
+          /* F8 to undo */
+        break;
+        case akbd_Fn + 9:
+          /* F9 to redo */
+        break;
+        case 'Q' - 64: /* Ctrl-Q to zoom out */
+          wimpt_noerr (wimp_get_point_info (&mouse));
+          menus_zoom_savemouse (&window->data->sprite, &mouse);
+          if (window->data->sprite.blobsize.scale_xmul > 1)
+            window->data->sprite.blobsize.scale_xmul--;
+          else if (window->data->sprite.blobsize.scale_xdiv < MAXZOOMFACTOR)
+            window->data->sprite.blobsize.scale_xdiv++;
+          menus_showmag (&window->data->sprite);
+        break;
+        case 'S' - 64: /* Ctrl-S to adjust size*/
+          menus_adjust_size (window->data->sprite.sprite);
+        break;
+        case 'W' - 64: /* Ctrl-W to zoom in */
+          wimpt_noerr (wimp_get_point_info (&mouse));
+          menus_zoom_savemouse (&window->data->sprite, &mouse);
+          if (window->data->sprite.blobsize.scale_xdiv > 1)
+            window->data->sprite.blobsize.scale_xdiv--;
+          else if (window->data->sprite.blobsize.scale_xmul < MAXZOOMFACTOR)
+            window->data->sprite.blobsize.scale_xmul++;
+          menus_showmag (&window->data->sprite);
+        break;
+        case akbd_PrintK: /* PRINT to, take a guess */
+          menus_print_sprite (window->data->sprite.sprite, TRUE);
+        break;
+        default:
+          ftracef1 ("Unsupported key code %d\n", e->data.key.chcode);
+          wimp_processkey (e->data.key.chcode);
+        break;
+      }
+    }
+    break;
+
+    case wimp_ESCROLL: /* Support for mousewheel to scroll and zoom */
+    { static int eventcount = -1;
+      static int scrollfix = 0; /*Workaround for odd RISC OS 5 mousewheel behaviour*/
+      BOOL ismousewheel = TRUE;
+      wimp_mousestr mouse;
+
+      ftracef2("wimp_ESCROLL in sprite window. scroll.x: %d scroll.y: %d\n", e->data.scroll.x, e->data.scroll.y);
+      wimpt_noerr (wimp_get_point_info (&mouse));
+      /* If the pointer is over the scroll bar / buttons and select / adjust clicked, don't skip any scroll events. */
+      if ((mouse.bbits & (wimp_BRIGHT | wimp_BLEFT)) &&
+          ((mouse.i <= -6 && mouse.i >= -8) || (mouse.i <= -10 && mouse.i >= -12)))
+      { ftracef0("Mouse is over vertical scroll bar / buttons. Scroll fix inactive.\n");
+        if (eventcount > 0)
+          eventcount = 0;
+        ismousewheel = FALSE;
+      }
+
+      if (eventcount <= 0 && (e->data.scroll.x || e->data.scroll.y))
+      { /*Read keyboard state.*/
+        int r1 = 0;
+        int r2 = 255;
+        if (ismousewheel)
+          os_byte (OsByte_RW_KeybStatus, &r1, &r2);
+        /*Turn extended scroll requests into old-style & saturate*/
+        if ((e->data.scroll.x & 3) == 0 && (e->data.scroll.y & 3) == 0)
+        { if (e->data.scroll.y < -8)     e->data.scroll.y = -2;
+          else if (e->data.scroll.y > 8) e->data.scroll.y = 2;
+          else                           e->data.scroll.y >>= 2;
+          if (e->data.scroll.x < -8)     e->data.scroll.x = -2;
+          else if (e->data.scroll.x > 8) e->data.scroll.x = 2;
+          else                           e->data.scroll.x >>= 2;
+        }
+        /*If Ctrl pressed, adjust the zoom level*/
+        if (r1 & 0x40)
+        { if (e->data.scroll.y == -1)
+          { /* Zoom out */
+            menus_zoom_savemouse (&window->data->sprite, &mouse);
+            if (window->data->sprite.blobsize.scale_xmul > 1)
+              window->data->sprite.blobsize.scale_xmul--;
+            else if (window->data->sprite.blobsize.scale_xdiv < MAXZOOMFACTOR)
+              window->data->sprite.blobsize.scale_xdiv++;
+            menus_showmag (&window->data->sprite);
+          }
+          else if (e->data.scroll.y == 1)
+          { /* Zoom in */
+            menus_zoom_savemouse (&window->data->sprite, &mouse);
+            if (window->data->sprite.blobsize.scale_xdiv > 1)
+              window->data->sprite.blobsize.scale_xdiv--;
+            else if (window->data->sprite.blobsize.scale_xmul < MAXZOOMFACTOR)
+              window->data->sprite.blobsize.scale_xmul++;
+            menus_showmag (&window->data->sprite);
+          }
+        }
+        else
+        { /*If Shift pressed, scroll horizontally with mousewheel*/
+          if ((r1 & 8) && e->data.scroll.y)
+          { e->data.scroll.x = -e->data.scroll.y;
+            e->data.scroll.y = 0;
+          }
+          /*Handle the scroll (or scroll-shift) request*/
+          switch (e->data.scroll.x)
+          { case -2: e->data.scroll.o.x -= (e->data.scroll.o.box.x1 - e->data.scroll.o.box.x0); break;
+            case -1: e->data.scroll.o.x -= 64; break;
+            case 1:  e->data.scroll.o.x += 64; break;
+            case 2:  e->data.scroll.o.x += (e->data.scroll.o.box.x1 - e->data.scroll.o.box.x0); break;
+          }
+          switch (e->data.scroll.y)
+          { case -2: e->data.scroll.o.y -= (e->data.scroll.o.box.y1 - e->data.scroll.o.box.y0); break;
+            case -1: e->data.scroll.o.y -= 64; break;
+            case 1:  e->data.scroll.o.y += 64; break;
+            case 2:  e->data.scroll.o.y += (e->data.scroll.o.box.y1 - e->data.scroll.o.box.y0); break;
+          }
+          if (wimpt_complain (wimp_open_wind (&e->data.scroll.o)))
+            return;
+          /* Scroll position changed, so reset offsets for zoom calculation */
+          window->data->sprite.resizestart.offsetx = -1;
+          window->data->sprite.resizestart.offsety = -1;
+          window->data->sprite.resizestart.window_width = 0;
+          window->data->sprite.resizestart.window_height = 0;
+        }
+      }
+      if (eventcount == -1)
+      { /* Version 0.25 to 1.30 of USBDriver have a "feature" that sends 5 scroll events per mouse wheel step */
+        os_error *err = os_cli("RMEnsure USBDriver 0.25");
+        os_error *err2 = os_cli("RMEnsure USBDriver 1.30");
+        /* If the first doesn't error but the second does, we have a troublesome version */
+        scrollfix = (err == NULL) && (err2 != NULL);
+        eventcount = 0;
+      }
+      if (scrollfix)
+      { eventcount++;
+        ftracef1("scrollFix active. eventCount %d\n", eventcount);
+        if (eventcount >=5)
+          eventcount = 0;
+      }
+    }
+    break;
+
+    case wimp_ECLOSE:
+      ftracef0 ("Window close event\n");
+      sprwindow_delete (window);
+    break;
+
+    case wimp_EPTRLEAVE:
+      if (!read_only && window->data->sprite.sprite->needsnull)
+      { /* First make sure any outstanding layer merge was handled */
+        tools_merge_layer_onto (window->data->sprite.sprite);
+
+        main_claim_idle (lastnullholder);
+      }
+    break;
+
+    case wimp_EPTRENTER:
+      if (!read_only && window->data->sprite.sprite->needsnull)
+        sprwindow_claim_idle_events (window);
+    break;
+
+    case wimp_ELOSECARET:
+      hasfocus = FALSE;
+      ftracef0 ("Lost caret\n");
+    break;
+
+    case wimp_EGAINCARET:
+      /*Dont' flag it; wait for any click event!*/
+      ftracef0 ("Gained caret\n");
+    return;
+
+    case wimp_ESEND:
+    case wimp_ESENDWANTACK:
+      if (e->data.msg.hdr.action == wimp_MHELPREQUEST)
+      { ftracef0 ("Help request on sprite window\n");
+        main_help_message ("PntH2", e);
+      }
+      else if (e->data.msg.hdr.action == wimp_MCLAIMENTITY)
+      { ftracef0 ("Claim entity msg on sprite window\n");
+        /*Lost focus?*/
+        wimp_t task_handle = wimpt_task ();
+        if (e->data.msg.hdr.task != task_handle)
+        { if (e->data.msg.data.claimentity.flags & wimp_MCLAIMENTITY_flags_caretselect)
+          { /*We lost the input focus*/
+           hasfocus = FALSE;
+           ftracef0 ("Lost input focus\n");
+          }
+          if (e->data.msg.data.claimentity.flags & wimp_MCLAIMENTITY_flags_clipboard)
+          { /*We lost the clipboard focus*/
+          }
+        }
+      }
+      else if (!read_only)
+      { char *name, *rgb, palfile [6*256 + 1] /*room for our palette data*/;
+        int i, entries, size, palette [256] /*the palette itself*/, mode;
+        BOOL old;
+
+        mode = psprite_address (window->data->sprite.sprite)->mode;
+
+        if (check_palette_type (xferrecv_checkinsert (&name), name))
+        { /*Load the file if it's not too big.*/
+          os_filestr file_str;
+
+          file_str.action = 5 /*read catalogue info*/;
+          file_str.name   = name;
+          if (wimpt_complain (os_file (&file_str)) != NULL)
+            break;
+
+          if (file_str.action != 1)
+          { file_str.loadaddr = file_str.action;
+            file_str.action   = 19 /*report error*/;
+            wimpt_complain (os_file (&file_str));
+            break;
+          }
+          size = file_str.start;
+          ftracef1 ("palette file size is %d\n", size);
+
+          if (size > 6*256)
+          { werr (FALSE, msgs_lookup ("PntE1"), name);
+            break;
+          }
+
+          file_str.action = 16 /*load file*/;
+          file_str.loadaddr = (int) palfile;
+          file_str.execaddr = 0 /*load at R2*/;
+          if (wimpt_complain (os_file (&file_str)) != NULL)
+            break;
+
+          ftracef0 ("Read palette\n");
+        }
+        else if (check_palette_type (xferrecv_checkimport (&size), NULL))
+        { size = xferrecv_doimport (palfile, sizeof(palfile),
+              &cant_extend_stack_buffer);
+          ftracef1 ("Imported %d byte palette\n", size);
+        }
+
+        /*How many entries in the palette we just got?*/
+        old = FALSE;
+        switch (size)
+        { case 6*2:
+            entries = 2;
+          break;
+
+          case 6*4:
+            entries = 4;
+          break;
+
+          case 60 /*Arthur 1.2 format*/:
+            old = TRUE;
+          /*fall through*/
+
+          case 6*16:
+          case 6*16 + 6*4 /*with mouse+border colours*/:
+            entries = 16;
+          break;
+
+          case 6*256:
+            entries = 256;
+          break;
+
+          default:
+            werr (FALSE, msgs_lookup ("PntE1"));
+            entries = 0;
+          break;
+        }
+        if (entries == 0) break;
+
+        ftracef1 ("that means we need a sprite with %d colours\n", entries);
+        if (entries != 1 << (1 << bbc_modevar (mode, bbc_Log2BPP)))
+        { werr (FALSE, msgs_lookup ("PntE1"));
+          break;
+        }
+
+        xferrecv_insertfileok ();
+
+        /*Copy the data out of the palette file*/
+        rgb = !old? &palfile [3]: &palfile [0];
+        for (i = 0; i < entries; i++)
+        { palette [i] = *rgb << 8 | *(rgb + 1) << 16 | *(rgb + 2) << 24;
+          rgb += !old? 6: 3;
+        }
+
+        menus_set_palette (window->data->sprite.sprite, entries, palette);
+        ftracef0 ("palette loaded\n");
+      }
+    break;
+
+    default:
+      ftracef1 ("Sprite window event %d\n", e->e);
+    break;
+  }
+
+  menus_insdel_frig ();
+}
+
+/*******************************************************************
+ *                                                                 *
+ *  Delete a sprite window with given sprite                       *
+ *                                                                 *
+ *******************************************************************/
+
+void sprwindow_delete (main_window *window)
+
+{ main_sprite_window *us, *beforeus;
+
+  ftracef0 ("sprwindow_delete\n");
+  ftracef1 ("sprwindow_delete: deleting main_window 0x%X\n", window);
+  us = &window->data->sprite;
+
+  ftracef1 ("sprwindow_delete: freeing title \"%s\"\n", us->title);
+  m_FREE (us->title, TITLE_LIMIT);
+
+  beforeus = /*(main_sprite_window *) &*/us->sprite->windows;
+  if (beforeus != us)
+  { while (beforeus != NULL && beforeus->link != us)
+      beforeus = beforeus->link;
+
+    if (beforeus != NULL)
+      beforeus->link = us->link;
+    else
+      ftracef0 ("oh god a sprite window's gone walkies\n");
+  }
+
+  /*If we are pointed at by the main_sprite for this sprite, set it to
+    our successor.*/
+  if (us->sprite->windows == us)
+  { ftracef1 ("deleting the chain header main_sprite_window - "
+        "setting sprite->windows to 0x%X\n", us->link);
+    us->sprite->windows = us->link;
+  }
+
+  /* are we closing the last window on a sprite */
+  if (us->sprite->windows == NULL)
+  { ftracef0 ("closing the last window on a sprite\n");
+
+    colours_delete_window (us->sprite, -1);
+
+    if (toolwindow_current_tool == &tools_brushpaint)
+      psprite_drop_translation ((main_ttab **) &us->sprite->toolspace [2]);
+  }
+
+  sprwindow_set_window_titles (us->sprite); /*there might not be any*/
+
+  if (us->colourpanel != NULL)
+    m_FREE (us->colourpanel, sizeof (colour_panel));
+
+  main_window_delete (window);
+}
+
+/***********************************************************************
+ *                                                                     *
+ *  Create a new sprite window with given sprite                       *
+ *                                                                     *
+ ***********************************************************************/
+
+void sprwindow_new (main_sprite *sprite)
+
+{ main_window *window;
+  main_sprite_window *sprite_window;
+  wimp_wind wind;
+  wimp_openstr open_str;
+  wimp_w w;
+  sprite_info info;
+
+  ftracef0 ("sprwindow_new\n");
+  if ((window = m_ALLOC (sizeof (main_window))) == NULL)
+  { main_NO_ROOM ("sprite window descriptor");
+    return;
+  }
+
+  if ((sprite_window = m_ALLOC (sizeof (main_sprite_window))) == NULL)
+  { main_NO_ROOM ("main_sprite_window");
+    m_FREE (window, sizeof (main_window));
+    return;
+  }
+
+  wind = sprwindow_template.t;
+
+  psprite_read_size (sprite, &info);
+  wind.ex.y1 = 0;
+  wind.ex.y0 = -info.height*main_current_options.zoom.mul/
+      main_current_options.zoom.div;
+  wind.ex.x0 = 0;
+  wind.ex.x1 = info.width*main_current_options.zoom.mul/
+      main_current_options.zoom.div;
+  main_allocate_position (&wind.box);
+  wind.colours [wimp_WCWKAREABACK] = '\377';
+  wind.colours[wimp_WCRESERVED] = 2; /*Enable extended scroll requests for mouse wheel*/
+  wind.flags = (wimp_wflags) (wind.flags | wimp_WIGNORE_H_SIZE /*Enable ignore window extent when*/
+                                         | wimp_WIGNORE_V_SIZE /*adjusting size (for ctrl + zoom)*/);
+
+  wind.titleflags = (wimp_iconflags) (wind.titleflags | wimp_INDIRECT);
+  if ((wind.title.indirecttext.buffer = m_ALLOC (TITLE_LIMIT)) == NULL)
+  { m_FREE (sprite_window, sizeof (main_sprite_window));
+    m_FREE (window, sizeof (main_window));
+    main_NO_ROOM ("indirect title - sprite window");
+    return;
+  }
+  wind.title.indirecttext.bufflen = TITLE_LIMIT;
+  wind.title.indirecttext.validstring = 0;
+
+  sprite_window->title = wind.title.indirecttext.buffer;
+
+  if (!main_create_window (&wind, &w, &sprwindow_event_handler,
+      window))
+  { m_FREE (wind.title.indirecttext.buffer, TITLE_LIMIT);
+    m_FREE (sprite_window, sizeof (main_sprite_window));
+    m_FREE (window, sizeof (main_window));
+    return;
+  }
+
+  sprite_window->link                = sprite->windows;
+  sprite_window->window              = window;
+  sprite_window->sprite              = sprite;
+  sprite_window->blobsize.scale_xmul =
+  sprite_window->blobsize.scale_ymul = main_current_options.zoom.mul;
+  sprite_window->blobsize.scale_xdiv =
+  sprite_window->blobsize.scale_ydiv = main_current_options.zoom.div;
+  sprite_window->minwidth = 0; /*Will be updated in colourpanel_new()*/
+  sprite_window->resizestart.mx = 0;
+  sprite_window->resizestart.my = 0;
+  sprite_window->resizestart.swidth = 0;
+  sprite_window->resizestart.sheight = 0;
+  sprite_window->resizestart.sprite_width = 0;
+  sprite_window->resizestart.sprite_height = 0;
+  sprite_window->resizestart.window_width = 0;
+  sprite_window->resizestart.window_height = 0;
+  sprite_window->resizestart.offsetx = -1;
+  sprite_window->resizestart.offsety = -1;
+  sprite_window->resizestart.zoommul = 0L;
+  sprite_window->resizestart.zoomdiv = 0L;
+  sprite_window->gridcol             = main_current_options.grid.show?
+      main_current_options.grid.colour: 255;
+  sprite_window->read_only           = FALSE;
+
+  sprite->windows = sprite_window;
+
+  event_attachmenumaker (w, &menus_sprite_maker,
+      &menus_sprite_handler, window);
+
+  open_str.w = w;
+  open_str.box = wind.box;
+  open_str.behind = -1;
+  open_str.x = 0;
+  open_str.y = 0;
+  wimpt_noerr (wimp_open_wind (&open_str));
+  win_activeinc ();
+
+  window->link = main_windows;
+  main_windows = window;
+  window->handle = w;
+  window->tag = main_window_is_sprite;
+  window->data = (main_info_block *) sprite_window;
+  /*Selection's currently for file windows but clear it for safety anyway*/
+  memset (&window->selection, 0, sizeof(window->selection));
+
+  sprwindow_set_window_titles (sprite);
+  sprwindow_set_work_extent (window, TRUE);
+  main_check_position (window);
+
+  if (main_current_options.colours.show_colours && !sprite_window->read_only)
+    colours_create_window (sprite, FALSE);
+
+  /*Create fore/background colour selection panel at bottom of window RO 3.8+*/
+  sprite_window->colourpanel = colourpanel_new (sprite_window);
+
+  /*For a small or zoomed-out sprite, it's possible the window was already
+    opened too narrow to fit the colour panel without squashing buttons.
+    If so, we have to reopen it.*/
+  if (open_str.box.x1 - open_str.box.x0 < sprite_window->minwidth)
+    menus_showmag_getstate (sprite_window, 0, 0, FALSE);
+
+  /*Fix MED-xxxx: brush translation tables are only maintained for open
+    windows, so create one now if necessary. J R C 26th Jul 1994*/
+  if (sprite_window->link == NULL /*first window on this sprite*/)
+  { if (toolwindow_current_tool == &tools_brushpaint &&
+        tools_brushsprite_ptr != NULL)
+      psprite_set_brush_translation (sprite, FALSE);
+  }
+}

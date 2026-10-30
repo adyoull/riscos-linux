@@ -1,0 +1,31 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Central module state shared across LanManFS translation units. */
+
+struct LMvars {
+  char machinename[NAME_LIMIT];  // Local NetBIOS machine name
+  char drivername[NAME_LIMIT];   // Name of DCI4 driver to which attached
+  char workgroup[NAME_LIMIT];    // Workgroup to browse
+  char username[USERNAME_LIMIT]; // Default user e.g. 'guest'
+  int namemode;                  // Filename case-folding mode (NM_*)
+  bool cache_off;                // Mounts made from now on run without a cache (*LMCache Off)
+  bool logged_on;                // Whether a default credential is currently held
+  char *password_ptr;            // Default password, jumbled; points at Logon's buffer, which holds "" when none
+  int initialised;               // LMInitState_* progress through module bring-up
+  int default_type;              // Filetype for which no ",xxx" suffix is added on the wire
+  int untyped_address;           // Base of the OS ROM, used as load/exec address for untyped files
+};
+
+extern struct LMvars LM_Vars;

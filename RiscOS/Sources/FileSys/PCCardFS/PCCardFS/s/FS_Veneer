@@ -1,0 +1,241 @@
+; Copyright 1996 Acorn Computers Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+
+;*****************************************************************************************
+;***                                                                                   ***
+;***  FS_Veneer.s                                                                      ***
+;***                                                                                   ***
+;***  Application:   PCCardFS Module                                                   ***
+;***  Version:       0.01                                                              ***
+;***                                                                                   ***
+;***  By:            Neil Critchell, Acorn Computers Ltd.                              ***
+;***  Date:          25th October 1993                                                 ***
+;***                                                                                   ***
+;***                                                                                   ***
+;***  Purpose:       Contains the Filing System entry point's veneer routines.         ***
+;***                                                                                   ***
+;***                                                                                   ***
+;***  History:       0.01 25th October 1993 - Original version                         ***
+;***                                                                                   ***
+;***                                                                                   ***
+;*****************************************************************************************
+
+        GET     Hdr:ListOpts
+        GET     Hdr:Macros
+        GET     Hdr:System
+
+        IMPORT  |_Lib$Reloc$Off$DP|
+
+        AREA |C$$code|, CODE, READONLY
+
+;*****************************************************************************************
+;***    Define Constants                                                               ***
+;*****************************************************************************************
+
+
+ModRelocOffset  *       0              ; subject to deferred relocation
+SomeOffset      *       0
+
+
+
+;*****************************************************************************************
+;***    Exprorted Values                                                               ***
+;*****************************************************************************************
+
+        EXPORT  PCCardFS_DiscOpVeneer
+        EXPORT  PCCardFS_MiscOpVeneer
+
+
+
+;*****************************************************************************************
+;***    Improrted Values                                                               ***
+;*****************************************************************************************
+
+        IMPORT  Do_DiscOp
+        IMPORT  Do_MiscOp
+
+
+
+
+
+
+
+
+;*****************************************************************************************
+;*****************************************************************************************
+;***                                                                                   ***
+;***            Veneer Code Starts here                                                ***
+;***                                                                                   ***
+;*****************************************************************************************
+;*****************************************************************************************
+
+
+
+;*****************************************************************************************
+;***                                                                                   ***
+;***  PCCardFS_DiscOpVeneer                                                            ***
+;***                                                                                   ***
+;***  _kernel_oserror PCCardFS_DiscOp(_kernel_swi_regs *r)                             ***
+;***                                                                                   ***
+;***  The veneer code used to allow DiscOp calls to be implmented in 'C'. The Veneer   ***
+;***  sets up the various parameters needed and sets R12 to the private word, so that  ***
+;***  modules static data can be reached.                                              ***
+;***  The veneer will then call the 'C' Function 'PCCardFS_DiscOp' as specified above. ***
+;***  On return from the 'C' function registers r0 - r9 are, set to the return vaules, ***
+;***  and V is set if an error was returned, al other registers are restored.          ***
+;***                                                                                   ***
+;***  On Entry:                                                                        ***
+;***    R0 - R9 Various parameters                                                     ***
+;***    R12     Pointer to private word (I hope)                                       ***
+;***    R13     Pointer to full descending stack (again I hope)                        ***
+;***    R14     Return address                                                         ***
+;***                                                                                   ***
+;***  On Exit:                                                                         ***
+;***    R0 - R9 Returned parameters                                                    ***
+;***    V Clear Function successful                                                    ***
+;***    V Set   Function returned an error.                                            ***
+;***            R0 = Error                                                             ***
+;***                 R0 >= 255, FileCore error No.                                     ***
+;***                 Bit 30 set, R0 & 0x3FFFFFFF is pointer to error block             ***
+;***                 Bit 31 set, Disc error (see PRMs)                                 ***
+;***                                                                                   ***
+;***    Preserved:                                                                     ***
+;***       R10 - R13, N, Z & V flags                                                   ***
+;*****************************************************************************************
+
+PCCardFS_DiscOpVeneer
+
+        STMFD   sp!, {r0-r9, sl, fp, r12, lr}   ; create args in store; save lr etc;
+
+        MOV     sl, sp, LSR #20
+        MOV     sl, sl, ASL #20                 ; SP_LWM
+
+        LDMIA   sl, {v1, v2}                    ; save old reloc modifiers over fn call
+
+        LDR     r12, [r12]                      ; -> static data
+        LDMIB   r12, {fp, r12}                  ; new relocation modifiers
+        STMIA   sl,  {fp, r12}                  ; set by module init
+        MOV     fp, #0                          ; halt C backtrace here!
+
+        ; This is equivalent of 'ADD r10, r10, #0' + |_Lib$Reloc$Off$DP|
+        DCD     |_Lib$Reloc$Off$DP| + &E28AA000
+
+        MOV     a1, sp                          ; 'r', put into a1(r0) for input parameter
+        BL      Do_DiscOp                       ; finally call the function
+
+        ; This is equivalent of 'SUB r10, r10, #0' + |_Lib$Reloc$Off$DP|
+        DCD     |_Lib$Reloc$Off$DP| + &E24AA000
+
+        STMIA   sl, {v1, v2}                    ; restore old reloc modifiers
+
+        CMP     r0, #0                          ; check return from PCCardFS_DiscOp function
+        STRNE   r0, [sp]                        ; if error, store new r0 on stack
+                                                ; (NB. will be pulled of stack as r0)
+
+        LDMFD   sp!, {r0-r9, sl, fp, r12, lr}   ; restore (pos modified) regs
+
+        TEQ     pc, pc                          ; select 26b or 32b return
+        BEQ     %FT10
+
+        CMP     r0, #0                          ; test error return again
+        BICEQS  pc, lr, #V_bit                  ; V clear if return value was 0
+        ORRS    pc, lr, #V_bit                  ; & V set
+10
+        CMP     r0, #0
+        SETV    NE
+        CLRV    EQ
+        MOV     pc, lr
+
+
+
+;*****************************************************************************************
+;***                                                                                   ***
+;***  PCCardFS_MiscOpVeneer                                                            ***
+;***                                                                                   ***
+;***  _kernel_oserror PCCardFS_MiscOp(_kernel_swi_regs *r)                             ***
+;***                                                                                   ***
+;***  The veneer code used to allow MiscOp calls to be implmented in 'C'. The Veneer   ***
+;***  sets up the various parameters needed and sets R12 to the private word, so that  ***
+;***  modules static data can be reached.                                              ***
+;***  The veneer will then call the 'C' Function 'PCCardFS_MiscOp' as specified above. ***
+;***  On return from the 'C' function registers r0 - r9 are, set to the return vaules, ***
+;***  and V is set if an error was returned, al other registers are restored.          ***
+;***                                                                                   ***
+;***  On Entry:                                                                        ***
+;***    R0 - R9 Various parameters                                                     ***
+;***    R12     Pointer to private word (I hope)                                       ***
+;***    R13     Pointer to full descending stack (again I hope)                        ***
+;***    R14     Return address                                                         ***
+;***                                                                                   ***
+;***  On Exit:                                                                         ***
+;***    R0 - R9 Returned parameters                                                    ***
+;***    V Clear Function successful                                                    ***
+;***    V Set   Function returned an error.                                            ***
+;***            R0 = Error                                                             ***
+;***                 R0 >= 255, FileCore error No.                                     ***
+;***                 Bit 30 set, R0 & 0x3FFFFFFF is pointer to error block             ***
+;***                 Bit 31 set, Disc error (see PRMs)                                 ***
+;***                                                                                   ***
+;***    Preserved:                                                                     ***
+;***       R10 - R13, N, Z & V flags                                                   ***
+;*****************************************************************************************
+
+PCCardFS_MiscOpVeneer
+
+        STMFD   sp!, {r0-r9, sl, fp, r12, lr}   ; create args in store; save lr etc;
+
+        MOV     sl, sp, LSR #20
+        MOV     sl, sl, ASL #20                 ; SP_LWM
+
+        LDMIA   sl, {v1, v2}                    ; save old reloc modifiers over fn call
+
+        LDR     r12, [r12]                      ; -> static data
+        LDMIB   r12, {fp, r12}                  ; new relocation modifiers
+        STMIA   sl,  {fp, r12}                  ; set by module init
+        MOV     fp, #0                          ; halt C backtrace here!
+
+        ; This is equivalent of 'ADD r10, r10, #0' + |_Lib$Reloc$Off$DP|
+        DCD     |_Lib$Reloc$Off$DP| + &E28AA000
+
+        MOV     a1, sp                          ; 'r', put into a1(r0) for input parameter
+        BL      Do_MiscOp                       ; finally call the function
+
+        ; This is equivalent of 'SUB r10, r10, #0' + |_Lib$Reloc$Off$DP|
+        DCD     |_Lib$Reloc$Off$DP| + &E24AA000
+
+        STMIA   sl, {v1, v2}                    ; restore old reloc modifiers
+
+        CMP     r0, #0                          ; check return from PCCardFS_MiscOp function
+        STRNE   r0, [sp]                        ; if error, store new r0 on stack
+                                                ; (NB. will be pulled of stack as r0)
+
+        LDMFD   sp!, {r0-r9, sl, fp, r12, lr}   ; restore (pos modified) regs
+
+        TEQ     pc, pc                          ; select 26b or 32b return
+        BEQ     %FT10
+
+        CMP     r0, #0                          ; test error return again
+        BICEQS  pc, lr, #V_bit                  ; V clear if return value was 0
+        ORRS    pc, lr, #V_bit                  ; & V set
+10
+        CMP     r0, #0
+        SETV    NE
+        CLRV    EQ
+        MOV     pc, lr
+
+
+
+        END
+

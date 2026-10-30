@@ -1,0 +1,385 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*> c.DOSctl <*/
+/*-------------------------------------------------------------------------*/
+/* DOSFS image FS interface to FileSwitch                                  */
+/*-------------------------------------------------------------------------*/
+
+#include <stdlib.h>
+#include <stdint.h>
+#include "DebugLib/DebugLib.h"
+#include "Interface/LowFSI.h"
+
+#include "DOSFS.h"
+#include "DOSFSHdr.h"
+#include "MsgTrans.h"
+#include "Ops.h"
+
+#define CHECK_SPARE_STACK_SPACE do                                     \
+                                {                                      \
+                                  uintptr_t base, sp = __current_sp(); \
+                                  base = (sp >> 20) << 20; /* MB */    \
+                                  if ((sp - base) < 0x400)             \
+                                  {                                    \
+                                    return global_error(err_nostack);  \
+                                  }                                    \
+                                } while (0)
+#define RETURN_RESULT           return ((int)result == -1) ? _syserr : NULL
+
+/*!
+ * \param  r Register set from FileSwitch
+ * \param  pw Private word
+ * \return Error pointer
+ */
+_kernel_oserror *dosctl_fsentry_open_handler(_kernel_swi_regs *r, void *pw)
+{
+  FS_open_block *result;
+
+  CHECK_SPARE_STACK_SPACE;
+  UNUSED(pw);
+
+  result = DOSFS_open_file(r->r[0], (char *)r->r[1], (DOSdisc *)r->r[6]);
+  if ((int)result != -1)
+  {
+    r->r[0] = result->information;
+    r->r[1] = (int)result->inhand;
+    r->r[2] = result->buffsize;
+    r->r[3] = result->fileext;
+    r->r[4] = result->falloc;
+  }
+
+  RETURN_RESULT;
+}
+
+/*!
+ * \param  r Register set from FileSwitch
+ * \param  pw Private word
+ * \return Error pointer
+ */
+_kernel_oserror *dosctl_fsentry_close_handler(_kernel_swi_regs *r, void *pw)
+{
+  int result;
+
+  CHECK_SPARE_STACK_SPACE;
+  UNUSED(pw);
+
+  result = DOSFS_close_file((FILEhand *)r->r[1], r->r[2], r->r[3]);
+
+  RETURN_RESULT;
+}
+
+/*!
+ * \param  r Register set from FileSwitch
+ * \param  pw Private word
+ * \return Error pointer
+ */
+_kernel_oserror *dosctl_fsentry_getbytes_handler(_kernel_swi_regs *r, void *pw)
+{
+  int result;
+
+  CHECK_SPARE_STACK_SPACE;
+  UNUSED(pw);
+
+  result = DOSFS_get_bytes((FILEhand *)r->r[1], (char *)r->r[2], r->r[3], r->r[4]);
+
+  RETURN_RESULT;
+}
+
+/*!
+ * \param  r Register set from FileSwitch
+ * \param  pw Private word
+ * \return Error pointer
+ */
+_kernel_oserror *dosctl_fsentry_putbytes_handler(_kernel_swi_regs *r, void *pw)
+{
+  int result;
+
+  CHECK_SPARE_STACK_SPACE;
+  UNUSED(pw);
+
+  result = DOSFS_put_bytes((FILEhand *)r->r[1], (char *)r->r[2], r->r[3], r->r[4]);
+
+  RETURN_RESULT;
+}
+
+/*!
+ * \param  r Register set from FileSwitch
+ * \param  pw Private word
+ * \return Error pointer
+ */
+_kernel_oserror *dosctl_fsentry_args_handler(_kernel_swi_regs *r, void *pw)
+{
+  CHECK_SPARE_STACK_SPACE;
+  UNUSED(pw);
+
+  switch (r->r[0])
+  {
+    case fsargs_SetEXT:
+    {
+      int result = DOSFS_write_extent((FILEhand *)r->r[1], r->r[2]);
+      RETURN_RESULT;
+    }
+
+    case fsargs_ReadSize:
+      r->r[2] = DOSFS_alloc((FILEhand *)r->r[1]);
+      return NULL;
+
+    case fsargs_Flush:
+    {
+      FS_datestamp *result = DOSFS_flush((FILEhand *)r->r[1]);
+      if ((int)result != -1)
+      {
+        r->r[2] = result->loadaddr;
+        r->r[3] = result->execaddr;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsargs_EnsureSize:
+    {
+      word result = DOSFS_ensure((FILEhand *)r->r[1], r->r[2]);
+      if ((int)result != -1)
+      {
+        r->r[2] = result;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsargs_WriteZeroes:
+    {
+      int result = DOSFS_write_zeros((FILEhand *)r->r[1], r->r[2], r->r[3]);
+      RETURN_RESULT;
+    }
+
+    case fsargs_ReadLoadExec:
+    {
+      FS_datestamp *result = DOSFS_read_datestamp((FILEhand *)r->r[1]);
+      if ((int)result != -1)
+      {
+        r->r[2] = result->loadaddr;
+        r->r[3] = result->execaddr;
+      }
+      RETURN_RESULT;
+    }
+
+    default:
+      return global_error(err_badparargs);
+  }
+}
+
+/*!
+ * \param  r Register set from FileSwitch
+ * \param  pw Private word
+ * \return Error pointer
+ */
+_kernel_oserror *dosctl_fsentry_file_handler(_kernel_swi_regs *r, void *pw)
+{
+  CHECK_SPARE_STACK_SPACE;
+  UNUSED(pw);
+
+  switch (r->r[0])
+  {
+    case fsfile_Save:
+    {
+      char *result = DOSFS_save_file((char *)r->r[1], r->r[2], r->r[3],
+                                     (char *)r->r[4], (char *)r->r[5], (DOSdisc *)r->r[6]);
+      if ((int)result != -1)
+      {
+        r->r[6] = (int)result;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsfile_WriteInfo:
+    {
+      int result = DOSFS_write_cat((char *)r->r[1], r->r[2], r->r[3], r->r[5], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfile_ReadInfo:
+    {
+      FS_cat_entry *result = DOSFS_read_cat((char *)r->r[1], (DOSdisc *)r->r[6]);
+      if ((int)result != -1)
+      {
+        r->r[0] = result->type;
+        r->r[2] = result->loadaddr;
+        r->r[3] = result->execaddr;
+        r->r[4] = result->filelen;
+        r->r[5] = result->fileattr;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsfile_Delete:
+    {
+      FS_cat_entry *result = DOSFS_delete((char *)r->r[1], (DOSdisc *)r->r[6]);
+      if ((int)result != -1)
+      {
+        r->r[0] = result->type;
+        r->r[2] = result->loadaddr;
+        r->r[3] = result->execaddr;
+        r->r[4] = result->filelen;
+        r->r[5] = result->fileattr;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsfile_Create:
+    {
+      int result = DOSFS_create((char *)r->r[1], r->r[2], r->r[3],
+                                (char *)r->r[4], (char *)r->r[5], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfile_CreateDir:
+    {
+      int result = DOSFS_create_dir((char *)r->r[1], r->r[2], r->r[3], r->r[4], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfile_ReadBlockSize:
+      r->r[2] = DOSFS_read_block_size((char *)r->r[1], (DOSdisc *)r->r[6]);
+      return NULL;
+
+    default:
+      return global_error(err_badparfile);
+  }
+}
+
+/*!
+ * \param  r Register set from FileSwitch
+ * \param  pw Private word
+ * \return Error pointer
+ */
+_kernel_oserror *dosctl_fsentry_func_handler(_kernel_swi_regs *r, void *pw)
+{
+  CHECK_SPARE_STACK_SPACE;
+  UNUSED(pw);
+
+  switch (r->r[0])
+  {
+    case fsfunc_Rename:
+    {
+      int result = DOSFS_rename((char *)r->r[1], (char *)r->r[2], (DOSdisc *)r->r[6]);
+      if (result != -1)
+      {
+        r->r[1] = result;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsfunc_ReadDirEntries:
+    {
+      FS_dir_block *result = DOSFS_read_dir((char *)r->r[1], (void *)r->r[2],
+                                            r->r[3], r->r[4], r->r[5], (DOSdisc *)r->r[6]);
+      if ((int)result != -1)
+      {
+        r->r[3] = result->objects_read;
+        r->r[4] = result->next_offset;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsfunc_ReadDirEntriesInfo:
+    {
+      FS_dir_block *result = DOSFS_read_dir_info((char *)r->r[1], (void *)r->r[2],
+                                                 r->r[3], r->r[4], r->r[5], (DOSdisc *)r->r[6]);
+      if ((int)result != -1)
+      {
+        r->r[3] = result->objects_read;
+        r->r[4] = result->next_offset;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsfunc_NewImage:
+    {
+      DOSdisc *result = DOSFS_image_open(r->r[1], r->r[2]);
+      if ((int)result != -1)
+      {
+        r->r[1] = (int)result;
+      }
+      RETURN_RESULT;
+    }
+
+    case fsfunc_ImageClosing:
+    {
+      int result = DOSFS_image_close((DOSdisc *)r->r[1]);
+      RETURN_RESULT;
+    }
+
+    case fsfunc_DefectList:
+    {
+      int result = DOSFS_defect_list((char *)r->r[1], (word *)r->r[2], r->r[5], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfunc_AddDefect:
+    {
+      int result = DOSFS_add_defect((char *)r->r[1], r->r[2], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfunc_ReadBootOption:
+      r->r[2] = DOSFS_read_boot_option((char *)r->r[1], (DOSdisc *)r->r[6]);
+      return NULL;
+
+    case fsfunc_WriteBootOption:
+    {
+      int result = DOSFS_write_boot_option((char *)r->r[1], r->r[2], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfunc_UsedSpaceMap:
+    {
+      int result = DOSFS_used_space_map((char *)r->r[2], r->r[5], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfunc_ReadFreeSpace:
+    {
+      FS_free_space *result = DOSFS_read_free_space((DOSdisc *)r->r[6]);
+      r->r[0] = result->freespace;
+      r->r[1] = result->largestobject;
+      r->r[2] = result->discsize;
+      return NULL;
+    }
+
+    case fsfunc_NameDisc:
+    {
+      int result = DOSFS_namedisc((char *)r->r[2], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfunc_StampImage:
+    {
+      int result = DOSFS_stampimage(r->r[2], (DOSdisc *)r->r[6]);
+      RETURN_RESULT;
+    }
+
+    case fsfunc_ObjectAtOffset:
+    {
+      int result = DOSFS_objectatoffset(r->r[2], (char *)r->r[3], r->r[4], (DOSdisc *)r->r[6]);
+      if ((int)result != -1)
+      {
+        r->r[2] = result;
+      }
+      RETURN_RESULT;
+    }
+
+    default:
+      return global_error(err_badparfunc);
+  }
+}

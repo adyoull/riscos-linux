@@ -1,0 +1,418 @@
+;
+; Copyright (c) 2013, Timothy Baldwin
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+
+        GET     Hdr:ListOpts
+        GET     Hdr:Macros
+        GET     Hdr:System
+        GET     Hdr:Machine.<Machine>
+        GET     Hdr:ImageSize.<ImageSize>
+        GET     Hdr:HALSize.<HALSize>
+        GET     Hdr:HALEntries
+        GET     Hdr:LinuxSyscalls
+
+        AREA |HEAD|, CODE, READONLY
+
+        IMPORT  do_ptrace
+        IMPORT  main
+
+        EXPORT  HAL_Header
+        EXPORT  __PVirt_LinuxSyscall
+        EXPORT  __PVirt_fork
+        EXPORT  __main
+        EXPORT  __rt_udiv10
+        EXPORT  __rt_udiv
+        EXPORT  ptrace_swi_jump
+        EXPORT  signal_exit
+        EXPORT  start_fork_server
+        EXPORT  start_ptrace
+        EXPORT  image_start
+
+image_start
+        DCB     &7F, "ELF"
+        DCB     1       ; 32 bits
+        DCB     1       ; Two's complement, little-endian
+        DCB     1       ; ELF Version
+        DCB     3       ; Linux ABI
+        DCB     0       ; ABI Version
+        %       7       ; Unused padding
+        DCW     2       ; This is an executable
+        DCW     40      ; ARM
+        DCD     1       ; EV_CURRENT - Current file version, not invalid.
+
+        DCD     entry                           ; Start address
+        DCD     program_headers - image_start   ; Offset to program headers
+        DCD     section_headers - image_start   ; Offset to section headers (none)
+ [ SupportARMv8
+        DCD     0x5000400                       ; Flags - Version5 EABI, hard-float ABI
+ |
+        DCD     0x80                            ; Flags - uses classic GNU EABI
+ ]
+        DCW     header_end - image_start        ; Size of ELF header
+        DCW     32                              ; Size of program headers
+        DCW     (program_headers_end -  program_headers) / 32
+        DCW     40                              ; Size of section headers
+        DCW     (section_headers_end -  section_headers) / 40
+        DCW     1                               ; Section header string table index
+header_end
+
+        ; Once set up by the code in main(), only the SWI instruction at
+        ;  __PVirt_LinuxSyscall will execute Linux system calls. SWI instructions
+        ; elsewhere will call the RISC OS SWI handler, or a tempoary handler
+        ; in this HAL.
+signal_exit
+        MOV     r7, #__NR_rt_sigreturn
+__PVirt_LinuxSyscall
+        SWI     0
+        myBX    lr
+
+program_headers
+        DCD     1                                      ; PT_LOAD
+        DCD     0                                      ; Offset
+        DCD     image_start                            ; Load address
+        DCD     0                                      ; Physical address unused
+        DCD     |!!rwbase| - ADDRESS                    ; File size
+        DCD     |!!rwbase| - ADDRESS                    ; Memory size
+        DCD     5                                      ; Readable and executable
+        DCD     0x1000                                 ; Alignment
+
+        DCD     1                                      ; PT_LOAD
+        DCD     |!!rwbase| - ADDRESS                    ; Offset
+        DCD     |!!rwbase|                              ; Load address
+        DCD     0                                      ; Physical address unused
+        DCD     OSROM_HALSize                          ; File size (adjusted after link)
+        DCD     OSROM_HALSize + ADDRESS                ; Memory size (adjusted after link)
+        DCD     6                                      ; Readable and writable
+        DCD     0x1000                                 ; Alignment
+
+        DCD     1                                      ; PT_LOAD
+        DCD     OSROM_HALSize                          ; Offset
+        DCD     image_start + OSROM_HALSize            ; Load address
+        DCD     0                                      ; Physical address unused
+        DCD     OSROM_ImageSize * 1024 - OSROM_HALSize ; File size
+        DCD     OSROM_ImageSize * 1024 - OSROM_HALSize ; Memory size
+        DCD     5                                      ; Readable and executable
+        DCD     0x1000                                 ; Alignment
+
+        ; This magic program header enables readable and non-executable memory.
+        DCD     0x6474e551                             ; PT_GNU_STACK
+zeros   DCD     0, 0, 0, 0, 0
+        DCD     6                                      ; Readable and writable
+        DCD     16                                     ; Alignment
+program_headers_end
+
+section_headers
+        SPACE   40
+        DCD     %FT10 - strings        ; Name
+        DCD     3                      ; SHT_STRTAB
+        DCD     0
+        DCD     0                      ; Address
+        DCD     strings - image_start  ; Offset
+        DCD     strings_end - strings
+        DCD     0, 0
+        DCD     1                      ; Alignment
+        DCD     0
+
+        DCD     %FT20 - strings        ; Name
+        DCD     1                      ; SHT_PROGBITS
+        DCD     6                      ; Loaded and executable
+        DCD     image_start            ; Address
+        DCD     0                      ; Offset
+        DCD     OSROM_ImageSize * 1024
+        DCD     0, 0
+        DCD     16                     ; Alignment
+        DCD     0
+section_headers_end
+
+strings DCB     0
+10      DCB     ".strtab", 0
+20      DCB     ".text", 0
+strings_end
+        ALIGN
+
+        GBLA    max
+max     SETA    0
+
+        MACRO
+        H       $name
+        LCLA    t
+t       SETA    EntryNo_$name
+        GBLS    ent_$t
+ent_$t  SETS    "$name"
+        IF t > max
+max       SETA t
+        ENDIF
+        MEND
+
+        H       HAL_ControllerAddress
+        H       HAL_CounterDelay
+        H       HAL_CounterPeriod
+        H       HAL_CounterRate
+        H       HAL_CounterRead
+        H       HAL_DebugRX
+        H       HAL_DebugTX
+        H       HAL_IICBuses
+        H       HAL_IRQClear
+        H       HAL_IRQDisable
+        H       HAL_IRQEnable
+        H       HAL_IRQMax
+        H       HAL_IRQSource
+        H       HAL_IRQStatus
+        H       HAL_InitDevices
+        H       HAL_KbdScanDependencies
+        H       HAL_NVMemoryPageSize
+        H       HAL_NVMemoryProtectedSize
+        H       HAL_NVMemoryRead
+        H       HAL_NVMemorySize
+        H       HAL_NVMemoryType
+        H       HAL_NVMemoryWrite
+        H       HAL_PlatformInfo
+        H       HAL_Reset
+        H       HAL_TimerDevice
+        H       HAL_TimerGranularity
+        H       HAL_TimerMaxPeriod
+        H       HAL_TimerPeriod
+        H       HAL_TimerReadCountdown
+        H       HAL_TimerSetPeriod
+
+HAL_Header
+        DCD     0
+        DCD     image_start - HAL_Header
+        DCD     OSROM_HALSize
+        DCD     HAL_EntryTable - HAL_Header
+        DCD     max + 1
+        DCD     0 ; No workspace
+
+HAL_EntryTable
+        GBLA    i
+        GBLS    name
+i       SETA    0
+        WHILE i <= max
+          IF :DEF:ent_$i
+name        SETS ent_$i
+            IMPORT $name
+            DCD $name - HAL_EntryTable
+          ELSE
+            DCD null_entry - HAL_EntryTable
+          ENDIF
+i         SETA i + 1
+        WEND
+
+null_entry
+        MOV     pc, lr
+
+        ENTRY
+entry   LDR     r0, [sp]        ; Read argc
+        ADD     r1, sp, #4      ; Read argv
+        BL      main
+        MOV     r7, #__NR_exit_group
+        B       __PVirt_LinuxSyscall
+
+__main  *       0
+
+start_ptrace
+        STMFD   sp!, {r4, r7, lr}
+        MOV     r0, #ix_CLONE_VM
+        MOV     r1, sp
+        MOV     r2, #0
+        MOV     r3, #0
+        MOV     r4, #0
+        LDR     r7, =__NR_clone
+        LDR     sp, =ptrace_stack
+        SWI     0
+        TEQ     r0, #0
+        LDMEQFD sp!, {r4, r7, pc} ; Return if child.
+        B       do_ptrace         ; Parent runs ptrace loop
+
+        NOP
+ptrace_swi_jump
+        LDMFD   sp!, {r0, lr}
+        LDR     pc, [sp], #4
+
+
+sig_mask
+        DCD     ~0,  ~0
+
+start_fork_server
+        STMFD   sp!, {r7, lr}
+
+        ; Block all signals, save old mask below sp, which is safe as signals blocked.
+        MOV     r7, #__NR_rt_sigprocmask
+        MOV     r0, #ix_SIG_BLOCK
+        ADR     r1, sig_mask
+        SUB     r2, sp, #8
+        MOV     r3, #8
+        SWI     0
+
+        ; Create pipe
+        LDR     r0, =fork_pipe_fds
+        MOV     r1, #ix_O_CLOEXEC
+        LDR     r7, =__NR_pipe2
+        SWI     0
+        TEQ     r0, #0
+
+        ; Create fork server thread
+        LDRPL   r0, =ix_CLONE_VM | ix_CLONE_THREAD | ix_CLONE_SIGHAND | ix_CLONE_FS | ix_CLONE_FILES
+        MOVPL   r1, #0
+        MOVPL   r2, #0
+        MOVPL   r3, #0
+        LDRPL   r7, =__NR_clone
+        SWIPL   0
+        TEQPL   r0, #0
+        BEQ     fork_server_loop
+
+        ; Restore signal mask
+        MOVPL   r7, #__NR_rt_sigprocmask
+        MOVPL   r0, #ix_SIG_SETMASK
+        SUBPL   r1, sp, #8
+        MOVPL   r2, #0
+        MOVPL   r3, #8
+        SWIPL   0
+        LDMPLFD sp!, {r7, pc}
+
+        MOV     r0, #2
+        ADR     r1, %FT10
+        MOV     r2, #%FT11 - %FT10
+        MOV     r7, #__NR_write
+        SWI     0
+        MOV     r0, #119
+        MOV     r7, #__NR_exit_group
+        SWI     0
+
+10      DCB     "Problem starting fork server thread.", 10
+11
+        ALIGN
+
+fork_server_loop
+        ; Read stack pointer from pipe
+        LDR     r1, =fork_pipe_fds + 8
+        MOV     r2, #4
+        LDR     r0, [r1, #-8]
+        MOV     r7, #__NR_read
+        SWI     0
+        LDR     sp, [r1]
+
+        ; Do fork
+        MOV     r7, #__NR_fork
+        SWI     0
+        CMP     r0, #0
+        BGT     fork_server_loop
+
+        ; Get child's PID
+        MOV     r7, #__NR_getpid
+        SWIEQ   0
+
+        ; Write return value to supplied pipe
+        ; In child to avoid race with future pipe use
+        LDR     r6, [sp]     ; Load pointer to pipe fds
+        STR     r0, [sp]     ; Save return value
+        LDR     r0, [r6, #4] ; Load pipe fd
+        MOV     r1, sp
+        MOV     r7, #__NR_write
+        SWI     0
+        BNE     fork_server_loop
+
+fork_is_child
+        ; Restore all signal handlers to default
+        ASSERT  ix_SIG_DFL = 0
+        ADR     r1, zeros
+        MOV     r2, #0
+        MOV     r3, #8
+        MOV     r7, #__NR_rt_sigaction
+        MOV     r5, #64
+20      MOV     r0, r5
+        BL      __PVirt_LinuxSyscall
+        SUBS    r5, r5, #1
+        BNE     %BT20
+
+        ; Unblock all signals, requires r1 and r2 from above
+        MOV     r7, #__NR_rt_sigprocmask
+        MOV     r0, #ix_SIG_SETMASK
+        BL      __PVirt_LinuxSyscall
+
+        ; Return
+        ADD     sp, sp, #8
+        MOV     r0, #0
+        LDMFD   sp!, {r4-r11,pc}
+
+do_real_fork
+        ; Block all signals, save old mask below sp, which is safe as signals are blocked.
+        MOV     r7, #__NR_rt_sigprocmask
+        MOV     r0, #ix_SIG_BLOCK
+        ADR     r1, sig_mask
+        SUB     r2, sp, #8
+        MOV     r3, #8
+        BL      __PVirt_LinuxSyscall
+
+        ; Call fork
+        MOV     r7, #__NR_fork
+        BL      __PVirt_LinuxSyscall
+        TEQ     r0, #0
+        BEQ     fork_is_child
+        STR     r0, [sp, #4]!
+
+        ; Restore signal mask, r3 = 8 from above
+        MOV     r7, #__NR_rt_sigprocmask
+        MOV     r0, #ix_SIG_SETMASK
+        SUB     r1, sp, #12
+        MOV     r2, #0
+        BL      __PVirt_LinuxSyscall
+        LDMFD   sp!, {r0, r4-r11,pc}
+
+__PVirt_fork
+        STMFD   sp!, {r0, r1, r4-r11,lr}
+        MOV     r12, r0
+
+        ; Read fork pipe file descriptor, if -1 goto do_real_fork
+        LDR     r3, =fork_pipe_fds
+        LDR     r0, [r3, #4]
+        TEQ     r0, #0
+        BMI     do_real_fork
+
+        ; Write stack pointer into fork pipe
+        STR     sp, [sp, #4]
+        ADD     r1, sp, #4
+        MOV     r2, #4
+        MOV     r7, #__NR_write
+        BL      __PVirt_LinuxSyscall
+        TEQ     r0, #0
+        LDMMIFD sp!, {r1, r2, r4-r11,pc}
+
+        ; Read return value from supplied pipe
+        LDR     r0, [r12]
+        MOV     r1, sp
+        MOV     r2, #4
+        MOV     r7, #__NR_read
+        BL      __PVirt_LinuxSyscall
+        TEQ     r0, #0
+        LDMPLFD sp!, {r0, r1, r4-r11,pc}
+        LDMFD   sp!, {r1, r2, r4-r11,pc}
+
+
+__rt_udiv10
+        MOV     a2, a1
+        MOV     a1, #10
+__rt_udiv
+        DivRem  a3, a2, a1, ip
+        MOV     a1, a3
+        myBX    lr
+
+        AREA    |!!rwbase|, DATA, ALIGN=12
+fork_pipe_fds
+        DCD     -1, -1
+        %       32 * 4
+ptrace_stack
+
+        END

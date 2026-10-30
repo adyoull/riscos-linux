@@ -1,0 +1,74 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Stats.c - global statistics counters for the SMB1 NetBIOS-over-IP transport.
+ *
+ * Effectively debug-only scaffolding - the counters are always kept, but only a DEBUG build can
+ * show them, in the *LMInfo dump.  The STA_NET* counters belong to a NetBEUI transport this
+ * module does not carry, so nothing increments them.
+ */
+
+/* Standard includes */
+
+#include <stdio.h>
+
+/* Our includes */
+
+#include "stdtypes.h"
+#include "Stats.h"
+
+int Stat_StatTable[STA_MAXSTATS];
+int Stat_ClassMask;
+
+struct stat_info {
+  int stat_no;
+  int sclass;
+  char *name;
+};
+
+#ifdef DEBUG
+/* clang-format off */
+static struct stat_info statinfo[] = {STA_SERIOUS_BARF, SCLASS_GENERAL, "Internal errors",
+
+                                      STA_IP_EVENTS, SCLASS_IP, "IP:  Internet events",
+                                      STA_IP_RXDGRAM, SCLASS_IP, "IP:  Receive datagrams",
+
+                                      -1, 0, NULL};
+/* clang-format on */
+
+/* -------------- */
+
+void Stat_Show(void) {
+  int i;
+  for (i = 0; statinfo[i].stat_no >= 0; i++) {
+    if (statinfo[i].sclass & Stat_ClassMask) {
+      printf("%-30s: %d\n", statinfo[i].name, Stat_StatTable[statinfo[i].stat_no]);
+    }
+  }
+  printf("\n");
+}
+#endif
+
+/* ------------- */
+
+bool Stat_Init(void) {
+  int i;
+
+  Stat_ClassMask = SCLASS_GENERAL;
+  for (i = 0; i < STA_MAXSTATS; i++) {
+    Stat_StatTable[i] = 0;
+  }
+
+  return true;
+}

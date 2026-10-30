@@ -1,0 +1,957 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* h.Cache - LanManFS cache module public API.
+ *
+ * This header declares the public surface: the cache's lifecycle (Init / Shutdown plus per-mount Create / Destroy), the read
+ * path (Cache_Lookup), directory listing and the name lookups answered from listings, the record of paths that do not exist, file
+ * content kept from whole loads and captured through open handles, the mutation hooks (Cache_Notify*) and the open-file handle table.
+ *
+ * Conventions:
+ *   - All paths stored in or compared against the cache are in DOS
+ *     wire form: "\\" separators, the server's own spelling (including any
+ *     ",xxx" filetype suffix), original case preserved (compares fold ASCII letter case only).
+ *   - Paths inside the cache carry no leading "\\".  Public entry points
+ *     strip one if present, so a caller may pass either form; stored keys
+ *     never have it.
+ *   - The cache makes no SMB call itself.  Wire calls happen at the
+ *     FSEntry boundary in c.CoreFn, and directory listings go through
+ *     the function pointers c.SMB2 installs (h.Cache_Wire); the cache
+ *     builds and runs on its own, so a test build on Linux can drive it
+ *     without a server.
+ */
+
+#ifndef LMCACHE_H
+#define LMCACHE_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "SRHeapLib/srheap.h"
+#include "Cache_Wire.h"
+
+/* Object type held in a cnode's obj_type.  NOTHING is the negative entry: the server reported that the path does
+ * not exist, so repeat lookups are answered without a request.
+ */
+#define LMCACHE_OBJECT_NOTHING   (0u)
+#define LMCACHE_OBJECT_FILE      (1u)
+#define LMCACHE_OBJECT_DIRECTORY (2u)
+
+/* Length of a directory cnode: RISC OS reports every directory's length as 4096, whatever space the server gives it. */
+#define LMCACHE_DIR_LENGTH (4096u)
+
+/* Slots in the module-global table mapping RISC OS file handles (one-based) to cnodes; matches FileSwitch's handle limit. */
+#define LMCACHE_HANDLE_TABLE_SIZE (255u)
+
+/* Scratch-buffer size for composing and splitting canonical DOS paths: the longest path the cache will handle.  Room for a directory
+ * path FileSwitch can name plus a server leaf name, with spare; a longer path is refused and not cached.  These buffers live on
+ * the privileged-mode stack, several deep on some call chains, so keep this small.
+ */
+#define LMCACHE_PATH_BUF_BYTES (1024u)
+
+/* Bits of a cnode's flags byte:
+ *   HOT               on the hot recency list rather than the cold one.
+ *   EXCEEDS_CACHE     a directory whose listing would not fit; the cache-read step always misses it, and the enumeration stops caching it
+ *                     as soon as it runs out of room.  Cleared only by a listing that fits.
+ *   INERT_SYMLINK     a symbolic link whose target could not be resolved when learned; presented as a placeholder until a later access
+ *                     resolves it (SMB2_RetryInertSymlink).
+ *   RESOLVED_SYMLINK  a symbolic link whose target resolved; the metadata held describes the target, not the link.
+ *   DEFINITIVE        a directory whose leafnames blob is the complete child list, so present/absent probes can be answered from RAM.
+ *   CASE_TWINS        a directory the server listed with two names differing only in letter case, as a case-sensitive server can.  Its
+ *                     listing is never cached, and the entries beneath it match only their exact spelling, so each twin keeps its own.
+ *                     Cleared only by a listing without twins.
+ *   UNLISTED_ENTRIES  a directory whose listing leaves out entries the server holds (hidden or system ones while hidden files are not
+ *                     shown, names that cannot be translated), so a name missing from the listing may still exist.
+ *   READ_BEFORE       a file loaded or opened for reading since its cnode was made, without its content being kept; the next such read
+ *                     keeps it (Cache_ReadAgain).
+ */
+#define LMCACHE_FLAG_HOT (0x01u)
+
+#define LMCACHE_FLAG_EXCEEDS_CACHE (0x02u)
+
+#define LMCACHE_FLAG_INERT_SYMLINK (0x04u)
+
+#define LMCACHE_FLAG_RESOLVED_SYMLINK (0x08u)
+
+#define LMCACHE_FLAG_DEFINITIVE (0x10u)
+
+#define LMCACHE_FLAG_CASE_TWINS (0x20u)
+
+#define LMCACHE_FLAG_UNLISTED_ENTRIES (0x40u)
+
+#define LMCACHE_FLAG_READ_BEFORE (0x80u)
+
+/* Default per-mount sizing: cnode slab slots, string-heap bytes (names), and content-heap bytes (file content and leafnames blobs).
+ * Cache_SetTier overrides these per memory tier before mounts are created.
+ */
+#define LMCACHE_DEFAULT_SLAB_NODES (2000u)
+#define LMCACHE_DEFAULT_STR_BYTES  (96u * 1024u)
+#define LMCACHE_DEFAULT_FILE_BYTES (6u * 1024u * 1024u)
+
+/* Cap on the hot recency list; a promotion past it pushes the hot LRU tail back to cold, bounding the protected working set. */
+#define LMCACHE_DEFAULT_HOT_MAX (256u)
+
+/* Default lifetimes (centiseconds): how long metadata and captured content are trusted without revalidation, while change
+ * notifications report what other clients do; and how long an echo window lasts.  An echo window is a deadline on a cnode, opened by a
+ * local change to it, before which a CHANGE_NOTIFY event matching that change is taken for the server reporting it back (its echo) and
+ * skipped.
+ */
+#define LMCACHE_DEFAULT_METADATA_TTL   (6000u)
+#define LMCACHE_DEFAULT_CONTENT_TTL    (3000u)
+#define LMCACHE_DEFAULT_NOTIFY_BACKOFF (1000u)
+
+/* Lifetime clamps applied under the aggressive-refresh quirk: a server that delivers CHANGE_NOTIFY unreliably or not at all leaves the
+ * lifetimes as the only freshness signal, so they must be short.  A name cached as absent goes sooner than other details, since it hides
+ * a file created elsewhere, and captured content soonest, since old bytes do more harm than an old listing.
+ */
+#define LMCACHE_QUIRK_METADATA_TTL (500u)
+#define LMCACHE_QUIRK_NEGATIVE_TTL (200u)
+#define LMCACHE_QUIRK_CONTENT_TTL  (100u)
+
+/* Per-mount quirk bit-set, merged in via Cache_SetQuirks. */
+typedef uint32_t LMCacheQuirks_t;
+
+/* Cut the mount's lifetimes to the short quirk ones so it revalidates soon after each access; set for a mount that receives no
+ * CHANGE_NOTIFY (SMB1), or whose server class delivers it unreliably.
+ */
+#define LMCACHE_QUIRK_AGGRESSIVE_REFRESH (0x00000001u)
+
+/* CHANGE_NOTIFY overflow timings (centiseconds).  An overflow within the busy threshold of this client's last local change is most likely
+ * the server reporting a burst of changes this client made, so the cached details keep their lifetimes; any other overflow clamps every
+ * entry's expiry to the grace lifetime rather than wiping the cache outright.  Either way every listing goes, since it may lack a name
+ * another client added.
+ */
+#define LMCACHE_OVERFLOW_BUSY_THRESHOLD    (1000u)
+#define LMCACHE_DEFAULT_OVERFLOW_GRACE_TTL (200u)
+
+/* Evictions one claim may make before giving up.  A heap claim can need several: a freed name, listing or file content only helps once it
+ * joins free space either side of it into a run long enough. */
+#define LMCACHE_RECOVERY_ROUNDS (16u)
+
+/* Share of the content heap one file's content may take: a mount's per-file cap is the heap size divided by this. */
+#define LMCACHE_CONTENT_HEAP_SHARE (4u)
+
+/* Ceiling on the derived per-file cap, so a generous content heap still cannot let a single file dominate it. */
+#define LMCACHE_MAX_CONTENT_CAP (1u * 1024u * 1024u)
+
+/*
+ * A cache timestamp: centiseconds counted from the injected clock, carried on in 64 bits past each wrap of the 32-bit reading.  Deadlines
+ * are then plain comparisons that never go wrong however long the machine stays up.
+ */
+typedef uint64_t LMCacheTime_t;
+
+/* The cache's structs reference each other, so name them all up front. */
+struct LMCacheNode;
+
+typedef struct LMCacheNode LMCacheNode_t;
+typedef struct LMCache LMCache_t;
+typedef struct LMHandleSlot LMHandleSlot_t;
+typedef struct LMLruSentinel LMSentinel_t;
+typedef struct LMLeafnamesBlobHdr LMLeafnamesBlobHdr_t;
+
+/* Embedded head of a recency list.  The nested structs mirror the layout of a cnode's u.file link pair exactly, so the link/unlink
+ * primitives treat sentinels and real nodes uniformly; both lists are circular and terminate back at the sentinel, never at NULL.
+ */
+struct LMLruSentinel {
+  struct {
+    struct {
+      LMCacheNode_t *prev;
+      LMCacheNode_t *next;
+    } file;
+  } u;
+};
+
+/* A cache entry (cnode): one file, directory, or negative ("nothing") per canonical DOS path, living in the per-mount slab and reached
+ * by hashing the full path.  The leading union holds the type-specific state: a file or negative sits on the hot or cold recency list; a
+ * directory is on the directory recency list, which decides whose listing goes first when listings need room, and which directory goes
+ * first when entries do.  Making room evicts a directory only once no sub-directory of it is left in the cache, because the cnodes
+ * beneath it point back at it, and never the path being installed or a directory above it.  Listing a directory, making room for an
+ * entry, and any wire call (during which a change notification can be handled) can free or re-key cnodes, so a pointer to one must never
+ * be carried across such a call without re-resolving via the mount's mutation_gen.
+ */
+struct LMCacheNode {
+  union {
+    struct {
+      LMCacheNode_t *prev; // recency-list neighbours; the list is circular through its sentinel
+      LMCacheNode_t *next;
+      uint8_t handle; // one-based RISC OS handle bound to this file (any one, if several are), or 0
+      uint8_t pad_[3];
+      uint8_t *data;                 // captured file content in the content heap, or NULL
+      LMCacheTime_t data_expires_at; // content freshness deadline; metadata ages separately via expires_at
+    } file;
+
+    struct {
+      LMLeafnamesBlobHdr_t *leafnames_blob; // packed child leaf list in the content heap, or NULL
+      uint16_t leafnames_size;              // blob body bytes in use
+      uint16_t leafnames_capacity;          // blob body bytes allocated
+      LMCacheNode_t *older;                 // neighbours on the mount's directory recency list; NULL at either end
+      LMCacheNode_t *newer;
+    } dir;
+  } u;
+  LMCacheNode_t *parent;       // owning directory cnode; must outlive this node
+  LMCacheNode_t *first_child;  // newest of the cnodes whose parent this is, or NULL; only a directory has any
+  LMCacheNode_t *sibling_prev; // neighbours among the parent's children, newer then older; NULL at either end
+  LMCacheNode_t *sibling_next;
+  union {
+    LMCacheNode_t *hash_next; // next cnode in this hash bucket while occupied...
+    LMCacheNode_t *free_next; // ...or next vacant slot while free; never both at once
+  } next;
+  LMCache_t *mount;   // owning per-mount cache; NULL marks a vacant slab slot
+  uint32_t hash;      // full FNV-1a of the canonical path, compared before the string to keep bucket walks cheap
+  uint32_t load_addr; // RISC OS metadata as served to FileSwitch (load/exec/length/attributes)
+  uint32_t exec_addr;
+  uint64_t length;
+  uint32_t attrs;
+  LMCacheTime_t expires_at;     // metadata freshness deadline; an expired cnode reads as a miss but stays linked
+  LMCacheTime_t suppress_until; // end of the echo window, opened by Cache_BumpSuppress for a local change
+  uint8_t obj_type;             // LMCACHE_OBJECT_*
+  uint8_t flags;                // LMCACHE_FLAG_* bits
+  uint16_t name_len;            // strlen(name), cached for the compare fast path
+  char *name;                   // string-heap name: directories store the full path, files and negatives only the leaf
+};
+
+/* Content-heap claim made up-front when building a leafnames blob; trimmed back to the used size plus headroom once the build is done. */
+#define LMCACHE_LEAFNAMES_BUILD_BYTES (16u * 1024u)
+
+/* Slack kept above the used bytes when a finished blob is trimmed, so a name added later need not immediately reallocate. */
+#define LMCACHE_LEAFNAMES_HEADROOM (512u)
+
+/* Share of the slab a single directory may fill: one with more entries than the slab holds divided by this is too big to cache, and is
+ * read from the server instead, so that listing it does not evict the rest of the working set. */
+#define LMCACHE_LISTING_SLAB_SHARE (4u)
+
+/* Verdict from Cache_DirHasLeaf; UNKNOWN means no authoritative blob was available and the caller must fall back to the wire. */
+typedef enum { LM_LEAF_UNKNOWN, LM_LEAF_PRESENT, LM_LEAF_ABSENT } LMLeafStatus_t;
+
+/* Header prefixed to a leafnames blob in the content heap.  The owner back-pointer ties the blob to its directory, and the blob carries its
+ * own expiry so a stale child list is never trusted merely because the directory's details are fresh.
+ */
+struct LMLeafnamesBlobHdr {
+  LMCacheNode_t *owner;
+  LMCacheTime_t expires_at;
+  uint16_t *index;       // open-addressed hash of the names' body offsets, or NULL until the first name
+  uint16_t index_mask;   // index slot count minus one; the slot count is a power of two
+  uint16_t index_filled; // slots holding a name or the mark of a removed one, which together set when the index must grow
+  uint16_t gone_bytes;   // body bytes still taken by removed names, reclaimed by compacting when an append runs short
+};
+
+/* Per-mount cache header, living at the base of the mount's substrate alongside the slab, hash table and heaps it describes.  Built by
+ * Cache_MountCreate and released whole (substrate and all) by Cache_MountDestroy; mounts share nothing but the module-global handle table.
+ */
+struct LMCache {
+  LMCacheNode_t *root_node; // slab base; slot 0 is the pinned share-root directory
+  LMCacheNode_t *free_head; // vacant slab slots, singly linked through the cnodes' next union
+  uint16_t slab_capacity;
+  uint16_t slab_used;
+  LMCacheNode_t **hash_table; // power-of-two array of bucket heads for path lookups
+  uint16_t hash_mask;         // bucket count minus one, ANDed with the hash to pick a bucket
+  LMSentinel_t hot_sentinel;  // recency list of repeat-hit files and negatives
+  uint16_t hot_len;
+  uint16_t hot_max;           // hot-list cap; promotion past it demotes the hot LRU tail to cold
+  LMSentinel_t cold_sentinel; // recency list of new and one-shot files and negatives; eviction picks its LRU tail first
+  LMCacheNode_t *dir_oldest;  // directory recency list, every directory but the root; recovery works from the oldest end
+  LMCacheNode_t *dir_newest;
+  srheap_t str_heap;                    // cnode names
+  srheap_t content_heap;                // file content blocks and leafnames blobs
+  volatile uint32_t mutation_gen;       // bumped when a cnode is freed or re-keyed; volatile because inline notify processing moves it
+  uint32_t metadata_ttl;                // centiseconds metadata stays fresh
+  uint32_t negative_ttl;                // centiseconds a name cached as absent stays fresh
+  uint32_t content_ttl;                 // centiseconds captured content stays fresh
+  LMCacheTime_t last_local_mutation_at; // time of this client's last change, used to recognise an echo overflow
+  LMCacheQuirks_t quirks;               // LMCACHE_QUIRK_* bits
+  void *substrate_base;                 // whole-mount memory block as handed out by the substrate allocator
+  size_t substrate_size;
+  int substrate_handle;              // opaque allocator handle (Dynamic Area number in production, 0 for the heap fallback)
+  char label[32];                    // mount name, used for the Dynamic Area name and diagnostics
+  LMCacheWireVTable_t wire;          // function pointers into the SMB2 layer; a test build scripts its own
+  uint32_t max_cacheable_file_bytes; // per-file content-capture cap derived from the content-heap size
+  bool content_caching_disabled;     // content capture switched off for this mount; metadata caching is unaffected
+};
+
+/* One handle-table entry: the cnode (and owning mount) a RISC OS file handle currently resolves to, and any content being captured
+ * through the handle, with the file's details when the capture began.  The binding is cleared when the cnode dies, so a stale handle
+ * yields NULL rather than a dangling pointer.
+ */
+struct LMHandleSlot {
+  LMCache_t *cache;
+  LMCacheNode_t *node;
+  LMCache_t *stream_cache;   // mount whose content heap holds stream; kept apart from cache, which a re-bind may clear
+  uint8_t *stream;           // content being captured through this handle, or NULL
+  uint32_t stream_load_addr; // the bound file's load address, exec address and length when stream was claimed
+  uint32_t stream_exec_addr;
+  uint64_t stream_length;
+};
+
+/*
+ * Bring up the module-global cache subsystem: install the clock that stamps entry expiry and clear the handle table.
+ *
+ * A second call while the subsystem is up only swaps in the new clock, leaving live mounts, their handle bindings and any captures in
+ * progress untouched.
+ *
+ * Parameters:
+ *   clock_fn  returns the current time in centiseconds (on RISC OS the module's monotonic tick)
+ */
+extern void Cache_Init(uint32_t (*clock_fn)(void));
+
+/* Hooks for claiming and releasing a mount's substrate block; see Cache_SetSubstrateAllocator below. */
+typedef void *(*Cache_SubstrateAllocFn)(size_t bytes, const char *label, int *handle_out);
+typedef void (*Cache_SubstrateFreeFn)(void *base, size_t bytes, int handle);
+
+/*
+ * Install the hooks the cache uses to allocate and free each mount's substrate memory.
+ *
+ * This is the seam that lets the same cache code run on RISC OS and on Linux: production points them at an OS_DynamicArea-backed
+ * implementation; a Linux test build leaves them unset, and the cache then uses malloc and free.  The hooks must be installed before
+ * the first Cache_MountCreate.
+ *
+ * Parameters:
+ *   alloc_fn  claims a substrate block of a given size, returning base pointer and an opaque handle
+ *   free_fn   releases a block previously handed out by alloc_fn
+ */
+extern void Cache_SetSubstrateAllocator(Cache_SubstrateAllocFn alloc_fn, Cache_SubstrateFreeFn free_fn);
+
+/*
+ * Set the sizing of mounts created from now on, chosen by the machine's memory.
+ *
+ * Mounts already created keep the sizes they were made with.  The largest file whose content a mount will cache is its content heap's
+ * size divided by LMCACHE_CONTENT_HEAP_SHARE, up to LMCACHE_MAX_CONTENT_CAP.
+ *
+ * Parameters:
+ *   slab_nodes  cnode slab capacity, or 0 to leave it as it is
+ *   str_bytes   string-heap size in bytes (cnode names), or 0 to leave it as it is
+ *   file_bytes  content-heap size in bytes (file content and directory listings), or 0 to leave it as it is
+ */
+extern void Cache_SetTier(uint32_t slab_nodes, uint32_t str_bytes, uint32_t file_bytes);
+
+/*
+ * Switch caching of file content off or on for mounts created from now on; metadata and listings are cached either way.
+ *
+ * Parameters:
+ *   disabled  true to cache no file content
+ */
+extern void Cache_SetContentCachingDisabled(bool disabled);
+
+/*
+ * Tear the cache subsystem back down: clear the handle table and forget the clock.
+ *
+ * Per-mount substrates are not freed here, so every mount must already have been passed to Cache_MountDestroy.  Safe to call when never
+ * initialised.
+ */
+extern void Cache_Shutdown(void);
+
+/*
+ * Create a per-mount cache backed by its own substrate, sized by the current tier.
+ *
+ * The cache starts with no quirks; the caller sets the aggressive-refresh quirk with Cache_SetQuirks once the server class is known.  The
+ * share root never expires, so a catalogue read of it is answered from the cache with the date given here.
+ *
+ * Parameters:
+ *   label      mount name, used for the substrate's Dynamic Area name and diagnostics; NULL for none
+ *   root_load  load address of the share root, as a dated directory
+ *   root_exec  exec address of the share root
+ *
+ * Returns: the new cache, or NULL if the subsystem is not initialised or the cache could not be built (the tier's slab too small, or the
+ * substrate or the root's name not allocated).
+ */
+extern LMCache_t *Cache_MountCreate(const char *label, uint32_t root_load, uint32_t root_exec);
+
+/*
+ * Release a mount's cache and its substrate.
+ *
+ * Handles still bound into the cache are unbound first, so an open file resolves to no cnode and carries on uncached; a capture in
+ * progress on one of them is dropped with the content heap.  Safe with a NULL cache.
+ *
+ * Parameters:
+ *   cache  the mount cache to destroy
+ */
+extern void Cache_MountDestroy(LMCache_t *cache);
+
+/*
+ * Turn on quirk bits for a mount, merging them with any already set.
+ *
+ * The aggressive-refresh bit clamps the mount's metadata, negative and content lifetimes to LMCACHE_QUIRK_METADATA_TTL,
+ * LMCACHE_QUIRK_NEGATIVE_TTL and LMCACHE_QUIRK_CONTENT_TTL, so that the cache revalidates soon after each access to a server that delivers
+ * CHANGE_NOTIFY unreliably or not at all.  When the bit is newly set, every lifetime already handed out (details, names cached as absent,
+ * captured content and listings, including one a scan is building) is clamped to match.  Safe with a NULL cache.
+ *
+ * Parameters:
+ *   cache  the mount cache to modify
+ *   bits   LMCACHE_QUIRK_* bits to set
+ */
+extern void Cache_SetQuirks(LMCache_t *cache, LMCacheQuirks_t bits);
+
+/*
+ * Look up the cnode for a DOS path.
+ *
+ * An expired cnode reads as a miss but stays in place, so that the next report of the path's details from the server refreshes it; the
+ * share root never expires.  A negative is a hit: its object type NOTHING records that the path is known not to exist.  A hit is promoted
+ * on its recency list, and a file's captured content whose own lifetime has run out is dropped, so a hit's content can be served as it
+ * stands.
+ *
+ * Parameters:
+ *   cache  per-mount cache; NULL, or no clock installed, yields a miss
+ *   path   DOS path; a leading separator is tolerated
+ *
+ * Returns: the live cnode (possibly a negative), or NULL on a miss.
+ */
+extern LMCacheNode_t *Cache_Lookup(LMCache_t *cache, const char *path);
+
+/*
+ * Record a file or directory this client has created on the server, inserting or refreshing its cnode.
+ *
+ * The parent's listing gains the name when the entry is new or has changed type, no cached absence of a directory above it is left,
+ * and a parent not yet cached is added as a placeholder.  Content cached for an existing file at the path is dropped, and any capture of
+ * it under way through an open handle is abandoned: the create has replaced its bytes, whatever the new length and datestamp.  The time is
+ * noted as a local change, so a CHANGE_NOTIFY overflow arriving soon after is taken for the server echoing changes this client made.
+ *
+ * Parameters:
+ *   cache      per-mount cache
+ *   path       DOS path of the created object
+ *   obj_type   LMCACHE_OBJECT_FILE or LMCACHE_OBJECT_DIRECTORY
+ *   load_addr  RISC OS load address
+ *   exec_addr  RISC OS exec address
+ *   length     object length in bytes
+ *   attrs      RISC OS attributes
+ *
+ * Returns: the inserted or refreshed cnode, or NULL if the arguments are bad, the parent cannot be cached as a directory, or there is no
+ * room.
+ */
+extern LMCacheNode_t *Cache_NotifyCreate(LMCache_t *cache, const char *path, uint8_t obj_type, uint32_t load_addr, uint32_t exec_addr,
+                                         uint64_t length, uint32_t attrs);
+
+/*
+ * Record a directory this client has just created.
+ *
+ * Any cnodes left beneath its path from an earlier directory of the same name are dropped, and the directory is given an empty listing
+ * that counts as complete, so names looked up in it are answered without asking the server.  The date the server stamped is not
+ * available to the caller, so its details are left expired.
+ *
+ * Parameters:
+ *   cache  per-mount cache, or NULL for none
+ *   path   share-relative path of the new directory
+ *   attrs  RISC OS attribute word
+ *
+ * Returns: the directory's cnode, or NULL if it could not be cached.
+ */
+extern LMCacheNode_t *Cache_NotifyMkdir(LMCache_t *cache, const char *path, uint32_t attrs);
+
+/*
+ * Record a file or directory's details as just read from the server, inserting or refreshing its cnode.
+ *
+ * As for Cache_NotifyCreate, the parent's listing gains the name if it lacked it and no cached absence of a directory above it is left, but
+ * the local-change time is left alone: reading the server must not make another client's CHANGE_NOTIFY overflow look like the echo of this
+ * client's own changes.  Content cached for a file is dropped if the details differ from those it was captured with; content that survives
+ * has just been checked against the server, so its lifetime starts again.  Callers therefore pass only details the server has just
+ * reported.
+ *
+ * Parameters:
+ *   cache      per-mount cache
+ *   path       DOS path of the object
+ *   obj_type   LMCACHE_OBJECT_FILE or LMCACHE_OBJECT_DIRECTORY
+ *   load_addr  RISC OS load address
+ *   exec_addr  RISC OS exec address
+ *   length     object length in bytes
+ *   attrs      RISC OS attributes
+ *
+ * Returns: the inserted or refreshed cnode, or NULL if the arguments are bad, the parent cannot be cached as a directory, or there is no
+ * room.
+ */
+extern LMCacheNode_t *Cache_NotifyLearned(LMCache_t *cache, const char *path, uint8_t obj_type, uint32_t load_addr, uint32_t exec_addr,
+                                          uint64_t length, uint32_t attrs);
+
+/*
+ * Record a file read whole from the server, as Cache_NotifyLearned does, and keep a copy of its content.
+ *
+ * The content is kept only if the mount caches content, the length is within the mount's per-file cap, the file's type is one worth
+ * caching (Cache_ShouldCacheContent) and the file has been read before (Cache_ReadAgain).  A full content heap gives up captured content
+ * to make room, but never a directory listing; with no room even so, the details are still recorded.
+ *
+ * Parameters:
+ *   cache      per-mount cache
+ *   path       DOS path of the file
+ *   load_addr  RISC OS load address
+ *   exec_addr  RISC OS exec address
+ *   length     file length in bytes, and the length of data
+ *   attrs      RISC OS attributes
+ *   data       the file's bytes, copied
+ *
+ * Returns: the file's cnode, or NULL if it could not be recorded.
+ */
+extern LMCacheNode_t *Cache_NotifyLearnedWithContent(LMCache_t *cache, const char *path, uint32_t load_addr, uint32_t exec_addr,
+                                                     uint64_t length, uint32_t attrs, const void *data);
+
+/*
+ * Record that this client has deleted a path, dropping its cnode and any subtree beneath it.
+ *
+ * The name leaves the parent's listing whether or not the path itself is cached; the share root is never removed.  The time is noted as a
+ * local change, so a CHANGE_NOTIFY overflow arriving soon after is taken for the server echoing changes this client made.
+ *
+ * Parameters:
+ *   cache  per-mount cache
+ *   path   DOS path of the removed object
+ */
+extern void Cache_NotifyDelete(LMCache_t *cache, const char *path);
+
+/*
+ * Record that the server reported a path removed, as Cache_NotifyDelete does for a delete this client made.
+ *
+ * Leaves the local-change time alone: a removal another client made must not make a later CHANGE_NOTIFY overflow look like the echo of
+ * this client's own changes.
+ *
+ * Parameters:
+ *   cache  per-mount cache
+ *   path   DOS path of the removed object
+ */
+extern void Cache_NotifyRemoved(LMCache_t *cache, const char *path);
+
+/*
+ * Record that the server reported a name added, or the new name of a rename.
+ *
+ * The parent's listing gains the name, or is dropped if the name will not fit, so a name lookup keeps answering from it; the new object's
+ * details are left for the next lookup to fetch, and the parent's own details, whose datestamp has moved, are expired.  A listing, finished
+ * or still being built, that already holds the name in another letter case is dropped instead, and its directory marked as holding case
+ * twins, since only a case-sensitive server keeps both.  Whatever was held under the name before (most often a "not found" entry, or a
+ * directory whose contents are now unknown) no longer describes it, so it is expired, and a directory's listing dropped.
+ *
+ * Parameters:
+ *   cache  per-mount cache
+ *   path   DOS path of the added object
+ */
+extern void Cache_NotifyAdded(LMCache_t *cache, const char *path);
+
+/*
+ * Update a cached path's details after this client changed them on the server.
+ *
+ * The details are overwritten and their lifetime restarted.  A file's captured content is dropped when the length or the load or exec
+ * address (which carry the datestamp) changes, or when content_changed is set, which also abandons any capture of the file under way
+ * through an open handle.  A path not cached is left alone; one cached as absent is dropped and its name added to the parent's listing,
+ * for a later lookup to fetch the details.  The time is noted as a local change, as for Cache_NotifyCreate.
+ *
+ * Parameters:
+ *   cache            per-mount cache
+ *   path             DOS path of the changed object
+ *   load_addr        RISC OS load address
+ *   exec_addr        RISC OS exec address
+ *   length           length in bytes
+ *   attrs            RISC OS attributes
+ *   content_changed  true if the file's bytes may have changed whatever its length and datestamp
+ */
+extern void Cache_NotifyMutate(LMCache_t *cache, const char *path, uint32_t load_addr, uint32_t exec_addr, uint64_t length, uint32_t attrs,
+                               bool content_changed);
+
+/*
+ * Update a cnode's details after a write through an open handle, as Cache_NotifyMutate does, given the cnode itself.
+ *
+ * No wire call may have come between resolving the cnode and this call, since a change notification handled during one can free it.
+ * The share root and negatives are left alone.  A cnode expired outright, whose other details are not to be trusted, stays expired.
+ *
+ * Parameters:
+ *   cache            per-mount cache
+ *   node             the cnode to update
+ *   load_addr        RISC OS load address
+ *   exec_addr        RISC OS exec address
+ *   length           length in bytes
+ *   attrs            RISC OS attributes
+ *   content_changed  true if the file's bytes may have changed whatever its length and datestamp
+ */
+extern void Cache_NotifyMutateNode(LMCache_t *cache, LMCacheNode_t *node, uint32_t load_addr, uint32_t exec_addr, uint64_t length,
+                                   uint32_t attrs, bool content_changed);
+
+/*
+ * Expire a cached path's details so the next lookup asks the server, after a change the cache cannot follow in detail.
+ *
+ * The cnode stays in place.  A file's captured content is dropped, and any capture of it under way through an open handle is abandoned.
+ * A directory's listing is kept: a change to the directory itself (its
+ * datestamp moves whenever a child is written) leaves its names as they were, and names that come or go are reported on their own.  A
+ * path not cached is left alone.
+ *
+ * Parameters:
+ *   cache  per-mount cache
+ *   path   DOS path of the changed object
+ */
+extern void Cache_NotifyChange(LMCache_t *cache, const char *path);
+
+/*
+ * Record that the server has reported a directory as already existing.
+ *
+ * Every entry recording the directory, or one above it, as absent is dropped, as is any current listing on the way that lacks the next
+ * name down.  Something cached at the path as other than a directory is expired.  What the directory holds is not known, so a listing
+ * the cache has of it is kept.
+ *
+ * Parameters:
+ *   cache  per-mount cache; NULL is a no-op
+ *   path   share-relative DOS path of the directory
+ */
+extern void Cache_NotifyDirExists(LMCache_t *cache, const char *path);
+
+/*
+ * Re-key a cached object from old_path to new_path after this client renamed it on the server.
+ *
+ * A file keeps its cnode, details and bound handles, re-keyed in place.  A directory is evicted with its subtree and re-inserted with its
+ * own details, its contents to be learned again.  A symbolic link's details, which are its target's, are left expired, because a relative
+ * link moved to another directory points at another object.  Whatever was cached at new_path is evicted first, no cached absence of a
+ * directory above new_path is left, and a destination parent not yet cached is added as a placeholder.  A rename within one directory
+ * moves the name within its listing; a move between directories, or a source not cached, drops both parents' listings.  The time is noted
+ * as a local change, as for Cache_NotifyDelete.  Any cnode pointer held across this call must be re-resolved.  A NULL path, or one naming
+ * the share root, does nothing.
+ *
+ * Parameters:
+ *   cache     per-mount cache
+ *   old_path  DOS path the object is moving from
+ *   new_path  DOS path the object is moving to
+ */
+extern void Cache_NotifyRename(LMCache_t *cache, const char *old_path, const char *new_path);
+
+/*
+ * Undo a Cache_NotifyRename made ahead of a rename the server then refused.
+ *
+ * The object goes back to old_path, but what the cache knew of new_path cannot: the rename evicted whatever was cached there, and the
+ * server most likely refused because an object of that name exists.  The listing of new_path's directory is dropped, so the next
+ * enumeration asks the server what is there.
+ *
+ * Parameters:
+ *   cache     per-mount cache
+ *   old_path  DOS path the object was moving from, and is back at
+ *   new_path  DOS path the server refused to move it to
+ */
+extern void Cache_NotifyRenameFailed(LMCache_t *cache, const char *old_path, const char *new_path);
+
+/*
+ * Report whether a CHANGE_NOTIFY event is the server echoing a change this client made.
+ *
+ * A removal is this client's echo when the echo window of the parent directory is open, the cache holds nothing live at the path spelt
+ * exactly, and the parent's listing does not name it spelt exactly; so the old name of a change of letter case made here is an echo too.
+ * Any other event is this client's echo when it names a cached file whose own echo window is open.  So a change another client makes
+ * beside this client's in the same directory is still applied.  A change another client makes to the very file this client changed,
+ * while its window is open, is taken for this client's, and its details are left until they expire.
+ *
+ * Parameters:
+ *   cache    per-mount cache
+ *   path     DOS path the event names
+ *   removed  true for a removal or the old name of a rename
+ *
+ * Returns: true if the event can be skipped as this client's echo.
+ */
+extern bool Cache_IsEcho(LMCache_t *cache, const char *path, bool removed);
+
+/*
+ * Open, or extend, the echo windows of a path this client has changed, or is about to change, and of its parent directory.
+ *
+ * Each window lasts LMCACHE_DEFAULT_NOTIFY_BACKOFF, so that Cache_IsEcho recognises the server's CHANGE_NOTIFY for the change.  The path's
+ * own window covers an addition or a modification, the parent's a removal.  A window is opened only on what is cached; a path that is
+ * not cached opens its parent's window alone.
+ *
+ * Parameters:
+ *   cache  per-mount cache; NULL does nothing
+ *   path   DOS path of the changed object
+ */
+extern void Cache_BumpSuppress(LMCache_t *cache, const char *path);
+
+/*
+ * Open, or extend, the echo window of a file this client has written to through an open handle.
+ *
+ * The window lasts LMCACHE_DEFAULT_NOTIFY_BACKOFF, so that Cache_IsEcho skips the server's CHANGE_NOTIFY for the write.  Unlike
+ * Cache_BumpSuppress it takes the cnode the handle is bound to, so it needs no path, and it opens no window on the parent directory, since
+ * a write removes nothing.
+ *
+ * Parameters:
+ *   node  cnode bound to the handle; NULL, or a vacant slot, does nothing
+ */
+extern void Cache_BumpSuppressNode(LMCacheNode_t *node);
+
+/*
+ * Respond to a CHANGE_NOTIFY overflow, after which the server has stopped reporting individual changes.
+ *
+ * Every listing is dropped, since it may lack a name another client added, and mutation_gen moves.  An overflow within
+ * LMCACHE_OVERFLOW_BUSY_THRESHOLD of this client's last local change is most likely the server reporting a burst of changes this client
+ * made, so the details keep their lifetimes and only "not found" entries and captured content are clamped to the grace lifetime: a lost
+ * notification may still have been another client's write.  Any other overflow, or any overflow on a mount with the aggressive-refresh
+ * quirk, clamps every entry's expiry to the grace lifetime and drops all captured content.  Either way every capture under way through an
+ * open handle is abandoned.  Cnodes are kept, but mutation_gen moves, so a caller holding a pointer across the call must re-resolve it.
+ * Needs a clock; safe with a NULL cache.
+ *
+ * Parameters:
+ *   cache  per-mount cache
+ */
+extern void Cache_NotifyOverflow(LMCache_t *cache);
+
+/*
+ * Record that the connection to a mount's server was lost, so changes made meanwhile go unreported: every entry is expired outright, and
+ * every listing, captured content and capture under way dropped.
+ *
+ * Parameters:
+ *   cache  per-mount cache; NULL is ignored
+ */
+extern void Cache_NotifyConnectionLost(LMCache_t *cache);
+
+/* Outcome of Cache_EnumerateDirectory. */
+typedef struct {
+  uint32_t child_count;   // children delivered to the visitor
+  bool is_authoritative;  // the scan did not fail: it listed the whole directory, or stopped once the visitor halted it
+  bool served_from_cache; // answered without wire traffic
+  bool not_found;         // the directory does not exist
+  int wire_error;         // when the listing failed part-way: the wire layer's error code, or 0 if it gave none
+} LMCacheEnumResult_t;
+
+/* Per-child visitor for Cache_EnumerateDirectory; returning false halts delivery, though the scan still completes and caches the listing,
+ * unless the directory cannot be cached (too big, or holding names that differ only in case), when the scan stops there.
+ */
+typedef bool (*Cache_EnumVisitor_t)(LMCacheNode_t *node, void *user);
+
+/*
+ * List a directory's children to a visitor, from the cache when it can and otherwise from the server, caching what the server returns.
+ *
+ * A directory whose listing is definitive and current is served straight from the cache with no wire traffic, as is a current negative
+ * entry for the path.  Otherwise the directory is listed from the server one reply at a time, inserting or refreshing each entry, and the
+ * children the scan did not list are evicted.  A directory too big to cache, or holding names that differ only in case, keeps no listing:
+ * its entries go to the visitor uncached.  A failure part-way leaves no listing and passes on the wire layer's error, and a directory the
+ * server reports missing is evicted and cached as absent under its parent.  Files listed with a size that may lag their data are given a
+ * short life.  A change notification handled during a wire call can free cnodes, so the directory cnode is found again by path when the
+ * cache has changed in between.
+ *
+ * Parameters:
+ *   cache     per-mount cache
+ *   dir_path  DOS path of the directory; a leading separator is skipped
+ *   visitor   called once per child, or NULL to only fill the cache; returning false halts delivery
+ *   user      passed through to the visitor
+ *
+ * Returns: the outcome; see LMCacheEnumResult_t.
+ */
+extern LMCacheEnumResult_t Cache_EnumerateDirectory(LMCache_t *cache, const char *dir_path, Cache_EnumVisitor_t visitor, void *user);
+
+/*
+ * Forget everything a mount has cached, for a change of setting that alters what the server's answers mean, such as whether hidden
+ * files are shown.  Open files carry on uncached.  Must not be called while a cache operation is in progress.  Safe with a NULL cache.
+ *
+ * Parameters:
+ *   cache  per-mount cache
+ */
+extern void Cache_Flush(LMCache_t *cache);
+
+/*
+ * Read the clock, so the cache counts its wraps even through long idle spells.  Called periodically; once a second is ample.
+ */
+extern void Cache_KeepTime(void);
+
+/*
+ * Bind a RISC OS file handle to a cache node in the handle table.
+ *
+ * A file opened more than once keeps a binding for each handle, so its cached details follow writes through any of them.  Handles are
+ * one-based; the node may be NULL to reserve the slot without a backing cnode.
+ *
+ * Parameters:
+ *   handle  one-based file handle; zero is rejected
+ *   cache   per-mount cache owning the node
+ *   node    cnode to bind, or NULL
+ *
+ * Returns: true on success, false if the handle is zero.
+ */
+extern bool Cache_HandleAssign(uint8_t handle, LMCache_t *cache, LMCacheNode_t *node);
+
+/*
+ * Release a file handle's slot in the handle table, as the file is closed.
+ *
+ * The cnode's own record of a handle is cleared only if it names this one, or moved to another handle still bound to it.  A capture the
+ * handle never attached is released too.  Safe with a zero handle.
+ *
+ * Parameters:
+ *   handle  one-based file handle
+ */
+extern void Cache_HandleClear(uint8_t handle);
+
+/*
+ * Return the cnode bound to a file handle, dropping its captured content first if that content's lifetime has run out.
+ *
+ * Reads through the handle are served from the content returned with the cnode, so the content's lifetime is enforced here.
+ *
+ * Parameters:
+ *   handle  one-based file handle
+ *
+ * Returns: the bound cnode, or NULL for an unbound or zero handle.
+ */
+extern LMCacheNode_t *Cache_HandleLookup(uint8_t handle);
+
+/*
+ * Report whether a named child is present in a directory using only the cached leafnames blob, with no wire traffic.
+ *
+ * This lets a lookup of an absent child fail without a QUERY_DIRECTORY, because a definitive directory's blob lists every child.  An
+ * answer is only given when the directory is definitive with an unexpired blob present, and ABSENT only when the listing leaves out
+ * none of the server's entries (LMCACHE_FLAG_UNLISTED_ENTRIES); otherwise the caller must fall back to the wire.  Names compare
+ * ignoring letter case.
+ *
+ * Parameters:
+ *   dir   the directory cnode to consult
+ *   leaf  the child leaf name to test
+ *
+ * Returns: LM_LEAF_PRESENT or LM_LEAF_ABSENT when the blob is authoritative, or LM_LEAF_UNKNOWN when the listing cannot tell.
+ */
+extern LMLeafStatus_t Cache_DirHasLeaf(const LMCacheNode_t *dir, const char *leaf);
+
+/*
+ * Install the function that folds a leaf name to the hash under which a listing indexes it.
+ *
+ * A listing finds a name through this hash, so any two names a caller's matcher can treat as the same (whether Cache_DirHasLeaf's
+ * letter-case-insensitive comparison or the equivalence handed to Cache_ListingFind) must fold to the same value.  Without one the cache
+ * folds letter case only.  Must be installed before any mount is created, and never changed while a listing exists.
+ *
+ * Parameters:
+ *   fold  the folding function, or NULL for the letter-case default
+ */
+extern void Cache_SetLeafFold(uint32_t (*fold)(const char *leaf));
+
+/*
+ * Find a name in a directory's listing that a caller's own rule accepts as the name sought.
+ *
+ * Only names folding to the same hash as the one sought are tried, so the rule must never accept two names that the installed fold
+ * (Cache_SetLeafFold) keeps apart.
+ *
+ * Parameters:
+ *   listing     a current listing, from Cache_LookupListing
+ *   sought      name being looked for
+ *   equivalent  returns true when the listed name answers for the one sought
+ *
+ * Returns: the name as listed, valid until the cache is next changed, or NULL if the listing holds none the rule accepts.
+ */
+extern const char *Cache_ListingFind(const LMCacheNode_t *listing, const char *sought,
+                                     bool (*equivalent)(const char *listed, const char *sought));
+
+/*
+ * Report whether the cache holds a directory path as absent, so a lookup beneath it needs no request to the server.
+ *
+ * A compiler probing each include path in turn looks up headers under directories that are not there, and each such lookup would cost
+ * several round trips to the server to find that out.  The path is ruled out if it, or a directory on the way to it, is cached as absent,
+ * or if the current listing of the nearest listed directory above it leaves none of the server's entries out and lacks the next name down.
+ * Only current listings count, so a directory made elsewhere is seen once its parent's listing learns of it, by notification or by listing
+ * the parent again.
+ *
+ * Parameters:
+ *   cache       per-mount cache
+ *   dir_path    share-relative DOS path of the directory
+ *   equivalent  returns true when a listed name answers for the one sought, as for Cache_ListingFind
+ *
+ * Returns: true if the path cannot exist; false if it may, or the cache cannot tell.
+ */
+extern bool Cache_PathRuledOut(LMCache_t *cache, const char *dir_path, bool (*equivalent)(const char *listed, const char *sought));
+
+/*
+ * Find a directory whose cached listing can be trusted as its complete, current list of children.
+ *
+ * The listing has its own lifetime, separate from the directory cnode's: refreshing the directory's own details (a catalogue read, or an
+ * enumeration of its parent) says nothing about its children, and the directory's details expiring says nothing about the listing.
+ * Callers that read a listing's leaf names directly must find the directory through here.
+ *
+ * Parameters:
+ *   cache     per-mount cache; NULL yields NULL
+ *   dir_path  DOS path of the directory; a leading separator is tolerated
+ *
+ * Returns: the directory cnode if its listing is complete (DEFINITIVE, with a blob) and has not expired, otherwise NULL.
+ */
+extern LMCacheNode_t *Cache_LookupListing(LMCache_t *cache, const char *dir_path);
+
+/*
+ * Report whether a directory is known not to be cacheable: too big to list, or holding names that differ only in case.
+ *
+ * Such a directory is never served from the cache, and an enumeration of it stops reading as soon as the caller has what it asked for, so
+ * callers that page through it or look names up in it do better going to the server directly, as an uncached mount does.
+ *
+ * Parameters:
+ *   cache     per-mount cache; NULL yields false
+ *   dir_path  DOS path of the directory; a leading separator is tolerated
+ *
+ * Returns: true if the directory is cached and flagged EXCEEDS_CACHE or CASE_TWINS.
+ */
+extern bool Cache_DirNotCacheable(LMCache_t *cache, const char *dir_path);
+
+/*
+ * Claim a block from a mount's content heap to capture the bytes read through an open handle.
+ *
+ * The claim stays recorded against the handle rather than being handed over outright, because emptying or destroying the content heap
+ * frees the block from under the open file: Cache_StreamBlock then returns NULL and the capture stops.  Any capture the handle
+ * already held is released first.  The details of the file the handle is bound to are recorded with the claim, so that
+ * Cache_StreamAttach can refuse bytes read before a change.  A full heap gives up other files' content to make room (expired content
+ * first, then the least recently used), but never a directory listing, which a build searches again and again.
+ *
+ * Parameters:
+ *   handle  one-based RISC OS file handle
+ *   cache   mount whose content heap to claim from
+ *   bytes   capture capacity in bytes
+ *
+ * Returns: the block, or NULL if the handle is zero, the cache NULL, or no room could be made.
+ */
+extern uint8_t *Cache_StreamClaim(uint8_t handle, LMCache_t *cache, size_t bytes);
+
+/*
+ * Return the block capturing a handle's content.
+ *
+ * Parameters:
+ *   handle  one-based RISC OS file handle
+ *
+ * Returns: the block, or NULL if the handle has no capture or the cache has since withdrawn it.
+ */
+extern uint8_t *Cache_StreamBlock(uint8_t handle);
+
+/*
+ * Abandon a handle's capture, returning its block to the content heap.  Safe when the handle has none, or is zero.
+ *
+ * Parameters:
+ *   handle  one-based RISC OS file handle
+ */
+extern void Cache_StreamRelease(uint8_t handle);
+
+/*
+ * Install a handle's completed capture as the content of the file cnode the handle is bound to, through Cache_AttachContent.
+ *
+ * Parameters:
+ *   handle  one-based RISC OS file handle
+ *   length  number of bytes captured
+ *
+ * Returns: true if the capture was installed; the handle then holds none.  False, leaving any capture with the handle, when: the handle
+ * has no capture; it is no longer bound to a file of the capture's mount; the file's load address, exec address or length differ from
+ * those recorded at the claim; the file is open on another handle, which may have written to it; or Cache_AttachContent refuses it.
+ */
+extern bool Cache_StreamAttach(uint8_t handle, uint64_t length);
+
+/*
+ * Report whether a file's content is worth capturing as it is read.
+ *
+ * Content caching must be on for the mount, the length non-zero and within the mount's per-file cap, and the load address must carry a
+ * filetype (top twelve bits all set) on the cacheable list, the types a build loads again and again: Text (which C source and headers
+ * carry), Data, BASIC, Obey, TaskObey, Utility and Absolute.  Other types are left out, so that large files such as sprites and archives
+ * do not churn the content heap.
+ *
+ * Parameters:
+ *   cache      per-mount cache; NULL yields false
+ *   load_addr  the file's RISC OS load address
+ *   length     file length in bytes
+ *
+ * Returns: true if the file's content should be captured.
+ */
+extern bool Cache_ShouldCacheContent(const LMCache_t *cache, uint32_t load_addr, uint64_t length);
+
+/*
+ * Note a read of a file's whole content, by a load or a read-only open, and report whether the file has been read before.
+ *
+ * Content is kept only on a file's second read.  A copy reads each file once, and keeping what it reads would cost a memory copy per file
+ * and push out content a build reads again, such as headers.  The mark lasts as long as the file's cnode, through refreshes of its
+ * details and changes to its content; a cnode evicted between two reads loses it, which is the right bias when the cache is short of room.
+ *
+ * Parameters:
+ *   node  the file's cnode
+ *
+ * Returns: true if the file was read before, so its content should be kept this time.
+ */
+extern bool Cache_ReadAgain(LMCacheNode_t *node);
+
+#endif

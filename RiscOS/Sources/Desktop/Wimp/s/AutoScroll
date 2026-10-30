@@ -1,0 +1,1266 @@
+; Copyright 1998 Acorn Computers Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+; > Wimp.s.AutoScroll
+
+;;-----------------------------------------------------------------------------
+;; Automatic window scrolling
+;;-----------------------------------------------------------------------------
+
+    [ Autoscr
+
+; Flags layout
+
+af_enable       *       2_00000000000000000000000000000011
+af_horizontal   *       2_00000000000000000000000000000001
+af_vertical     *       2_00000000000000000000000000000010
+af_scrollrq     *       2_00000000000000000000000000000100
+af_read         *       2_00000000000000000000000010000000
+af_scrolling    *       2_00000000000000000000000100000000
+af_ptrout       *       2_00000000000000000000001000000000
+af_ptrpause     *       2_00000000000000000000010000000000
+af_ptrin        *       2_00000000000000000000100000000000
+af_ptrleft      *       2_00000000000000000001000000000000
+af_ptrdown      *       2_00000000000000000010000000000000
+af_ptrright     *       2_00000000000000000100000000000000
+af_ptrup        *       2_00000000000000001000000000000000
+af_canleft      *       2_00000000000000010000000000000000
+af_candown      *       2_00000000000000100000000000000000
+af_canright     *       2_00000000000001000000000000000000
+af_canup        *       2_00000000000010000000000000000000
+af_status_bits  *       2_00000000000011111111111100000000
+af_status_can   *       2_00000000000011110000000000000000
+af_status_horiz *       2_00000000000001010000000000000000
+af_status_vert  *       2_00000000000010100000000000000000
+      [ CnP
+af_scrollicon   *       2_00000000000000000000000000001000
+      ]
+
+; Block definition
+                ^       0
+a_handle        #       4
+a_pausex0       #       4
+a_pausey0       #       4
+a_pausex1       #       4
+a_pausey1       #       4
+a_pauselen      #       4
+a_rout          #       4
+a_wsptr         #       4
+
+;;-----------------------------------------------------------------------------
+;; SWI Wimp_AutoScroll
+;;
+;; in   R0 = autoscroll state flags
+;;           bit 0 set => enable horizontal scrolling
+;;           bit 1 set => enable vertical scrolling
+;;           bit 2 set => send Scroll_Request instead of Open_Window_Request
+      [ CnP
+;;           bit 3 set => scroll icon
+      ]
+;;           bit 7 set => just read current states of flags/block
+;;      R1 -> block
+;;           +0  window handle to scroll (must be owned by task)
+      [ CnP
+;;           if bit 3 set in R0,then +4 = icon handle of icon to scroll
+      ]
+;;           +4  left pause zone size
+;;           +8  bottom pause zone size
+;;           +12 right pause zone size
+;;           +16 top pause zone size
+;;           +20 pause duration (0 = pause not required, -1 = default length)
+;;           +24 pointer-changing routine (0 for none, 1 for default)
+;;           +28 workspace pointer for routine (if [R1,#24] >= &8000)
+;; out  R0 = new autoscroll state flags
+;;           bits 0-2 preserved, or (if bit 7 set on entry) read
+;;           bit 7 clear
+;;           bit 8  set => pause complete
+;;           bit 9  set => pointer not over visible area rectangles
+;;           bit 10 set => pointer over pause zone(s) rectangles
+;;           bit 11 set => pointer over centre zone rectangles
+;;           bit 12 set => pointer left of centre zone
+;;           bit 13 set => pointer below centre zone
+;;           bit 14 set => pointer right of centre zone
+;;           bit 15 set => pointer above centre zone
+;;           bit 16 set => there is work area left of the visible area
+;;           bit 17 set => there is work area below the visible area
+;;           bit 18 set => there is work area right of the visible area
+;;           bit 19 set => there is work area above the visible area
+;;-----------------------------------------------------------------------------
+
+SWIWimp_AutoScroll
+        MyEntry "AutoScroll"
+
+        TST     R0, #af_read
+        BNE     return_autoscroll_state ; Wimp_Init not necessary to read state
+
+        LDR     R14, taskhandle
+        LDR     R14, [wsptr, R14]
+        TST     R14, #task_unused
+        MyXError  WimpBadOp, NE, L
+        BVS     ExitWimp                ; check alive
+
+      [ CnP
+        TST     R0,#af_scrollicon       ; we're requesting an icon scroll to start or stop
+        BNE     iconautoscroll_swi
+      ]
+
+        TST     R0, #af_enable
+        BEQ     %FT01                   ; don't bother validating if disabling
+
+        CMP     userblk, #ApplicationStart
+        MyXError  WimpBadPtrInR1, LO, L
+        BVS     ExitWimp                ; then check pointer
+
+        LDR     handle, [userblk, #a_handle]
+        BL      checkhandle_owner
+        BVS     ExitWimp                ; then check it's one of our windows
+
+        ASSERT  a_handle = 0
+        LDMIA   userblk, {R1, cx0, cy0, cx1, cy1, x0, y0, x1}
+01
+        BL      int_autoscroll
+
+        LDRVC   R0, autoscr_state
+        B       ExitWimp
+
+return_autoscroll_state
+        CMP     userblk, #ApplicationStart
+        MyXError  WimpBadPtrInR1, LO, L
+        BVS     ExitWimp                ; just check pointer
+
+        ADRL    R14, autoscr_state
+        LDMIA   R14, {R0, R1, cx0, cy0, cx1, cy1, x0, y0, x1}
+
+        TST     R0, #af_enable
+        ASSERT  a_handle = 0
+        STMNEIA userblk, {R1, cx0, cy0, cx1, cy1, x0, y0, x1}
+
+        B       ExitWimp
+
+;;-----------------------------------------------------------------------------
+;; int_autoscroll
+;;
+;; in   R0  = autoscroll state flags (see above)
+;;      R1  = (external) window handle to scroll
+;;      cx0 = left pause zone size
+;;      cy0 = bottom pause zone size
+;;      cx1 = right pause zone size
+;;      cy1 = top pause zone size
+;;      x0  = pause duration (0 = pause not required, -1 = default length)
+;;      y0  = pointer routine (or 0 or 1)
+;;      x1  = pointer routine workspace (if y0 >= &8000)
+;;-----------------------------------------------------------------------------
+
+int_autoscroll
+        Entry   "R0-x1"
+        MOV     R0, #0
+        BL      update_autoscroll_state ; deactivate any existing autoscroll
+                                        ; (does nothing if already off)
+        LDR     R0, [sp]
+
+        ADRL    R14, autoscr_handle
+        STMIA   R14, {R1, cx0, cy0, cx1, cy1, x0, y0, x1}
+
+        CMP     x0, #-1                 ; default pause time requested?
+        LDREQB  x0, autoscr_default_pause
+        MOVEQ   x0, x0, LSL #1
+        ADDEQ   x0, x0, x0, LSL #2      ; load default time *10 (ds -> cs)
+
+        CMP     y0, #ApplicationStart
+        BHS     %FT01                   ; if a user routine, leave alone
+
+        TST     y0, #1                  ; NB if you add further types, keeping
+        MOVEQ   y0, #0                  ; bit 0 set will guarantee that some
+        ADRNE   y0, autoscroll_pointer_routine_1 ; sort of pointer is displayed
+        MOV     x1, wsptr               ; even when running on this old Wimp
+
+01      ADRL    R14, autoscr_pause
+        STMIA   R14, {x0, y0, x1}
+
+        BL      update_autoscroll_state
+
+        CLRV
+        TST     R0, #af_enable
+        EXIT    NE
+
+        MOV     R0, #SpriteReason_SetPointerShape
+        ADRL    R14, special_pointer    ; if turned off, get pointer to sprite
+        LDR     R14, [R14]              ; name to return shape number 1 to
+        TEQ     R14, #0
+        ADREQL  R2, ptr_default2
+        ADRNEL  R2, pointer_sprite
+        MOV     R3, #&61                ; just reprogram the shape
+        MOV     R4, #0                  ; assume origin at top-left
+        MOV     R5, #0
+        MOV     R6, #0
+        MOV     R7, #0
+        SWI     XWimp_SpriteOp
+        CLRV
+        EXIT
+
+update_autoscroll_state
+; In: R0 = new autoscroll state, in bits 0-4
+; Sends a message to the autoscroll owner if the state (of any bit) has changed
+        Entry   "R0-R2"
+        LDR     R1, autoscr_state
+        STR     R0, autoscr_state
+        BL      update_autoscroll_flags
+        LDR     R0, autoscr_state
+
+        CLRV
+        TEQ     R0, R1
+        EXIT    EQ                      ; no change
+
+        LDR     R14, autoscr_rout
+        TEQ     R14, #0
+        EXIT    EQ                      ; no pointer update routine
+
+        CLRV                            ; make sure clean on entry
+        Push    "wsptr"
+        LDR     R14, autoscr_rout
+        Push    "R14"                   ; store new PC
+        LDR     R14, autoscr_wsptr
+        Push    "R14"                   ; store new wsptr
+        MOV     R14, PC                 ; gets PC+8
+        Pull    "wsptr, PC"             ; BL [autoscr_rout]
+        Pull    "wsptr"                 ; retrieve Wimp wsptr
+        EXIT
+
+update_autoscroll_flags
+; Updates status flag bits to reflect current state
+        Entry   "R0-y1,handle,userblk"
+        ADRL    R14, autoscr_state
+        LDMIA   R14, {R0, R1, cx0, cy0, cx1, cy1}
+
+        TST     R0, #af_enable
+        MOVEQ   R0, #0                  ; if turned off, zero all bits and exit
+        STREQ   R0, autoscr_state
+        STREQB  R0, autoscr_scrolling
+        STREQB  R0, autoscr_pausing
+        EXIT    EQ
+
+        LDR     R14, =af_status_bits    ; all bits default to 0
+        BIC     userblk, R0, R14        ; keep in userblk until end of routine
+
+        Abs     handle, R1
+        LDR     R0, mousexpos
+        LDR     R1, mouseypos
+
+        ADD     R14, handle, #w_wax0
+        LDMIA   R14, {cx0, cy0, cx1, cy1} ; cx0-cy1 = visible area
+        SUB     cx1, cx1, #1              ; make inclusive
+        SUB     cy1, cy1, #1
+
+        BL      get_centre_zone         ; x0-y1 = centre zone
+        SUB     x1, x1, #1              ; make inclusive
+        SUB     y1, y1, #1
+
+        CMP     cx0, R0                 ; is pointer outside visible area?
+        CMPLE   R0, cx1
+        CMPLE   cy0, R1
+        CMPLE   R1, cy1
+        ORRGT   userblk, userblk, #af_ptrout
+        BGT     %FT01
+
+        CMP     x0, R0                  ; is it in the centre, or a pause zone?
+        CMPLE   R0, x1
+        CMPLE   y0, R1
+        CMPLE   R1, y1
+        ORRGT   userblk, userblk, #af_ptrpause
+        ORRLE   userblk, userblk, #af_ptrin
+        MOVLE   R14, #0
+        STRLEB  R14, autoscr_scrolling  ; deactivate scrolling if in centre
+        STRLEB  R14, autoscr_pausing
+01
+        LDRB    R14, autoscr_scrolling  ; read separate flag for this
+        TEQ     R14, #0
+        ORRNE   userblk, userblk, #af_scrolling
+
+        CMP     R0, x0                  ; is it in the left pause zone?
+        ORRLT   userblk, userblk, #af_ptrleft
+
+        CMP     R1, y0                  ; is it in the down pause zone?
+        ORRLT   userblk, userblk, #af_ptrdown
+
+        CMP     R0, x1                  ; is it in the right pause zone?
+        ORRGT   userblk, userblk, #af_ptrright
+
+        CMP     R1, y1                  ; is it in the up pause zone?
+        ORRGT   userblk, userblk, #af_ptrup
+
+        ADD     R14, handle, #w_wax0    ; get visible area and scroll offsets
+        LDMIA   R14, {cx0, cy0, cx1, cy1, x0, y1}
+        SUB     cx1, cx1, cx0           ; convert to work area coordinates
+        SUB     cy0, cy0, cy1
+        MOV     cx0, x0
+        MOV     cy1, y1
+        ADD     cx1, cx1, cx0
+        ADD     cy0, cy0, cy1
+
+        ADD     R14, handle, #w_wex0    ; get work area extent
+        LDMIA   R14, {x0, y0, x1, y1}
+
+        CMP     cx0, x0                 ; is there space to move left?
+        ORRGT   userblk, userblk, #af_canleft
+
+        CMP     cy0, y0                 ; is there space to move down?
+        ORRGT   userblk, userblk, #af_candown
+
+        CMP     cx1, x1                 ; is there space to move right?
+        ORRLT   userblk, userblk, #af_canright
+
+        CMP     cy1, y1                 ; is there space to move up?
+        ORRLT   userblk, userblk, #af_canup
+
+        AND     R0, userblk, #af_enable
+        TEQ     R0, #af_vertical        ; do we clear the horizontal bits?
+        BICEQ   userblk, userblk, #af_status_horiz
+
+        TEQ     R0, #af_horizontal      ; do we clear the vertical bits?
+        BICEQ   userblk, userblk, #af_status_vert
+
+        STR     userblk, autoscr_state
+        EXIT
+
+get_centre_zone
+; In:  handle = autoscroll window handle
+; Out: x0-y0  = centre zone (may be zero width or height)
+        Entry   "cx0-cy1"
+        ADRL    R14, autoscr_pz_x0      ; load zone sizes
+        LDMIA   R14, {cx0, cy0, cx1, cy1}
+
+        CMP     cx0, #0                 ; can't be negative
+        MOVLT   cx0, #0
+        CMP     cy0, #0
+        MOVLT   cy0, #0
+        CMP     cx1, #0
+        MOVLT   cx1, #0
+        CMP     cy1, #0
+        MOVLT   cy1, #0
+
+        LDR     R14, autoscr_state
+        AND     R14, R14, #af_enable
+        TEQ     R14, #af_vertical       ; if just vertical scrolling,
+        MOVEQ   cx0, #0                 ; don't supply horizontal pause zones
+        MOVEQ   cx1, #0
+        TEQ     R14, #af_horizontal     ; if just horizontal scrolling,
+        MOVEQ   cy0, #0                 ; don't supply vertical pause zones
+        MOVEQ   cy1, #0
+
+        ADD     R14, handle, #w_wax0    ; load visible area
+        LDMIA   R14, {x0, y0, x1, y1}
+
+        ADD     x0, x0, cx0             ; add on the specified borders
+        SUB     x1, x1, cx1
+        ADD     y0, y0, cy0
+        SUB     y1, y1, cy1
+
+        CMP     x1, x0                  ; if x pause zone won't fit
+        ADDLT   x1, x1, x0
+        MOVLT   x0, x1, LSR#1           ; find the middle of the overlap
+        MOVLT   x1, x0
+
+        CMP     y1, y0                  ; if y pause zone won't fit
+        ADDLT   y1, y1, y0
+        MOVLT   y0, y1, LSR#1           ; find the middle of the overlap
+        MOVLT   y1, y0
+
+        EXIT
+
+autoscroll_pointer_routine_1
+; handles pointer changes according to the default rules
+; In: R0 = new autoscroll state
+;     R1 = old autoscroll state
+        Entry   "R0-R7"
+        TST     R0, #af_scrolling       ; don't show pointer if not scrolling
+        MOVEQ   R0, #0
+        TST     R1, #af_scrolling
+        MOVEQ   R1, #0
+
+        AND     R0, R0, R0, LSL #4      ; only consider directions in which we
+        AND     R0, R0, #af_status_can  ; can scroll *and* where the pointer is
+        AND     R1, R1, R1, LSL #4      ; suitably positioned
+        AND     R1, R1, #af_status_can
+
+        TEQ     R0, #0                  ; reduce to on/off status
+        MOVNE   R0, #1
+        TEQ     R1, #0
+        MOVNE   R1, #1
+
+        TEQ     R0, R1                  ; don't do anything if status constant
+        EXIT    EQ
+
+        TEQ     R0, #0                  ; is it being turned on or off?
+        BEQ     %FT10
+
+        ; turn *on* autoscroll pointer
+
+        ADRL    R4, autoscr_old_ptr_colours
+
+        MOV     R0, #1                  ; remember old colour 1
+        MOV     R1, #&19
+        SWI     XOS_ReadPalette
+        BIC     R2, R2, #&FF
+        STR     R2, [R4], #4
+
+        MOV     R0, #2                  ; remember old colour 2
+        MOV     R1, #&19
+        SWI     XOS_ReadPalette
+        BIC     R2, R2, #&FF
+        STR     R2, [R4], #4
+
+        MOV     R0, #3                  ; remember old colour 3
+        MOV     R1, #&19
+        SWI     XOS_ReadPalette
+        BIC     R2, R2, #&FF
+        STR     R2, [R4], #4
+
+        ASSERT  autoscr_old_ptr_number - autoscr_old_ptr_colours = 3*4
+        MOV     R0,#OsByte_SelectPointer
+        MOV     R1,#127                 ; this is invalid, so won't be set
+        SWI     XOS_Byte                ; R1 := actual shape number
+        AND     R1, R1, #&F             ; forget linkage flag
+        STRB    R1, [R4]                ; remember old pointer number
+
+        ADR     R0, autoscroll_pointers
+        LDR     R2, [sp]                ; get R0 from stack
+        AND     R2, R2, #af_enable      ; get allowed directions
+        SUB     R2, R2, #1
+        ADD     R2, R0, R2, LSL#4       ; point at the details for relevant ptr
+
+        MOV     R0, #SpriteReason_ReadSpriteSize
+        SWI     XWimp_SpriteOp
+        MOV     R5, R4, LSR#1           ; active point y-offset
+        MOV     R4, R3, LSR#1           ; active point x-offset
+
+        TEQ     R1, #1                  ; does pointer number need changing?
+        MOVEQ   R3, #&61                ; just change shape
+        MOVNE   R3, #&21                ; change number and shape
+                                        ; bit 5 clear => uses Wimp palette
+        MOV     R6, #0                  ; scale for mode
+        MOV     R7, #0                  ; no translation table
+        MOV     R0, #SpriteReason_SetPointerShape
+        SWI     XWimp_SpriteOp
+
+        CLRV
+        EXIT
+
+10      ; turn *off* autoscroll pointer
+        LDRB    R3, autoscr_old_ptr_number
+        TEQ     R3, #1
+
+        MOVNE   R0, #SpriteReason_SetPointerShape
+        MOVNE   R2, #0
+        ORRNE   R3, R3, #&30            ; just change number
+        MOVNE   R4, #0
+        MOVNE   R5, #0
+        MOVNE   R6, #0
+        MOVNE   R7, #0
+        SWINE   XWimp_SpriteOp
+
+        MOV     R0, #SpriteReason_SetPointerShape
+        ADRL    R2, ptr_default2
+        MOV     R3, #&61                ; just change shape 1 to ptr_default
+        MOV     R4, #0
+        MOV     R5, #0
+        MOV     R6, #0
+        MOV     R7, #0
+        SWI     XWimp_SpriteOp
+
+        ADRL    R2, autoscr_old_ptr_colours
+
+        LDR     R0, [R2], #4            ; R0 = &BBGGRR00
+        MOV     R1, R0, LSR#24          ; R1 = &BB
+        MOV     R0, R0, LSL#8           ; R0 = &GGRR0000
+        LDR     R3, =&1901
+        ORR     R0, R0, R3
+        Push    "R0, R1"
+        MOV     R0, #OsWord_WritePalette
+        MOV     R1, sp
+        SWI     XOS_Word                ; restore original pointer colour 1
+        ADD     sp, sp, #8
+
+        LDR     R0, [R2], #4            ; R0 = &BBGGRR00
+        MOV     R1, R0, LSR#24          ; R1 = &BB
+        MOV     R0, R0, LSL#8           ; R0 = &GGRR0000
+        LDR     R3, =&1902
+        ORR     R0, R0, R3
+        Push    "R0, R1"
+        MOV     R0, #OsWord_WritePalette
+        MOV     R1, sp
+        SWI     XOS_Word                ; restore original pointer colour 2
+        ADD     sp, sp, #8
+
+        LDR     R0, [R2], #4            ; R0 = &BBGGRR00
+        MOV     R1, R0, LSR#24          ; R1 = &BB
+        MOV     R0, R0, LSL#8           ; R0 = &GGRR0000
+        LDR     R3, =&1903
+        ORR     R0, R0, R3
+        Push    "R0, R1"
+        MOV     R0, #OsWord_WritePalette
+        MOV     R1, sp
+        SWI     XOS_Word                ; restore original pointer colour 3
+        ADD     sp, sp, #8
+
+        CLRV
+        EXIT
+
+autoscroll_pointers
+        DCB     "ptr_autoscrh", 0, 0, 0, 0
+        DCB     "ptr_autoscrv", 0, 0, 0, 0
+        DCB     "ptr_autoscr", 0, 0, 0, 0, 0
+
+poll_autoscroll
+; Called during poll - update scroll flags, issue open/scroll rqs if necessary
+        EntryS  "R0-cy1"
+        LDR     R0, autoscr_state
+        BL      update_autoscroll_state
+
+        LDRB    R0, autoscr_scrolling   ; what we do depends upon current state
+        TEQ     R0, #0
+        BNE     continueautoscroll
+        LDRB    R0, autoscr_pausing
+        TEQ     R0, #0
+        BNE     %FT10
+
+        ; Neither pausing nor scrolling
+        LDR     R0, autoscr_state
+        TST     R0, #af_ptrin
+        EXITS   NE                      ; nothing to do in centre
+
+        LDR     R1, autoscr_pause
+        TEQ     R1, #0                  ; if no pause, start scrolling
+        BEQ     startautoscroll         ; as soon as we leave the centre
+
+        TST     R0, #af_ptrout
+        EXITS   NE                      ; can't do anything if outside
+
+        SWI     XOS_ReadMonotonicTime   ; R0 = current time
+        ADD     R0, R0, R1              ; R0 = time when pause ends
+        STR     R0, autoscr_next_t
+        LDR     R0, mousexpos           ; recalculate pause end time
+        STR     R0, autoscr_last_x      ; if these change subsequently
+        LDR     R0, mouseypos           ;
+        STR     R0, autoscr_last_y      ;
+        MOV     R0, #-1
+        STRB    R0, autoscr_pausing     ; mark pausing
+        EXITS
+
+10      ; Pausing
+        LDR     R0, autoscr_state
+        TST     R0, #af_ptrpause
+        MOVEQ   R0, #0                  ; abandon the pause if no longer in
+        STREQB  R0, autoscr_pausing     ; the pause zone(s)
+        EXITS   EQ
+
+        SWI     XOS_ReadMonotonicTime   ; R0 = current time
+        LDR     cx0, mousexpos
+        LDR     cx1, autoscr_last_x
+        TEQ     cx0, cx1
+        LDREQ   cy0, mouseypos
+        LDREQ   cy1, autoscr_last_y
+        TEQEQ   cy0, cy1
+
+        LDRNE   R1, autoscr_pause       ; if the pointer's moved, update the
+        ADDNE   R0, R0, R1              ; pointer position and pause end time
+        STRNE   R0, autoscr_next_t
+        STRNE   cx0, autoscr_last_x
+        STRNE   cy0, autoscr_last_y
+        EXITS   NE
+
+        LDR     R1, autoscr_next_t      ; exit if pause hasn't finished
+        CMP     R0, R1
+        EXITS   LO                      ; else drop through to startautoscroll
+
+startautoscroll
+        MOV     R0, #-1                 ; set flags as necessary
+        STRB    R0, autoscr_scrolling
+        MOV     R0, #0
+        STRB    R0, autoscr_pausing
+        LDR     R0, autoscr_state
+        BL      update_autoscroll_state
+
+        SWI     XOS_ReadMonotonicTime   ; R0 = current time
+        STR     R0, autoscr_last_t
+        ADD     R0, R0, #autoscr_update_delay
+        STR     R0, autoscr_next_t
+
+        LDR     R0, autoscr_state
+        TST     R0, #af_scrollrq        ; if issuing Open_Window_Requests,
+        EXITS   EQ                      ; don't do anything else at this time
+
+        LDR     handle, autoscr_handle
+        Abs     handle, handle
+        LDR     R0, [handle, #w_taskhandle]
+        Task    "R0",, "Autoscroll start"
+        ADD     sp, sp, #Proc_RegOffset+7*4     ; skip stuff pushed to stack
+        MOV     R1, #0                          ; x scroll "direction"
+        MOV     R2, #0                          ; y scroll "direction"
+        B       userscroll                      ; return Scroll_Request event
+
+continueautoscroll
+        LDRB    R0, autoscr_pausing     ; check flag - ensure control passes
+        TEQ     R0, #0                  ; further down the Wimp_Poll action
+        MOVNE   R0, #0                  ; list at least once per window update
+        STRB    R0, autoscr_pausing
+        EXITS   NE
+
+        SWI     XOS_ReadMonotonicTime   ; R0 = current time
+        LDR     R1, autoscr_next_t
+        CMP     R1, R0
+        EXITS   HI                      ; give other events a chance
+
+        MOV     R1, #-1
+        STRB    R1, autoscr_pausing     ; give other events a chance next time
+
+        LDR     R1, autoscr_last_t
+        SUB     R1, R0, R1              ; time since last update
+        STR     R1, tempworkspace       ; keep in case we need it later
+        STR     R0, autoscr_last_t
+        ADD     R0, R0, #autoscr_update_delay
+        STR     R0, autoscr_next_t
+
+        LDR     handle, autoscr_handle
+        Abs     handle, handle
+        LDR     R0, [handle, #w_taskhandle]
+        Task    "R0",, "Autoscroll continue"
+
+        LDR     R0, autoscr_state
+        TST     R0, #af_scrollrq
+        AND     R0, R0, R0, LSL#4       ; clear "can" bits where pointer isn't
+        BEQ     continueautoscroll_open
+
+        ADD     sp, sp, #Proc_RegOffset+7*4     ; skip stuff pushed to stack
+        MOV     R1, #0                  ; determine scroll "directions"
+        MOV     R2, #0
+        TST     R0, #af_canleft
+        MOVNE   R1, #-3
+        TST     R0, #af_candown
+        MOVNE   R2, #-3
+        TST     R0, #af_canright
+        MOVNE   R1, #+3
+        TST     R0, #af_canup
+        MOVNE   R2, #+3
+        B       userscroll              ; return Scroll_Request event
+
+continueautoscroll_open
+        TST     R0, #af_status_can
+        EXITS   EQ                      ; don't do anything if we can't scroll
+
+        ADD     sp, sp, #Proc_RegOffset+7*4     ; skip stuff pushed to stack
+        ADD     R14, handle, #w_wax0
+        LDMIA   R14, {cx0, cy0, cx1, cy1, x0, y0}
+        STMIA   userblk, {R0, cx0, cy0, cx1, cy1}
+
+        MOV     cx0, x0                 ; old scroll offsets
+        MOV     cy0, y0
+        BL      get_centre_zone         ; overwrites x0-y1
+        LDR     R14, dx
+        SUB     x1, x1, R14             ; make inclusive
+        LDR     R14, dy
+        SUB     y1, y1, R14
+
+        LDR     R14, tempworkspace      ; retrieve time since last update
+        LDR     R1, mousexpos           ; find pointer x offset from window
+        TST     R0, #af_canleft
+        SUBNE   R1, R1, x0
+        SUBEQ   R1, R1, x1
+        TST     R0, #af_status_horiz
+        MULNE   R1, R14, R1             ; multiply by time, and scale down
+        MOVNE   R1, R1, ASR#autoscr_speed_factor
+        TEQ     R1, #0
+        LDRPL   R14, dx                 ; compensate for the asymmetric effect
+        ADDPL   R1, R1, R14             ; of the rounding-down in OpenWindow
+        TST     R0, #af_status_horiz
+        ADDNE   cx0, cx0, R1            ; add to old scroll offset
+
+        LDR     R14, tempworkspace      ; retrieve time since last update
+        LDR     R1, mouseypos           ; find pointer y offset from window
+        TST     R0, #af_candown
+        SUBNE   R1, R1, y0
+        SUBEQ   R1, R1, y1
+        TST     R0, #af_status_vert
+        MULNE   R1, R14, R1             ; multiply by time, and scale down
+        MOVNE   R1, R1, ASR#autoscr_speed_factor
+        TEQ     R1, #0
+        LDRPL   R14, dy                 ; compensate for the asymmetric effect
+        ADDPL   R1, R1, R14             ; of the rounding-down in OpenWindow
+        TST     R0, #af_status_vert
+        ADDNE   cy0, cy0, R1            ; add to old scroll offset
+
+        Rel     cx1, handle             ; finish writing to [userblk]
+        STR     cx1, [userblk, #u_handle]
+        ADD     R14, userblk, #u_scx
+        STMIA   R14, {cx0, cy0, cx1}    ; store scx, scy, bhandle
+
+        B       Exit_OpenWindow         ; finally, get the window re-opened!
+
+      ]
+        LTORG
+        DCD     12648430                ; amuse the hackers... ;-)
+
+      [ CnP :LAND: Autoscr
+; Icon autoscrolling code
+
+; status flags
+cnp_af_selectionscroll  * 2_00000001
+cnp_af_ghostscroll      * 2_00000010
+cnp_af_enabled          * 2_00000011
+
+cnp_af_scrolling_left   * 2_00000100
+cnp_af_scrolling_right  * 2_00001000
+cnp_af_pausezone_left   * 2_00010000
+cnp_af_pausezone_right  * 2_00100000
+
+cnp_af_scrollable       * 2_01000000
+cnp_af_pointer_changed  * 2_10000000
+
+iconautoscroll_swi ROUT
+        TST     R0,#af_horizontal
+        BEQ     %FT01                   ; disable scroll if we're not doing horizontal scrolling
+
+        ; check pointer suitable to user block
+        CMP     userblk, #ApplicationStart
+        MyXError WimpBadPtrInR1, LO, L
+        BVS     ExitWimp                ; then check pointer
+        ; this will be a ghost caret setup
+
+        Push    "R0-R11,R14"
+        ; validate window/icon for scrolling
+        LDMIA   R1,{R10,R11}            ; window handle, icon handle in autoscroll block
+
+        STR     R10,cnp_iconautoscr_currentwindow
+        STR     R11,cnp_iconautoscr_currenticon
+        MOV     R3,R10
+        MOV     R4,R11
+
+        BL      checkhandle             ; we may not be the window owner as it's an icon scroll, but the handle must be OK
+        Pull    "R0-R11,R14",VS
+        BVS     ExitWimp
+
+        ; icon handle valid?
+        LDR     R14,[handle,#w_nicons]
+        CMP     R11,R14
+        Pull    "R0-R11,R14",HS
+        BHS     ExitWimp
+
+        LDR     R14,[handle,#w_icons]
+        ADD     R11,R14,R11,LSL #i_shift
+        LDR     R0,[R11,#i_flags]
+        AND     R0,R0,#if_buttontype
+        CMP     R0,#ibt_dwritable :SHL: ib_buttontype
+        CMPNE   R0,#ibt_writeable :SHL: ib_buttontype
+        Pull    "R0-R11,R14",NE
+        BNE     ExitWimp                ; not a writable icon, don't start scrolling
+
+        ; is there anything to scroll textwise?
+        ; page in task so we can look at the text
+        LDR     R14,taskhandle
+        Push    "R11,R14"               ; previous task
+        LDR     R14,[handle,#w_taskhandle]
+        Task    R14,,"iconautoscrollswi pagein"
+        Pull    "R11"
+        ; get icon bounding box
+        LDMIA   R11,{x0,y0,x1,y1}
+
+        LDR     R1,[R11,#i_flags]
+        ADD     R2,R11,#i_data
+        BL      seticonptrs
+
+        BL      textwidth
+        ; width in cx1
+
+        ; icon width...
+        SUB     R0,x1,x0
+        CMP     cx1,R0
+        BLE     %FT00                   ; too small to scroll text
+
+        ; sort out the scroll bounds
+        BL      iconautoscroll_set_limits
+
+        ; reset timer
+        MOV     R14,#0
+        STR     R14,cnp_iconautoscr_next_time
+
+        ; set scroll state
+        MOV     R14,#cnp_af_ghostscroll
+        STR     R14,cnp_iconautoscr_state
+
+        ; need to work out the current scroll offset for the icon ready for processing...
+        ; and stash it somewhere
+
+        ; get state based on current icon state
+        LDR     R4,cnp_iconautoscr_currenticon ; was changed by text calls above (=cx1)
+
+        ; main caret?
+        LDR     R14,caretdata+caretwindow
+        EORS    R14,R14,R3
+        LDREQ   R14,caretdata+careticon
+        EOREQ   R14,R14,R4
+        STR     R14,hascaret
+
+        ; ghost caret?
+        LDR     R14,ghostcaretdata+ghostcaretwindow
+        EORS    R14,R14,R3
+        LDREQ   R14,ghostcaretdata+ghostcareticon
+        EOREQ   R14,R14,R4
+        STR     R14,hasghostcaret
+
+        ; selection?
+        LDR     R14,[handle,#w_seldata+wselicon]
+        EORS    R14,R14,R4
+        STREQ   R10,selectionwindowaddr
+        STR     R14,hasselection
+
+        BL      findtextorigin
+        ; origin X is in cx1
+        MOV     R11,cx1                 ; store for later
+
+        MOV     R14,#0
+        STR     R14,hasghostcaret       ; pretend we have one
+        STR     R14,ghostcaretscrollxoverride ; set to 0 offset
+        BL      findtextorigin
+
+        ; set ghost caret with a 0 offset to see where we end up
+        ; restore previous ghost caret state, but leave the scroll offset there
+        SUB     cx1,R11,cx1
+        STR     cx1,ghostcaretscrollxoverride
+        ; restore task
+        Pull    "R14"
+        Task    R14,,"iconautoscrollswi - finishing"
+
+        Pull    "R0-R11,R14"
+        B       ExitWimp
+
+00      ; tidy up if can't scroll icon
+        Pull    "R14"
+        Task    R14,,"iconautoscroll - not scrollable"
+        MOV     R0,#nullptr
+        STR     R0,cnp_iconautoscr_currentwindow
+        STR     R0,cnp_iconautoscr_currenticon
+        Pull    "R0-R11,R14"
+        B       ExitWimp
+
+01
+        BL      iconautoscroll_stop
+        B       ExitWimp
+
+iconautoscroll_start ROUT
+; On entry, r0=type of autoscroll
+        Push    "R0-R11,R14"
+        AND     R8,R0,#cnp_af_enabled
+        STR     R8,cnp_iconautoscr_state
+
+        ; get pointer location
+        LDR     R0,mousexpos
+        LDR     R1,mouseypos
+        MOV     R5,#0
+        BL      int_get_pointer_info
+
+        ; returns R3=window
+        ;         R4=icon
+        ;         R10->window data
+        CMP     R3,#0
+        CMPGE   R4,#0
+        BLT     %FT99                   ; not a valid window or icon, abandon
+
+        ; is this icon scrollable?
+        ; if it's not writeable, then we don't do anything to it
+        Abs     handle,R3
+        LDR     R11,[handle,#w_icons]
+        ADD     R11,R11,R4,LSL #i_shift
+        LDR     R0,[R11,#i_flags]
+        AND     R0,R0,#if_buttontype
+        TEQ     R0,#ibt_writeable :SHL: ib_buttontype
+        BNE     %FT99                   ; not writeable
+
+        ; page in task so we can look at the text
+        LDR     R14,taskhandle
+        Push    "R11,R14"               ; previous task
+        LDR     R14,[handle,#w_taskhandle]
+        Task    R14,,"iconautoscroll"
+        Pull    "R11"
+        STR     R3,cnp_iconautoscr_currentwindow
+        STR     R4,cnp_iconautoscr_currenticon
+        ; get icon bounding box
+        LDMIA   R11,{x0,y0,x1,y1}
+
+        LDR     R1,[R11,#i_flags]
+        ADD     R2,R11,#i_data
+        BL      seticonptrs
+        BL      textwidth
+        ; width in cx1
+        ; icon width...
+        SUB     R0,x1,x0
+        CMP     cx1,R0
+        BLE     %FT00                   ; can't scroll this one - too small
+
+        BL      iconautoscroll_set_limits
+
+        ; this icon is good for scrolling
+
+        ; reset timer
+        MOV     R14,#0
+        STR     R14,cnp_iconautoscr_next_time
+
+        ; work out the required scroll offset, depending on the drag to take place
+
+        ; is there a selection elsewhere in this window?
+        ; If so, we need to remove it prior to fiddling with the selection offsets
+        LDR     R14,[handle,#w_seldata]
+        CMP     R14,#nullptr
+        LDRNE   R4,cnp_iconautoscr_currenticon
+        CMPNE   R14,R4
+        BEQ     %FT11                   ; if either current icon or nullptr we can carry on
+
+        ; we need to clear the selection that's present
+        Push    "R0-R6"
+        Rel     R0,handle
+        MOV     R1,R4
+        MOV     R2,#0
+        MOV     R3,#0
+        MOV     R4,#crf_selection
+        MOV     R5,#0
+        MOV     R6,#0
+        BL      int_set_caret_position
+        Pull    "R0-R6"
+11
+        ; our start scroll offset needs to match the offset from the current selection
+        ; for findtextorigin we have
+        ; r1=icon flags
+        ; r2->icon text
+        ; r6-r9 = icon bounding box (x0-y1)
+
+        ; set up first call:
+        ; we have no ghost caret, a main caret...
+        ; is there a selection already?
+        LDR     R14,[handle,#w_seldata]
+        CMP     R14,R4
+        MOV     R14,#nullptr
+        STR     R14,hasghostcaret
+        STRNE   R14,hasselection
+        MOV     R14,#0
+        STR     R14,hascaret
+        STREQ   R14,hasselection
+        STREQ   R10,selectionwindowaddr
+
+        ADD     R2,R11,#i_data
+        BL      seticonptrs
+        BL      findtextorigin
+
+        ; origin X is in cx1
+        MOV     R11,cx1                 ; save for later
+        LDR     R14,[handle,#w_seldata+wselicon]
+        Push    "R14"                   ; preserve current selection state
+        ; next time, we want to see what happens when we apply a zero offset to the selection scroll field
+        MOV     R14,#0
+        STR     R14,hasselection
+        STR     R4,[handle,#w_seldata+wselicon]   ; icon number
+        STR     R14,[handle,#w_seldata+wselxoverride] ; offset
+        STR     handle,selectionwindowaddr
+        BL      findtextorigin
+
+        ; reset the selection for now (there wasn't one when we started this call)
+        Pull    "R14"
+        STR     R14,[handle,#w_seldata+wselicon]
+
+        ; but leave the scroll setup...
+        SUB     cx1,R11,cx1
+        STR     cx1,[handle,#w_seldata+wselxoverride]
+
+        ; reset task
+        Pull    "R14"
+        Task    R14,,"iconautoscroll - charselection set up"
+
+        Pull    "R0-R11,PC"
+
+00      ; icon can't be scrolled, so tidy up
+        Pull    "R14"
+        Task    R14,,"iconautoscroll - not scrollable"
+        MOV     R0,#nullptr
+        STR     R0,cnp_iconautoscr_currentwindow
+        STR     R0,cnp_iconautoscr_currenticon
+
+99      ; tidy up - failed to start autoscroll for some reason
+        MOV     R8,#0
+        STR     R8,cnp_iconautoscr_state
+        Pull    "R0-R11,PC"
+
+iconautoscroll_stop ROUT
+; need to reset scroll pos if in an icon
+        Push    "R0-R2,R14"
+
+        ; change pointer if need be
+        LDR     R14,cnp_iconautoscr_state
+        TST     R14,#cnp_af_pointer_changed
+        MOVNE   R0,#OsByte_SelectPointer
+        MOVNE   R1,#1
+        SWINE   XOS_Byte
+
+        MOV     R14,#0
+        STR     R14,cnp_iconautoscr_state
+
+        LDR     R14,cnp_iconautoscr_currenticon
+        CMP     R14,#0
+        Pull    "R0-R2,PC",LT                 ; no current icon, nothing to do
+
+        Push    "R3-R5,R10"
+        ; remove any scroll overrides that we have set
+        MOV     R0,#bignum
+        STR     R0,ghostcaretscrollxoverride
+
+        LDR     R14,cnp_iconautoscr_currentwindow
+        Abs     R10,R14
+        STR     R0,[handle,#w_seldata+wselxoverride]
+
+        ; ensure caret position/scroll is correct
+        ADR     R14,caretdata
+        LDMIA   R14,{R0-R5}
+        BL      int_set_caret_position
+
+        Pull    "R3-R5,R10"
+        Pull    "R0-R2,PC"
+
+poll_iconautoscroll ROUT
+; see what we need to do to an icon
+;
+        Push    "R0-R11,R14"
+
+        ; get pointer location
+        LDR     R0,mousexpos
+        LDR     R1,mouseypos
+        MOV     R5,#0
+        BL      int_get_pointer_info
+
+        ; returns R3=window
+        ;         R4=icon
+        ;         R10->window data
+
+        ; same icon as before?
+        LDR     R14,cnp_iconautoscr_currentwindow
+        TEQ     R14,R3
+        LDREQ   R14,cnp_iconautoscr_currenticon
+        TEQEQ   R14,R4
+        Pull    "R0-R11,R14",NE
+        BNE     iconautoscroll_stop     ; we have left the icon, so stop autoscrolling
+
+        ; most recent status
+        LDR     R6,cnp_iconautoscr_state
+
+        ; determine new status
+        BIC     R6,R6,#cnp_af_pausezone_left :OR: cnp_af_pausezone_right
+
+        ; we definitely know we are in an icon as we've received an icon handle
+        LDR     R11,[handle,#w_icons]
+        ADD     R11,R11,R4,LSL #i_shift ; r11 is icon data ptr now
+
+        ; mouse X coord within work area
+        LDR     R4,mousexrel
+
+        ; get icon x0 coord
+        LDR     R0,[R11,#i_bbx0]
+        LDR     R1,[R11,#i_bbx1]
+
+        ; pause zone width (1/4 of icon width)
+        SUB     R2,R1,R0
+        MOV     R2,R2,LSR #2
+
+        ADD     R7,R0,R2                ; r7 = rightmost bit of left pause zone
+        CMP     R4,R7
+        ORRLE   R6,R6,#cnp_af_pausezone_left
+        SUBLE   R9,R7,R4                ; r9=mouse X - right bound (will be the scroll speed, +ve here for left)
+        BLE     %FT20                   ; can't be in the other zone at the same time
+
+        SUB     R7,R1,R2                ; r7 = leftmost bit of right pause zone
+        CMP     R4,R7
+        BICLT   R6,R6,#cnp_af_scrolling_left :OR: cnp_af_scrolling_right
+        BLT     %FT29                   ; not in this zone, so no scrolling etc to do
+        ORR     R6,R6,#cnp_af_pausezone_right
+        SUB     R9,R7,R4                ; r9=mouse X - left bound (will be the scroll speed, -ve here for right)
+
+20
+        ; if in a pause zone and scrolling, then scroll icon accordingly
+        ; R9 has the amount to scroll by
+        TST     R6,#cnp_af_pausezone_left
+        TSTNE   R6,#cnp_af_scrolling_left
+        BNE     %FT25                   ; do scroll
+
+        TST     R6,#cnp_af_pausezone_right
+        TSTNE   R6,#cnp_af_scrolling_right
+        BNE     %FT25                   ; also do scroll
+
+        ; we're not in the right place for scrolling, so disable that for now
+        BIC     R6,R6,#cnp_af_scrolling_left :OR: cnp_af_scrolling_right
+        ; if in a pause zone and not scrolling, then check if we need to start scrolling or not
+
+        ; has mouse moved?  If so, not able to start scrolling
+        SWI     XOS_ReadMonotonicTime
+        LDR     R2,mousexrel
+        LDR     R3,cnp_iconautoscr_previous_x
+        STR     R2,cnp_iconautoscr_previous_x
+        TEQ     R2,R3
+        BEQ     %FT21                   ; no X movement - good
+
+        ; reset timer
+        ; there's no pause for selections, just for ghost caret things
+        TST     R6,#cnp_af_selectionscroll
+        MOVNE   R2,#0
+        LDREQB  R2,autoscr_default_pause
+        MOV     R2,R2,LSL #1
+        ADD     R2,R2,R2,LSL #2         ; get default pause time (same as window autoscroll)
+        ADD     R0,R0,R2
+        STR     R0,cnp_iconautoscr_next_time
+        B       %FT24
+21
+        ; get timer
+        LDR     R14,cnp_iconautoscr_next_time
+        CMP     R0,R14
+        BLT     %FT24                   ; not ready yet
+
+        ; start up scrolling
+
+        ; decide which direction
+        TST     R6,#cnp_af_pausezone_left
+        ORRNE   R6,R6,#cnp_af_scrolling_left
+        ORREQ   R6,R6,#cnp_af_scrolling_right
+24
+        STR     R6,cnp_iconautoscr_state
+        Pull    "R0-R11,PC"
+25
+        ; scroll a bit more
+        ; have we reached the timepoint for the next iteration?
+        SWI     XOS_ReadMonotonicTime
+        LDR     R1,cnp_iconautoscr_next_time
+        CMP     R0,R1
+        BLT     %FT29
+
+        ; set a new time point
+        ADD     R0,R0,#autoscr_update_delay
+        STR     R0,cnp_iconautoscr_next_time
+28
+        ; scroll!
+        ; determine which bit we're adjusting
+        TST     R6,#cnp_af_ghostscroll
+        ADRNE   R8,ghostcaretscrollxoverride
+        ADDEQ   R8,handle,#w_seldata+wselxoverride    ; selectionscrollxoverride
+        LDR     R0,[R8]
+
+        ; see if we're reversed (RTL printing)
+        LDR     R14,writeabledir
+        TEQ     R14,#0
+        ADDEQ   R0,R0,R9
+        SUBNE   R0,R0,R9
+        ; clamp to scroll limits
+        LDR     R14,cnp_iconautoscr_minoffset
+        CMP     R0,R14
+        MOVLT   R0,R14
+
+        LDR     R14,cnp_iconautoscr_maxoffset
+        CMP     R0,R14
+        MOVGT   R0,R14
+
+        STR     R0,[R8]
+
+        ; redraw the icon
+        LDR     R0,cnp_iconautoscr_currenticon ; retrieve icon handle from stack (was R4)
+        MOV     R1,#0
+        MOV     R2,#0
+        BL      int_set_icon_state
+29
+        ; done
+        ; pointer shapes?
+        TST     R6,#cnp_af_pointer_changed
+        BEQ     %FT30
+
+        TST     R6,#cnp_af_pausezone_left :OR: cnp_af_pausezone_right
+        Pull    "R0-R11,PC",NE
+        ; reset pointer
+        BIC     R6,R6,#cnp_af_pointer_changed
+        STR     R6,cnp_iconautoscr_state
+
+        MOV     R0,#OsByte_SelectPointer
+        LDRB    R1,autoscr_old_ptr_number
+        SWI     XOS_Byte
+
+        Pull    "R0-R11,PC"
+30
+        ; pointer not changed at present
+        TST     R6,#cnp_af_pausezone_left :OR: cnp_af_pausezone_right
+        STREQ   R6,cnp_iconautoscr_state
+        Pull    "R0-R11,PC",EQ          ; pointer not set and not in a pause zone, no action
+
+        ORR     R10,R6,#cnp_af_pointer_changed
+        STR     R10,cnp_iconautoscr_state
+
+        ; get current pointer
+        MOV     R0,#OsByte_SelectPointer
+        MOV     R1,#127
+        SWI     XOS_Byte
+        AND     R1,R1,#15
+        STRB    R1,autoscr_old_ptr_number
+
+        ; get hotspot (it's right in the middle)
+        MOV     R0, #SpriteReason_ReadSpriteSize
+        ADRL    R2,autoscroll_pointers  ; gives us ptr_autoscrh
+
+        SWI     XWimp_SpriteOp
+        MOV     R5, R4, LSR#1           ; active point y-offset
+        MOV     R4, R3, LSR#1           ; active point x-offset
+
+        MOV     R0,#SpriteReason_SetPointerShape
+        ADRL    R2,autoscroll_pointers  ; gives us ptr_autoscrh
+        MOV     R3,#4
+        MOV     R6,#0
+        MOV     R7,#0
+        SWI     XWimp_SpriteOp
+        Pull    "R0-R11,PC"
+
+iconautoscroll_set_limits ROUT
+; set scroll limits for the icon
+        Push    "R14"
+        SUB     R14,cx1,R0
+        ADD     R14,R14,#8*2            ; 8*dx as text doesn't start at 0
+        TST     R1,#if_sprite           ; text+sprite?  Not a common writeable, but Filer does this even though there's no displayed sprite.
+        STREQ   R14,cnp_iconautoscr_maxoffset
+        MOVEQ   R14,#0
+        STREQ   R14,cnp_iconautoscr_minoffset
+        Pull    "PC",EQ
+
+        ; text+sprite icon.  The offsets work a bit differently here, depending on the centre/justify flags
+        ; icon flags: hj = left align
+        ;             Hj = centre
+        ;             HJ = right justify
+        ;             hJ = left align
+        TST     R1,#if_hcentred
+        BEQ     %FT02                  ; left aligned
+
+        TST     R1,#if_rjustify
+
+        ; centred writable (EQ) or right justified (NE)
+        MOVEQ   R14,R14,LSR #1
+        STR     R14,cnp_iconautoscr_maxoffset
+        RSBEQ   R14,R14,#0
+        MOVNE   R14,#0
+        STR     R14,cnp_iconautoscr_minoffset
+        Pull    "PC"
+02
+        ; left aligned
+        RSB     R14,R14,#0
+        STR     R14,cnp_iconautoscr_minoffset
+        MOV     R14,#0
+        STR     R14,cnp_iconautoscr_maxoffset
+        Pull    "PC"
+      ]
+
+        END

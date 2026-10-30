@@ -1,0 +1,1639 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Module entry point for LanManFS: initialisation, finalisation, service-call
+ * dispatch, SWI dispatch and the star-command handlers (*LMConnect,
+ * *LMLogon, *LMInfo, *Free, ...).
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <locale.h>
+#include <string.h>
+
+#include "kernel.h"
+#include "swis.h"
+#include "AsmUtils/rminfo.h"
+#include "Global/Services.h"
+#include "Global/FileTypes.h"
+#include "Global/NewErrors.h"
+#include "Interface/HighFSI.h"
+
+#include "sys/dcistructs.h"
+#include "sys/types.h"
+#include "netinet/in.h"
+#include "arpa/inet.h"
+
+#include "stdtypes.h"
+#include "LanMan.h"
+#include "Tick.h"
+#include "LMVars.h"
+#include "Params.h"
+#include "CoreFn.h"
+#include "Workspace.h"
+#include "BufLib.h"
+#include "NetBIOS.h"
+#include "NBIP.h"
+#include "SMB.h"
+#include "SMB2.h"
+#include "Cache.h"
+#include "Xlate.h"
+#include "VersionNum"
+#include "Omni.h"
+#include "Printers.h"
+#include "RPC.h"
+#include "Stats.h"
+#include "Logon.h"
+#include "LanMan_MH.h"
+
+extern void *Resources(void);
+
+#define DEFAULT_ETHER_TYPE "_default_"
+
+/* Oldest OS the module runs on: OS_Byte 129 with R1 = 0, R2 = 255 returns 0xA5 on RISC OS 3.50. */
+#define OS_IDENTIFIER_MINIMUM 0xA5u
+
+typedef void (*pfnShutdown)(void);
+typedef void (*pfnTransportInit)(void);
+
+enum { LMInitState_Uninitialised, LMInitState_PreInit, LMInitState_FullyInited, LMInitState_Boot };
+
+struct LMvars LM_Vars;
+static volatile int callbackflag = 0;
+static int msg_struct[4];        /* MessageTrans block */
+static _kernel_oserror msg_buff; /* MessageTrans buffer */
+static _kernel_oserror *msg_oserr;
+int LM_pw;                                    // Module workspace pointer (R12-style), supplied by RISC OS at init
+struct NETBIOS_TRANSPORT *NB_ActiveTransport; /* Selected net transport */
+static pfnTransportInit NB_InitedTransport;   /* Identify active transport */
+static bool LM_Declared;                      /* True if we're registered as a filing system */
+bool lanmanfs_in_use = false;                 // Module-wide re-entrancy interlock; see FSEnter/FSExit in h.LanMan
+const char *lanmanfs_owner = NULL;            // Current FSEnter holder's function name; NULL when idle
+
+/* Locations in CMOS containing file server name.
+ *
+ * FSERVER_LEN is assumed to be less than NAME_LIMIT.  If it is not, set FSERVER_LEN to NAME_LIMIT-1, and the name will be
+ * truncated.
+ */
+#define CMOS_FSSTAT   1
+#define CMOS_FSERVER1 2
+#define CMOS_FSERVER  158
+#define FSERVER_LEN   (172 - 159 + 1)
+
+/* Argument-parsing buffer for the *command handlers.  GetArgs tokenises the command tail into up
+ * to MAX_ARGS pointers (*LMServer and *LMPrinters take a list of names and use that many at most,
+ * ignoring the rest) and copies the tokens into Cmdbuf, which is sized to hold any plausible command line.
+ */
+#define MAX_ARGS   20
+#define MAX_CMDLEN 256
+
+static char Cmdbuf[MAX_CMDLEN];
+
+/* Forward declarations */
+
+static void startcallbacks(void);
+static void stopcallbacks(void);
+static _kernel_oserror *LM_init_phase_2(void);
+static void LM_check_driver_status(_kernel_swi_regs *r);
+static void LM_check_internet_status(_kernel_swi_regs *r);
+static void LM_check_protocol_status(_kernel_swi_regs *r);
+
+const char *MsgLookup(const char *token) {
+  if (_swix(MessageTrans_Lookup, _INR(0, 7), msg_struct, token, &msg_buff, sizeof(msg_buff), 0, 0, 0, 0) != NULL) {
+    return "";
+  }
+  return (const char *)&msg_buff;
+}
+
+err_t MsgSetOSError(_kernel_oserror *err) {
+  msg_oserr = err;
+  if (err == NULL) {
+    return OK;
+  }
+
+  return EUSELASTSETOSERR;
+}
+
+_kernel_oserror *MsgError(int which) {
+  struct {
+    int errnum;
+    char errmess[8];
+  } token;
+
+  if (which == OK) {
+    return NULL;
+  }
+
+  if (which == EUSELASTSETOSERR) {
+    /* Surface the most recent OS error captured by MsgSetOSError. */
+    if (msg_oserr != NULL) {
+      return msg_oserr;
+    }
+    which = EHOWDTHATHAPPEN;
+  }
+
+  sprintf(token.errmess, "E%02d", which);
+  if ((which == EDIRNOTEMPTY) || (which == ENOACCESS)) {
+    /* Filer_Action insists on the FileCore-style specific error number for "directory not empty". */
+    which = ErrorNumber_DirNotEmpty;
+  }
+  token.errnum = Our_Error_Base + which;
+  return _swix(MessageTrans_ErrorLookup, _INR(0, 3), &token, msg_struct, &msg_buff, sizeof(msg_buff));
+}
+
+int RdCMOS(int addr) {
+  return (_kernel_osbyte(161, addr, 0) & 0xFF00) >> 8;
+}
+
+/* Write a single byte to non-volatile CMOS storage. */
+static void WrCMOS(int addr, unsigned int data) {
+  _kernel_osbyte(162, addr, data);
+}
+
+/* Save the file-server name to CMOS so it survives a reboot.
+ *
+ * The first byte is stored as given.  Each later byte that is not printable (<= 0x20 or > 0x7F) is
+ * stored as NUL, which also ends the stored name early.  An empty name clears the entry.
+ *
+ * Parameters:
+ *   buf_in  NUL-terminated server name to store
+ */
+static void SetFSName(const char *buf_in) {
+  int i, t;
+
+  WrCMOS(CMOS_FSSTAT, 0);
+  WrCMOS(CMOS_FSERVER1, buf_in[0]);
+  if (buf_in[0] == 0) {
+    return;
+  }
+
+  for (i = 1; i < FSERVER_LEN; i++) {
+    t = buf_in[i];
+    if (t <= 0x20 || t > 0x7F) {
+      t = 0;
+    }
+    WrCMOS(CMOS_FSERVER + i - 1, t);
+    if (t == 0) {
+      break;
+    }
+  }
+}
+
+/* Read the configured file-server / workgroup name into `buf_out`.
+ *
+ * `buf_out` MUST be at least FSERVER_LEN + 1 bytes long; the size argument to
+ * _kernel_getenv must match, otherwise an oversized Inet$ServerName would
+ * overrun the caller's stack and the later strcpy into LM_Vars.workgroup
+ * would overrun too.
+ *
+ * Parameters:
+ *   buf_out  buffer of at least FSERVER_LEN + 1 bytes
+ */
+static void GetFSName(char *buf_out) {
+  int i;
+
+  /* Prefer the live env var; _kernel_getenv returns 0 on success and leaves buf_out populated. */
+  if (!_kernel_getenv("Inet$ServerName", buf_out, FSERVER_LEN + 1)) {
+    return;
+  }
+
+  /* No env var: fall back to the CMOS-resident name (split across CMOS_FSERVER1 and CMOS_FSERVER+). */
+  if (RdCMOS(CMOS_FSSTAT) == 0) {
+    *buf_out++ = RdCMOS(CMOS_FSERVER1);
+    for (i = 1; i < FSERVER_LEN; i++) {
+      *buf_out++ = RdCMOS(CMOS_FSERVER + i - 1);
+    }
+  }
+
+  *buf_out = 0;
+}
+
+/* Finalisation code ------------------------------------ */
+
+/* Remove ourselves from FileSwitch's filing-system table. */
+static void LM_Undeclare(void) {
+  if (LM_Declared) {
+    (void)_swix(OS_FSControl, _INR(0, 1), FSControl_RemoveFS, FilingSystemName);
+    LM_Declared = false;
+  }
+}
+
+/* Tear down all active state in dependency order.
+ *
+ * NBIP_ReleaseEventHandler must run before any socket close: socketclose
+ * triggers Internet events that fire into our EventFn while it is still
+ * claimed, queueing OS_AddCallBack entries that then dispatch to a freed
+ * veneer.  NB_Shutdown releases the EventV handler itself but runs late,
+ * after SMB_Shutdown has already closed the SMB2 sockets: so the release
+ * is needed up front too.  NBIP_ReleaseEventHandler is idempotent via the
+ * EventsClaimed flag, so the repeat call from NB_Shutdown is a safe no-op.
+ */
+static void LM_GracefulClosedown(void) {
+  NBIP_ReleaseEventHandler();
+
+  stopcallbacks();
+  SMB_Shutdown();  // Dismounts all SMB mounts
+  Omni_Shutdown(); // Zeros the Mounts lists
+  Prn_Shutdown();  // Free print jobs
+  NB_Shutdown();   // Closes the transport's sockets
+  Buf_Shutdown();  // Tell MBufManager we're done
+  LM_Vars.initialised = LMInitState_PreInit;
+}
+
+/* Finalise the module: tear everything down, undeclare the filing system, release the workspace and close the message and
+ * resource files.
+ */
+_kernel_oserror *LM_Finalise(int fatal, int podule, void *pw) {
+  debug("Finalise\n");
+  UNUSED(fatal);
+  UNUSED(podule);
+  UNUSED(pw);
+
+  LM_GracefulClosedown();
+  /* Now mark this filing system as gone */
+  LM_Undeclare();
+
+  /* No FSEntry call can reach the directory snapshots now, so their memory can go. */
+  CoreFn_ForgetSnapshots();
+
+  /* No more FSEntry dispatch can reach us after LM_Undeclare returns; safe to release the workspace DA. */
+  Workspace_Shutdown();
+
+  /* Per-mount cache substrates were freed by Cache_MountDestroy via the SMB_DeleteShare cascade in the
+   * closedown above.  Cache_Shutdown clears the global handle table and the module-static state.
+   */
+  Cache_Shutdown();
+
+  _swix(MessageTrans_CloseFile, _IN(0), msg_struct);
+  _swix(ResourceFS_DeregisterFiles, _IN(0), Resources());
+
+  return NULL;
+}
+
+/* LM_declare ------------------------------------------ */
+
+/* Register the filing system with FileSwitch.
+ *
+ * Builds the FSControl_AddFS information block referencing our FSEntry
+ * veneers and the Information / Information2 capability words, and
+ * latches LM_Declared so LM_Undeclare removes the filing system at finalise.
+ *
+ * Returns: NULL on success, or the OS error from FSControl_AddFS.
+ */
+static _kernel_oserror *LM_Declare(void) {
+  _kernel_oserror *err;
+  unsigned int InfoBlk[12];
+
+  LM_Declared = false;
+
+  /* Build the FSControl_AddFS info block.  Slots are PRM-defined: name, fsentry veneers, capability words.
+   * Addresses are stored as image-relative offsets so FileSwitch can relocate them on RMA load.
+   */
+  InfoBlk[0] = (unsigned int)((unsigned long)FilingSystemName - Image_RO_Base);
+  InfoBlk[1] = -1; // Self-ident - request call FSFunc_PrintStartupBanner
+  InfoBlk[2] = (unsigned int)((unsigned long)fsentry_open - Image_RO_Base);
+  InfoBlk[3] = (unsigned int)((unsigned long)fsentry_getbytes - Image_RO_Base);
+  InfoBlk[4] = (unsigned int)((unsigned long)fsentry_putbytes - Image_RO_Base);
+  InfoBlk[5] = (unsigned int)((unsigned long)fsentry_args - Image_RO_Base);
+  InfoBlk[6] = (unsigned int)((unsigned long)fsentry_close - Image_RO_Base);
+  InfoBlk[7] = (unsigned int)((unsigned long)fsentry_file - Image_RO_Base);
+  InfoBlk[8] = Information_Word;
+  InfoBlk[9] = (unsigned int)((unsigned long)fsentry_func - Image_RO_Base);
+  InfoBlk[10] = (unsigned int)((unsigned long)fsentry_gbpb - Image_RO_Base);
+  InfoBlk[11] = Information2_Word;
+
+  /* Hand off to FileSwitch; latch LM_Declared so the finalise path calls RemoveFS. */
+  err = _swix(OS_FSControl, _INR(0, 3), FSControl_AddFS, Image_RO_Base, (unsigned long)InfoBlk - Image_RO_Base, LM_pw);
+  if (err == NULL) {
+    LM_Declared = true;
+  }
+
+  return err;
+}
+
+/* *Command processor ------------------------------------ */
+
+/* Split a space-separated argument string into tokens.
+ *
+ * Each token is copied into the module-static Cmdbuf so the pointers
+ * returned in `argv_out` remain valid until the next GetArgs call.  Unused
+ * `argv_out` slots are set to NULL.  Stops on any control character (RISC
+ * OS terminator) or when `maxargs` tokens have been produced.
+ *
+ * Parameters:
+ *   args      input string, terminated by a control character
+ *   argv_out  array of `maxargs` pointers receiving the token starts
+ *   maxargs   maximum number of tokens to extract
+ *
+ * Returns: the number of tokens actually extracted.
+ */
+static int GetArgs(const char *args, char *argv_out[], int maxargs) {
+  int i, argc;
+
+  /* NULL-fill the output slots so callers can test argv[N] for "not supplied". */
+  for (i = 0; i < maxargs; i++) {
+    argv_out[i] = NULL;
+  }
+
+  i = 0; // Index into Cmdbuf
+  argc = 0;
+
+  /* Each iteration extracts one token: skip leading spaces, capture the slot, copy until the next space or terminator. */
+  do {
+    while (*args == ' ') {
+      args++;
+    }
+
+    if (*args < ' ') {
+      break;
+    }
+
+    if (argc >= maxargs) {
+      break;
+    }
+
+    argv_out[argc++] = Cmdbuf + i;
+
+    while (i < MAX_CMDLEN - 1 && *args > ' ') {
+      Cmdbuf[i++] = *args++;
+    }
+
+    Cmdbuf[i++] = 0;
+  } while (i < MAX_CMDLEN - 1);
+
+  return argc;
+}
+
+/* *LanMan - select LanManFS as the current filing system. */
+static _kernel_oserror *Cmd_LanMan(const char *args) {
+  _kernel_oserror *ret;
+
+  FSEnter();
+  UNUSED(args);
+
+  ret = _swix(OS_FSControl, _INR(0, 1), FSControl_SelectFS, FilingSystemName);
+  FSExit();
+  return ret;
+}
+
+/* *Free [mount] - print the free-space report for a mount, by default the current directory's or else the only one. */
+static _kernel_oserror *Cmd_Free(const char *args) {
+  _kernel_swi_regs r;
+  _kernel_oserror *e = NULL;
+  int values[6];
+  char *argv[1];
+
+  FSEnter();
+
+  /* No mount given: fall back to the current directory's mount, or to the sole mount if there is exactly one. */
+  if (GetArgs(args, argv, sizeof(argv) / sizeof(*argv)) == 0) {
+    argv[0] = getenv("FileSwitch$" FilingSystemName "$CSD");
+
+    if (argv[0] == NULL) {
+      argv[0] = (char *)Omni_GetSoleMountName();
+    }
+  }
+
+  if (argv[0] == NULL) {
+    e = MsgError(EBADDRV);
+    goto exit;
+  }
+
+  r.r[0] = 4; // 64-bit free space
+  r.r[1] = Our_FS_Number;
+  r.r[2] = (int)values;
+  r.r[3] = (int)argv[0];
+  e = Omni_FreeOp_SWI(&r);
+
+  /* Format the result: single-precision when both high halves are zero, double-precision otherwise.
+   * values[4] == -1 means the server didn't report a "used" figure, so substitute the unknown-amount message.
+   */
+  if (e == NULL) {
+    if (values[3] == 0 && values[5] == 0) {
+      printf("%s &%08X\n", MsgLookup("Free"), values[2]);
+      if (values[4] != -1) {
+        printf("%s &%08X\n", MsgLookup("Used"), values[4]);
+      } else {
+        printf("%s\n", MsgLookup("UsedUK"));
+      }
+    } else {
+      printf("%s &%08X%08X\n", MsgLookup("Free"), values[3], values[2]);
+      if (values[4] != -1) {
+        printf("%s &%08X%08X\n", MsgLookup("Used"), values[5], values[4]);
+      } else {
+        printf("%s\n", MsgLookup("UsedUK"));
+      }
+    }
+  }
+
+exit:
+  FSExit();
+  return e;
+}
+
+/* *ListFS [server] - dump the known servers, or the shares on one server. */
+static _kernel_oserror *Cmd_ListFS(const char *args) {
+  _kernel_oserror *ret;
+  char *argv[1];
+
+  FSEnter();
+
+  if (GetArgs(args, argv, sizeof(argv) / sizeof(*argv)) == 0) {
+    ret = Omni_DumpServers();
+  } else {
+    ret = Omni_DumpShares(argv[0]);
+  }
+  FSExit();
+  return ret;
+}
+
+/* *LMConnect <mount> <server> <share> [<user>|- [<password>]] - mount a share.
+ *
+ * A literal "-" as the user name maps to NULL so the default credential
+ * is used.  Refreshes Omni's mounts list once the mount has been attempted.
+ */
+static _kernel_oserror *Cmd_LMConnect(const char *args) {
+  _kernel_oserror *ret;
+  char *argv[5];
+  err_t res;
+  int tmp;
+
+  FSEnter();
+
+  if (GetArgs(args, argv, 5) < 3) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  if (argv[3] != NULL && argv[3][0] == '-' && argv[3][1] == 0) {
+    argv[3] = NULL;
+  }
+
+  res = Omni_MountServer(argv[1], // Server
+                         argv[3], // User name or NULL
+                         argv[4], // Password or NULL
+                         argv[0], // Mountname
+                         argv[2], // Drive name
+                         &tmp);   // MountID_out
+
+  Omni_RecheckInfo(RI_MOUNTS);
+  ret = MsgError(res);
+
+exit:
+  FSExit();
+  if (ret == NULL) {
+    ret = MsgError(Omni_RunDeferredBoots()); // The new mount's boot file
+  }
+  return ret;
+}
+
+/* *LMDisconnect <mount> - dismount a share by mount name. */
+static _kernel_oserror *Cmd_LMDisconnect(const char *args) {
+  _kernel_oserror *ret;
+  char *argv[1];
+  int mountID;
+  err_t res;
+
+  FSEnter();
+
+  if (GetArgs(args, argv, 1) < 1) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  mountID = Omni_GetMountID(argv[0]);
+  if (mountID == 0) {
+    ret = MsgError(EBADDRV);
+    goto exit;
+  }
+
+  res = Omni_DismountServer(mountID);
+  Omni_RecheckInfo(RI_MOUNTS);
+  ret = MsgError(res);
+
+exit:
+  FSExit();
+  return ret;
+}
+
+/* Record and immediately invoke the chosen transport initialiser. */
+static void LanMan_InitTransport(pfnTransportInit i) {
+  NB_InitedTransport = i;
+  (*i)();
+}
+
+/* Populate LM_Vars from environment variables and CMOS defaults.
+ *
+ * Selects the IP transport unconditionally.  Truncates Inet$HostName at
+ * the first dot to recover a NetBIOS-style machine name from a fully-
+ * qualified domain name.  The "ARM_NoName" sentinel (set by the STB OS)
+ * is treated as an unset host name.
+ */
+static void SetDefaultVars(void) {
+  char *name;
+  char fs_name[FSERVER_LEN + 1];
+
+  LM_Vars.initialised = LMInitState_Uninitialised;
+  LM_Vars.namemode = NM_FIRSTCAPS;
+  LM_Vars.cache_off = false;
+
+  name = getenv("Inet$EtherType");
+  strcpyn(LM_Vars.drivername, (name == NULL) ? DEFAULT_ETHER_TYPE : name, NAME_LIMIT);
+
+  /* Derive a NetBIOS-style machine name: uppercase, then chop at the first dot so an FQDN works too. */
+  name = getenv("Inet$HostName");
+  if ((name == NULL) || (stricmp(name, "ARM_NoName") == 0)) {
+    strcpy(LM_Vars.machinename, "");
+  } else {
+    strcpyn_upper(LM_Vars.machinename, name, NAME_LIMIT);
+    name = strchr(LM_Vars.machinename, '.');
+    if (name != NULL) {
+      *name = 0;
+    }
+  }
+
+  /* Optional override: LanMan$DefaultType lets the user pick the filetype assigned to wire entries
+   * we can't otherwise classify.  FSControl 31 turns a name like "Text" into the numeric type ID.
+   */
+  name = getenv("LanMan$DefaultType");
+  if (name != NULL) {
+    _swix(OS_FSControl, _INR(0, 1) | _OUT(2), 31, name, &LM_Vars.default_type);
+  } else {
+    LM_Vars.default_type = CNV_DEFAULT_TYPE;
+  }
+
+  /* Base of the OS ROM, used as load/exec for untyped files so accidental execution traps. */
+  _swix(OS_Module, _INR(0, 2) | _OUT(3), 12, 0, 0, &LM_Vars.untyped_address);
+  LM_Vars.untyped_address = LM_Vars.untyped_address & ~((1 << 20) - 1);
+
+  Lgn_Init();
+  GetFSName(fs_name);
+  if (fs_name[0] != '\0') {
+    strcpy(LM_Vars.workgroup, fs_name);
+  }
+
+  LanMan_InitTransport(NB_NBIP_Setup);
+}
+
+/* *LMLogoff - drop the default credential. */
+static _kernel_oserror *Cmd_LMLogoff(const char *args) {
+  FSEnter();
+  UNUSED(args);
+  Lgn_Logoff();
+  FSExit();
+  return NULL;
+}
+
+/* *LMLogon <workgroup> <user> [<password>] - set the default credential.
+ *
+ * The password is optional; passing NULL through to Lgn_Logon selects a
+ * blank password.
+ */
+static _kernel_oserror *Cmd_LMLogon(const char *args) {
+  _kernel_oserror *ret;
+  char *argv[3];
+
+  FSEnter();
+  if (GetArgs(args, argv, 3) < 2) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  ret = MsgError(Lgn_Logon(argv[0], argv[1], argv[2]));
+
+exit:
+  FSExit();
+  if (ret == NULL) {
+    ret = MsgError(Omni_RunDeferredBoots()); // The home directory's boot file
+  }
+  return ret;
+}
+
+#ifdef DEBUG
+/* Human-readable name for the current LM_Vars.initialised value.
+ *
+ * Returns: static string ("Dormant" / "Waiting for driver" / "Active" / "Waiting to boot" / "Dead").
+ */
+static char *LM_Status(void) {
+  switch (LM_Vars.initialised) {
+  case LMInitState_Uninitialised:
+    return "Dormant";
+  case LMInitState_PreInit:
+    return "Waiting for driver";
+  case LMInitState_FullyInited:
+    return "Active";
+  case LMInitState_Boot:
+    return "Waiting to boot";
+  default:
+    return "Dead";
+  }
+}
+#endif
+
+/* *LMInfo - print the module state, servers and mounts, plus the status and transport statistics in a debug build. */
+static _kernel_oserror *Cmd_LMInfo(const char *args) {
+  (void)args;
+  Omni_Debug();
+#ifdef DEBUG
+  debug("Status: %s\n", LM_Status());
+  Stat_Show();
+#endif
+  return NULL;
+}
+
+/* *LMNameMode - inspect or set the case of short names, whether hidden files are listed, and how SMB2 names show $ & @ ^. */
+static _kernel_oserror *Cmd_LMNameMode(const char *args) {
+  int i, mode, hidden, chars, listed, flags = 0;
+  /* OS_ReadArgs output block: a word per switch, then the type byte and value of the evaluated mode number.
+   * `spare` pads the packed block to a whole number of words.  cppcheck flags them individually as unused.
+   */
+  __packed struct {
+    /* cppcheck-suppress unusedStructMember */
+    int flags[8];
+    /* cppcheck-suppress unusedStructMember */
+    char type;
+    /* cppcheck-suppress unusedStructMember */
+    int mode;
+    /* cppcheck-suppress unusedStructMember */
+    char spare[3];
+  } parsed;
+  _kernel_oserror *e = NULL;
+
+  FSEnter();
+
+  e = _swix(OS_ReadArgs, _INR(0, 3),
+            "/e,preservecase/s,lowercase/s,firstcaps/s,includehidden/s,excludehidden/s,"
+            "smb2legacychars/s,smb2escapedchars/s",
+            args, &parsed, sizeof(parsed));
+  if (e != NULL) {
+    /* Convert buffer overflow to bad parameters */
+    e = e->errnum == ErrorNumber_BuffOverflow ? MsgError(EBADPARAM) : e;
+    goto exit;
+  }
+
+  for (i = 0; i < (sizeof(parsed.flags) / sizeof(parsed.flags[0])); i++) {
+    if (parsed.flags[i]) {
+      flags |= (1 << i);
+    }
+  }
+
+  if (flags == 0) {
+    const char *token;
+
+    /* No arguments given, show the current state */
+    switch (LM_Vars.namemode & NM_MODE) {
+    default: // Preserve case
+      token = "NMMode0";
+      break;
+    case NM_LOWERCASE:
+      token = "NMMode1";
+      break;
+    case NM_FIRSTCAPS:
+      token = "NMMode2";
+      break;
+    }
+    printf("%s: ", MsgLookup("NMMode"));
+    printf("%s\n", MsgLookup(token));
+
+    printf("%s: ", MsgLookup("NMHid"));
+    printf("%s\n", MsgLookup((LM_Vars.namemode & NM_HIDDEN) ? "Inc" : "Exc"));
+
+    printf("%s: ", MsgLookup("NMChr"));
+    printf("%s\n", MsgLookup((LM_Vars.namemode & NM_LEGACYCHARS) ? "NMChr1" : "NMChr0"));
+
+    goto exit;
+  }
+
+  mode = hidden = chars = -1;
+  switch (flags & 0xf) {
+  case 1: // Numeric mode
+    if (parsed.type != 0 /* Integer */ || parsed.mode > 2 || parsed.mode < 0) {
+      e = MsgError(EBADPARAM);
+      goto exit;
+    }
+    mode = parsed.mode;
+    break;
+  case 2: // PreserveCase
+  case 4: // Lowercase
+  case 8: // FirstCaps
+    mode = (flags >> 2) & NM_MODE;
+    break;
+  }
+
+  switch (flags & 0x30) {
+  case 0x10: // IncludeHidden
+    hidden = NM_HIDDEN;
+    break;
+  case 0x20: // ExcludeHidden
+    hidden = 0;
+    break;
+  case 0x30:
+    e = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  switch (flags & 0xc0) {
+  case 0x40: // SMB2LegacyChars
+    chars = NM_LEGACYCHARS;
+    break;
+  case 0x80: // SMB2EscapedChars
+    chars = 0;
+    break;
+  case 0xc0:
+    e = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  if (mode == -1 && hidden == -1 && chars == -1) {
+    e = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  if (mode != -1) {
+    LM_Vars.namemode &= ~NM_MODE;
+    LM_Vars.namemode |= mode;
+  }
+
+  listed = LM_Vars.namemode;
+
+  if (hidden != -1) {
+    listed = (listed & ~NM_HIDDEN) | hidden;
+  }
+
+  if (chars != -1) {
+    listed = (listed & ~NM_LEGACYCHARS) | chars;
+  }
+
+  /* Cached details, a remembered path and directory snapshots hold names as a listing gave them, so they must go when what it gives
+   * changes.
+   */
+  if (listed != LM_Vars.namemode) {
+    char drv;
+
+    LM_Vars.namemode = listed;
+
+    for (drv = 'A'; drv <= 'Z'; drv++) {
+      Cache_Flush(SMB_GetCacheFromDrv(drv));
+    }
+
+    Xlt_ForgetTranslation();
+    CoreFn_ForgetSnapshots();
+  }
+
+exit:
+  FSExit();
+  return e;
+}
+
+/* *LMCache [On | Off] - show, or set for mounts made from now on, whether a mount keeps a cache.
+ *
+ * A mount already made keeps what it has: its open files and any captured content are bound to its cache, so taking the cache away
+ * would need the same care as a dismount.
+ */
+static _kernel_oserror *Cmd_LMCache(const char *args) {
+  char *argv[MAX_ARGS];
+  _kernel_oserror *e = NULL;
+
+  FSEnter();
+
+  if (GetArgs(args, argv, MAX_ARGS) < 1) {
+    /* MsgLookup returns its text in one buffer, so each lookup is printed before the next. */
+    printf("%s: ", MsgLookup("CchMode"));
+#ifdef LM_CACHE
+    printf("%s\n", MsgLookup(LM_Vars.cache_off ? "CchOff" : "CchOn"));
+#else
+    printf("%s\n", MsgLookup("CchNone"));
+#endif
+  } else if (stricmp(argv[0], "On") == 0) {
+    LM_Vars.cache_off = false;
+  } else if (stricmp(argv[0], "Off") == 0) {
+    LM_Vars.cache_off = true;
+  } else {
+    e = MsgError(EBADPARAM);
+  }
+
+  FSExit();
+  return e;
+}
+
+/* *LMServer <server> [<share> ...] - announce a known server (with optional shares). */
+static _kernel_oserror *Cmd_LMServer(const char *args) {
+  _kernel_oserror *ret = NULL;
+  char *argv[MAX_ARGS];
+  int i;
+
+  FSEnter();
+
+  if (GetArgs(args, argv, MAX_ARGS) < 1) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  if (argv[1] == NULL) {
+    Omni_AddInfo(OAI_SERVER, argv[0], NULL, NULL);
+  } else {
+    for (i = 1; i < MAX_ARGS && argv[i] != NULL; i++) {
+      Omni_AddInfo(OAI_DISK, argv[0], argv[i], NULL);
+    }
+  }
+
+  Omni_RecheckInfo(RI_SERVERS);
+
+exit:
+  FSExit();
+  return ret;
+}
+
+/* *LMPrinters <server> [<printer> ...] - announce a known print server. */
+static _kernel_oserror *Cmd_LMPrinters(const char *args) {
+  _kernel_oserror *ret = NULL;
+  char *argv[MAX_ARGS];
+  int i;
+
+  FSEnter();
+
+  if (GetArgs(args, argv, MAX_ARGS) < 1) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  if (argv[1] == NULL) {
+    Omni_AddInfo(OAI_SERVER, argv[0], NULL, NULL);
+  } else {
+    for (i = 1; i < MAX_ARGS && argv[i] != NULL; i++) {
+      Omni_AddInfo(OAI_PRINTER, argv[0], argv[i], NULL);
+    }
+  }
+
+  Omni_RecheckInfo(RI_SERVERS);
+  Omni_RecheckInfo(RI_PRINTERS);
+
+exit:
+  FSExit();
+  return ret;
+}
+
+/* *Configure FS: get / set the boot file-server name in CMOS.
+ *
+ * RISC OS passes args = 0 to request the "Configure" syntax line and
+ * args = 1 to request the "Status" line; anything else is treated as a
+ * user-supplied command tail.
+ */
+static _kernel_oserror *Cmd_FS(const char *args) {
+  _kernel_oserror *ret = NULL;
+  char *argv[1];
+
+  FSEnter();
+
+  if ((int)args == 0) {
+    printf("FS           %s\n", MsgLookup("ConfFS"));
+    goto exit;
+  } else if ((int)args == 1) {
+    char buf[NAME_LIMIT];
+    GetFSName(buf);
+    printf("FS           %s\n", buf[0] ? buf : MsgLookup("NoHome"));
+    goto exit;
+  }
+
+  if (GetArgs(args, argv, 1) < 1) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  SetFSName(argv[0]);
+
+exit:
+  FSExit();
+  return ret;
+}
+
+/* *Configure LMNameServer xx.xx.xx.xx: get / set the NetBIOS name-server address.
+ *
+ * Rejects loopback (127.x.x.x), multicast / reserved (>223.x.x.x), and
+ * broadcast (x.x.x.255) addresses both when reading the stored value back
+ * and when accepting a new value.
+ */
+static _kernel_oserror *Cmd_LMNameServer(const char *args) {
+  _kernel_oserror *ret = MsgError(EBADPARAM);
+  char *argv[1];
+  struct in_addr address;
+  int result;
+
+  FSEnter();
+
+  /* *Configure with no args: echo the syntax line and finish. */
+  if (args == arg_CONFIGURE_SYNTAX) {
+    printf("LMNameServer xx.xx.xx.xx\n");
+    ret = NULL;
+    goto exit;
+  } else if (args == arg_STATUS) {
+    /* Status query: read the stored quad from CMOS, validate it, and print either the address or NoHome. */
+    int b0, b1, b2, b3;
+
+    b0 = RdCMOS(NBNSIPCMOS0);
+    b1 = RdCMOS(NBNSIPCMOS1);
+    b2 = RdCMOS(NBNSIPCMOS2);
+    b3 = RdCMOS(NBNSIPCMOS3);
+
+    if (((b0 != 0) && (b0 != 127) && (b0 <= 223)) && ((b3 != 0) && (b3 != 255))) {
+      printf("LMNameServer %d.%d.%d.%d\n", b0, b1, b2, b3);
+    } else {
+      printf("LMNameServer %s\n", MsgLookup("NoHome"));
+    }
+    ret = NULL;
+    goto exit;
+  } else if (GetArgs(args, argv, 1) == 1) {
+    /* Set request: parse the dotted quad and validate before committing to CMOS. */
+    result = inet_aton(argv[0], &address);
+    if (result) {
+      unsigned char b0, b1, b2, b3;
+
+      /* network-byte-order address picked apart for the per-byte CMOS slots. */
+      b0 = (unsigned char)(address.s_addr >> 0);
+      b1 = (unsigned char)(address.s_addr >> 8);
+      b2 = (unsigned char)(address.s_addr >> 16);
+      b3 = (unsigned char)(address.s_addr >> 24);
+
+      /* Reject loopback (127.x), multicast / reserved (>223.x), and broadcast (x.x.x.255). */
+      if (((b0 != 127) && (b0 <= 223)) && ((b3 != 255))) {
+        WrCMOS(NBNSIPCMOS0, (int)b0);
+        WrCMOS(NBNSIPCMOS1, (int)b1);
+        WrCMOS(NBNSIPCMOS2, (int)b2);
+        WrCMOS(NBNSIPCMOS3, (int)b3);
+        ret = NULL;
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  FSExit();
+  return ret;
+}
+
+typedef _kernel_oserror *(*CommandFnPtr)(const char *args);
+
+#define CmdEntry(X) [CMD_##X] = Cmd_##X
+static CommandFnPtr Cmd_Dispatch[] = {CmdEntry(LanMan),     CmdEntry(LMConnect),  CmdEntry(LMDisconnect), CmdEntry(LMLogon),
+                                      CmdEntry(LMInfo),     CmdEntry(LMNameMode), CmdEntry(LMLogoff),     CmdEntry(LMServer),
+                                      CmdEntry(LMPrinters), CmdEntry(FS),         CmdEntry(LMNameServer), CmdEntry(Free),
+                                      CmdEntry(ListFS),     CmdEntry(LMCache)};
+
+#define MAX_CMDS (sizeof Cmd_Dispatch / sizeof Cmd_Dispatch[0])
+
+/* Star-command dispatch entry, called from the cmhg veneer.
+ *
+ * Parameters:
+ *   args    command tail
+ *   argc    argument count (unused; we tokenise ourselves)
+ *   cmd_no  command index into Cmd_Dispatch
+ *   pw      private word (unused)
+ *
+ * Returns: NULL on success, an error block for parameter / dispatch failures.
+ */
+_kernel_oserror *LM_Command(const char *args, int argc, int cmd_no, void *pw) {
+  UNUSED(pw);
+  UNUSED(argc);
+
+  if (cmd_no < 0 || cmd_no >= MAX_CMDS) {
+    return MsgError(ENOTPRESENT);
+  }
+
+  return Cmd_Dispatch[cmd_no](args);
+}
+
+/* Service call handler --------------------------------- */
+
+typedef void (*resfs_reregister_fn)(void *, void *, void *, void *);
+
+/* Module service-call entry, called from the cmhg veneer.
+ *
+ * The list of services handled here must match the cmhg input file.
+ *
+ * Parameters:
+ *   service_number  Service_* code from h.Services
+ *   r               register block (per-service argument layout)
+ *   pw              private word
+ */
+void LM_Service(int service_number, _kernel_swi_regs *r, void *pw) {
+  UNUSED(pw);
+
+  switch (service_number) {
+  case Service_FSRedeclare:
+    LM_Declare();
+    break;
+
+  case Service_OmniAction:
+    Omni_ServiceCall(r, pw);
+    break;
+
+  case Service_ResourceFSStarting:
+    /* Reregister with ResourceFS */
+    (*(void (*)(void *, void *, void *, void *))r->r[2])(Resources(), 0, 0, (void *)r->r[3]);
+    break;
+
+  case Service_DCIDriverStatus:
+    LM_check_driver_status(r);
+    break;
+
+  case Service_DCIProtocolStatus:
+    LM_check_protocol_status(r);
+    break;
+
+  case Service_InternetStatus:
+    if (NB_InitedTransport == NB_NBIP_Setup) {
+      LM_check_internet_status(r);
+    }
+    break;
+
+  case Service_ModulePostInit: {
+    /* A module just finished initialising.  R2 -> module title.  If it's the Free module or OmniClient, retry
+     * Omni_StartUp - our LM_Initialise may have run before either of them was around, in which case the
+     * registration failed silently then.  Idempotent (Omni_StartUp skips a registration already made), so the cost when the loaded
+     * module isn't relevant to us is one strcmp per pair.
+     */
+    const char *title = (const char *)r->r[2];
+    if (title != NULL && (strcmp(title, "Free") == 0 || strcmp(title, "OmniClient") == 0)) {
+      Omni_StartUp();
+    }
+    break;
+  }
+
+  default:
+    break;
+  }
+}
+
+/* SWI handler ------------------------------------------ */
+
+/* SWI dispatch entry called from the cmhg veneer.
+ *
+ * Parameters:
+ *   swi_ofs  SWI number minus LanMan_00
+ *   r        register block
+ *   pw       private word (unused)
+ *
+ * Returns: NULL on success or an error block on failure.
+ */
+_kernel_oserror *LM_Swi(int swi_ofs, _kernel_swi_regs *r, void *pw) {
+  UNUSED(pw);
+  switch (swi_ofs) {
+  case LanMan_OmniOp - LanMan_00:
+    return OmniOp_SWI(r);
+
+  case LanMan_LogonOp - LanMan_00:
+    return Lgn_LogonOp_SWI(r);
+
+  case LanMan_FreeOp - LanMan_00:
+    return Omni_FreeOp_SWI(r);
+
+  case LanMan_NameOp - LanMan_00:
+    return MsgError(RPC_NameOp(r->r[0],           // reason code
+                               (char *)(r->r[1]), // name in
+                               (char *)(r->r[2])  // buffer out
+                               ));
+  case LanMan_Transact - LanMan_00:
+    return MsgError(RPC_Transact((char *)(r->r[0]), // server
+                                 (char *)(r->r[1]), // share name
+                                 (void *)(r->r[2])  // params
+                                 ));
+
+  default:
+    return MsgError(ENOTPRESENT);
+  }
+
+  return NULL;
+}
+
+/* Initialisation code ---------------------------------- */
+
+/* Copy a space-delimited token from `src` into `dst`, NUL-terminating.
+ *
+ * Stops at any character <= ' ' in `src`; at most `maxlen - 1` bytes are written to `dst`, but
+ * `src` always advances all the way to the delimiter so the caller can keep parsing.
+ *
+ * Parameters:
+ *   dst     destination buffer
+ *   src     source string
+ *   maxlen  size of dst including NUL
+ *
+ * Returns: the updated `src` pointer (positioned at the delimiter).
+ */
+static char *copy_space(char *dst, char *src, int maxlen) {
+  while (*src > ' ') {
+    if (--maxlen > 0) {
+      *dst++ = *src;
+    }
+    src++;
+  }
+
+  *dst = 0;
+  return src;
+}
+
+/* ------------------------------- */
+
+/* Parse the module's command-tail options (-d, -n, -m, -i).
+ *
+ * The RISC OS module command tail is terminated by a control character rather than NUL, so we
+ * copy into a local buffer and terminate before scanning.  Repeating a flag is harmless.
+ *
+ * Parameters:
+ *   _line  command tail from LM_Initialise (control-terminated, not NUL-terminated)
+ *
+ * Returns: OK on success, or ECMDLINE on an unrecognised switch.
+ */
+static err_t ProcessCmdLine(const char *_line) {
+  char cli[256];
+  char *end;
+  char *line;
+
+  /* Take a local copy and NUL-terminate at the first control character (the RISC OS command-tail terminator).
+   * strncpy does not terminate when the tail is 255+ bytes, so plant a NUL at the end first to bound the scan.
+   */
+  strncpy(cli, _line, 255);
+  cli[255] = '\0';
+  line = end = cli;
+  while (*end >= ' ') {
+    end++;
+  }
+  *end = '\0';
+
+  /* Walk option flags introduced by '-'; each handler advances `line` past its own argument. */
+  while ((line = strchr(line, '-')) != NULL) {
+    line++;
+    switch (toupper(*line)) {
+    case 'D': // -d<driver_name>: specify the driver name
+      line = copy_space(LM_Vars.drivername, line + 1, NAME_LIMIT);
+      break;
+
+    case 'N': // -n: disable network browsing
+      Lgn_Logoff();
+      break;
+
+    case 'M': // -m<name>: advertised NetBIOS name
+      line = copy_space(LM_Vars.machinename, line + 1, NAME_LIMIT);
+      strcpyn_upper(LM_Vars.machinename, LM_Vars.machinename, NAME_LIMIT);
+      break;
+
+    case 'I': // -i: use NetBIOS-over-IP
+      LanMan_InitTransport(NB_NBIP_Setup);
+      break;
+
+    default:
+      return ECMDLINE;
+    }
+  }
+
+  return OK;
+}
+
+/* ------------------------------- */
+
+void LM_Boot(void) {
+  int tries = 1;
+  int tmp;
+  err_t res;
+  char *serv_name;
+  char fs_name[FSERVER_LEN + 1];
+
+  /* Network not up yet: park the intent on LM_Vars so the deferred init path picks it up later. */
+  if (LM_Vars.initialised < LMInitState_FullyInited) {
+    debug("LM_Boot called, but cannot comply: %s\n", LM_Status());
+    LM_Vars.initialised = LMInitState_Boot;
+    return;
+  }
+
+  GetFSName(fs_name);
+
+  if (strlen(fs_name) == 0) {
+    debug("Auto-boot: server name has not been set...\n");
+    return;
+  }
+
+  /* Walk the configured server list (Inet$ServerName, then Inet$ServerName2, 3 ...) trying each until one mounts. */
+  for (;;) {
+    /* Prefer the domain controller for `fs_name` if RPC can find one; fall back to the configured name. */
+    serv_name = RPC_GetDomainController(fs_name);
+    if (serv_name == NULL) {
+      serv_name = fs_name;
+    }
+
+    debug("Server name \"%s\"\n", serv_name);
+
+    res = Omni_MountServer(serv_name,     // Server
+                           "ARMBOOT", "", // User name & password
+                           "BOOT",        // Mountname
+                           "ARMBOOT",     // Drive name
+                           &tmp);         // MountID_out
+
+    if (res != OK) {
+      printf("%s '%s' - ", MsgLookup("BootBad"), serv_name);
+      printf("%s", MsgError(res)->errmess);
+      /* tmp is non-zero once the share was successfully created; if we got that far we don't bother trying
+       * additional servers, the failure is post-mount.
+       */
+      if (tmp == 0) {
+        char var_name[sizeof("Inet$ServerName12")];
+        sprintf(var_name, "Inet$ServerName%d", ++tries);
+        if (!_kernel_getenv(var_name, fs_name, FSERVER_LEN)) {
+          continue;
+        }
+      }
+    }
+    break;
+  }
+}
+
+/* ------------------------------- */
+
+/* Initialise the module from the cmhg veneer, then run LM_init_phase_2 to bring up the network side if it can. */
+_kernel_oserror *LM_Initialise(const char *cmd_tail, int pod_base, void *pw) {
+  _kernel_oserror *err;
+  uint32_t os_version = 0;
+
+  /* DebugLib first so every subsequent failure path has tracing available; timestamp prefix helps interleave with kernel logs. */
+  debug_initialise("LanManFS", "", "");
+  debug_atexit();
+  debug_set_options(0, 0, 0);
+  debug_set_stamp_debug(true); // Prepend " HH:MM:SS" to every debug line via DebugLib's built-in timestamper.
+#ifdef SMB2_DEBUG
+  debug_set_device(REPORTER_OUTPUT);
+#else
+  debug_set_device(DEBUGIT_OUTPUT);
+#endif
+  LM_Vars.initialised = LMInitState_Uninitialised;
+
+  debug("LanManFS: LM_Initialise starting\n");
+
+  UNUSED(pod_base);
+  if (pw != NULL) {
+    LM_pw = (int)pw;
+  }
+
+  /* Resource and message-file registration before any user-visible output. */
+  err = _swix(ResourceFS_RegisterFiles, _IN(0), Resources());
+  if (err != NULL) {
+    return err;
+  }
+  err = _swix(MessageTrans_OpenFile, _INR(0, 2), msg_struct, "Resources:$.ThirdParty.OmniClient.LanManFS.Messages", 0);
+  if (err != NULL) {
+    goto initdereg;
+  }
+
+  debug("LanManFS: resources opened, calling SetDefaultVars\n");
+  SetDefaultVars();
+
+  /* Refuse anything older than RISC OS 3.50; OS identifiers rise with each release. */
+  (void)_swix(OS_Byte, _INR(0, 2) | _OUT(1), 129, 0, 255, &os_version);
+  if (os_version < OS_IDENTIFIER_MINIMUM) {
+    err = MsgError(ERISCOSVER);
+    goto initclose;
+  }
+
+  /* Optional command-tail processing: parses *RMLoad-style options that override CMOS defaults. */
+  if (cmd_tail != NULL) {
+    err = MsgError(ProcessCmdLine(cmd_tail));
+    if (err != NULL) {
+      goto initclose;
+    }
+  }
+
+  /* Reserve the module's Dynamic Area before the FS is declared.  Once LM_Declare runs, FSEntry handlers can be
+   * dispatched into the module at any point, and they assume the workspace pointers (DOSnamebuf, smb2_files, etc.)
+   * are already valid.
+   */
+  debug("LanManFS: claiming module workspace\n");
+  err = Workspace_Init();
+  if (err != NULL) {
+    debug("LanManFS: Workspace_Init failed: %s\n", err->errmess);
+    goto initclose;
+  }
+
+  /* Bring up module-global cache state before the FS goes live.  Per-mount substrates are claimed lazily by
+   * SMB_CreateShare / Cache_MountCreate; only the clock function and the global handle table are initialised here.
+   */
+  Cache_Init(LM_Tick);
+  Cache_SetLeafFold(Xlt_LeafFold);
+
+  /* Declare the filing system.  After this point any FSEntry dispatch may land. */
+  debug("LanManFS: calling LM_Declare\n");
+  err = LM_Declare();
+  if (err != NULL) {
+    debug("LanManFS: LM_Declare failed: %s\n", err->errmess);
+    goto initws;
+  }
+
+  /* SMB2 string conversion tables: prepared once at init so the wire path never builds them lazily. */
+  smb2_unicode_init();
+
+  LM_Vars.initialised = LMInitState_PreInit;
+
+  debug("LanManFS: calling LM_init_phase_2\n");
+  (void)LM_init_phase_2();
+
+  /* Try to register with OmniClient and the Free module regardless of init_phase_2's outcome.  Neither registration
+   * needs the network up; doing this here means the Free module gets us as a service handler even when the network
+   * is unavailable at boot (init_phase_2 takes the abort path in that case, but Free / OmniClient are happy to
+   * register without it).  Idempotent: safe to be re-fired by the Service_ModulePostInit handler above if Free or
+   * OmniClient are themselves loaded later.
+   */
+  Omni_StartUp();
+
+  return NULL;
+
+initws:
+  Workspace_Shutdown();
+initclose:
+  _swix(MessageTrans_CloseFile, _IN(0), msg_struct);
+initdereg:
+  _swix(ResourceFS_DeregisterFiles, _IN(0), Resources());
+  return err;
+}
+
+/* Bring up the sub-modules and the network transport, or leave the module waiting for a service call if there is no network. */
+static _kernel_oserror *LM_init_phase_2(void) {
+  enum { MAXEXITS = 4 };
+  pfnShutdown shutdowns[MAXEXITS];
+  int ctr = 0;
+  int want_boot;
+  int oldstate = LM_Vars.initialised;
+  _kernel_oserror *err;
+
+  want_boot = (LM_Vars.initialised == LMInitState_Boot);
+
+  debug("LanManFS: init_phase_2 starting\n");
+  debug("Initialising...\n");
+
+  /* Bring up subsystems in dependency order, pushing each shutdown hook onto the unwind stack as we go. */
+  if (!FS_Init() || !SMB_Init()) {
+    debug("LanManFS: FS_Init or SMB_Init failed\n");
+    goto initfailed;
+  }
+  shutdowns[ctr++] = (pfnShutdown)SMB_Shutdown;
+  if (!RPC_Init() || !Prn_Init()) {
+    debug("LanManFS: RPC_Init or Prn_Init failed\n");
+    goto initfailed;
+  }
+  shutdowns[ctr++] = (pfnShutdown)Prn_Shutdown;
+  if (!Stat_Init()) {
+    debug("LanManFS: Stat_Init failed\n");
+    goto initfailed;
+  }
+
+  err = MsgError(Buf_Init());
+  if (err != NULL) {
+    debug("LanManFS: Buf_Init failed: %s\n", err->errmess);
+    goto abort;
+  }
+
+  shutdowns[ctr++] = (pfnShutdown)Buf_Shutdown;
+
+  debug("LanManFS: starting network transport (NB_Startup)\n");
+  debug("Starting network transport...\n");
+
+  /* NB_Startup is the most likely failure point: no network -> abort (not fail), waiting for InternetStatus to wake us. */
+  err = MsgError(NB_Startup());
+  if (err != NULL) {
+    debug("LanManFS: NB_Startup failed: %d (%s)\n", err->errnum, err->errmess);
+    debug("Error - NB_Startup() returned %d (%s)\n", err->errnum, err->errmess);
+    goto abort;
+  }
+  debug("LanManFS: NB_Startup OK\n");
+
+  startcallbacks();
+
+  /* Everything we need is up: mark FullyInited so LM_Boot can proceed. */
+  LM_Vars.initialised = LMInitState_FullyInited;
+
+  _kernel_oscli("IconSprites Resources:$.ThirdParty.OmniClient.LanManFS.Sprites");
+
+  Omni_StartUp();
+
+  /* Replay any boot deferred from an earlier LM_Boot call that found us not yet ready. */
+  if (want_boot) {
+    debug("Booting...\n");
+    LM_Boot();
+  }
+
+  debug("All done...\n");
+
+  return NULL;
+
+initfailed:
+  /* Hard failure during sub-module init: report EINITFAILED to the caller and unwind. */
+  err = MsgError(EINITFAILED);
+  debug("LanManFS: %s (%s)\n", err->errmess, LM_Status());
+  while (--ctr >= 0) {
+    (shutdowns[ctr])();
+  }
+  return err;
+
+abort:
+  /* Soft abort (typically no network): restore the prior state so a service-call retry can pick up from here. */
+  LM_Vars.initialised = oldstate;
+  while (--ctr >= 0) {
+    (shutdowns[ctr])();
+  }
+  debug("LanManFS: %s\n", LM_Status());
+  return NULL;
+}
+
+/* Inspect a Service_DCIDriverStatus call: capture the first non-loopback driver to start as our default.
+ *
+ * Parameters:
+ *   r  register block of the service call (R0 = Dib*, R2 = DCIDRIVER_* status)
+ */
+static void LM_check_driver_status(_kernel_swi_regs *r) {
+  char if_name[16];
+  Dib *dib = (Dib *)(r->r[0]);
+
+  sprintf(if_name, "%-.8s%u", dib->dib_name, dib->dib_unit);
+
+  if ((strcmp(LM_Vars.drivername, DEFAULT_ETHER_TYPE) == 0) && (r->r[2] == DCIDRIVER_STARTING) && (if_name[0] != 'l')) {
+    /* Capture the first interface to start which isn't loopback */
+    (void)strncpy(LM_Vars.drivername, if_name, NAME_LIMIT);
+  }
+}
+
+/* Inspect a Service_DCIProtocolStatus call.
+ *
+ * If the Internet protocol comes or goes, inform our transport layer so it can drop or re-open its
+ * sockets.  Other protocol modules are ignored.
+ *
+ * Parameters:
+ *   r  register block (R2 = DCIPROTOCOL_* status, R4 = protocol name)
+ */
+static void LM_check_protocol_status(_kernel_swi_regs *r) {
+  const char *proto = (char *)r->r[4];
+
+  if (r->r[2] == DCIPROTOCOL_DYING && strcmp(proto, "Internet") == 0) {
+    NB_InternetGone();
+  } else if (r->r[2] == DCIPROTOCOL_STARTING && strcmp(proto, "Internet") == 0) {
+    NB_InternetInit();
+  }
+}
+
+/* Inspect a Service_InternetStatus call.
+ *
+ * Two paths complete a deferred boot: a fresh interface address (AddressChanged) when we know
+ * which interface we want, or InterfaceUpDown reporting the named interface coming up.  In both
+ * cases we only act when we are still in PreInit / Boot: once fully initialised this handler
+ * does nothing.
+ *
+ * Parameters:
+ *   r  register block (R0 = InternetStatus_* code, R2 = up/down flag, R3 = interface name)
+ */
+static void LM_check_internet_status(_kernel_swi_regs *r) {
+  char *cp = (char *)r->r[3];
+
+  /* AddressChanged path: any new address is interesting; only check we're still in a state that wants the wakeup. */
+  if (r->r[0] == InternetStatus_AddressChanged) {
+    if (LM_Vars.initialised != LMInitState_PreInit && LM_Vars.initialised != LMInitState_Boot) {
+      return;
+    }
+  } else {
+    /* Other status codes: only InterfaceUpDown for our chosen interface coming up counts. */
+    if (LM_Vars.initialised != LMInitState_PreInit && LM_Vars.initialised != LMInitState_Boot) {
+      return;
+    }
+    if (r->r[0] != InternetStatus_InterfaceUpDown) {
+      return;
+    }
+    if (stricmp(LM_Vars.drivername, cp) != 0) {
+      return;
+    }
+    if (r->r[2] != 1) {
+      return;
+    }
+  }
+
+  /* Defensive teardown: under normal sequencing init_phase_2 cannot reach this point with everything still up,
+   * but re-entrancy through service calls is hard to reason about, so tear down anyway.
+   */
+  {
+    /* Preserve a parked boot intent across the teardown: LM_GracefulClosedown resets the state to PreInit,
+     * erasing the LMInitState_Boot marker that LM_init_phase_2 samples to replay a boot that was deferred
+     * because the network was not yet up.
+     */
+    int boot_pending = (LM_Vars.initialised == LMInitState_Boot);
+
+    LM_GracefulClosedown();
+
+    if (boot_pending) {
+      LM_Vars.initialised = LMInitState_Boot;
+    }
+  }
+
+  LM_init_phase_2();
+}
+
+/* ========== Callback code ==========
+ *
+ * Periodic background work: keep idle connections alive, drain async
+ * server-initiated traffic, and recover from dead servers.  The callevery
+ * fires on the ticker and queues a transient callback, which then runs in
+ * the safer "between SWIs" context.
+ */
+
+/*
+ * Keep the cache clock, then collect change notifications, keep idle connections alive and probe dead servers.
+ *
+ * Runs as the transient callback callevery_handler queues.  The network work is skipped while a foreground call is using the connection,
+ * since the callback can fire inside one that is waiting, and it runs to the short background deadline because it holds up the whole
+ * desktop while it waits.
+ *
+ * Parameters:
+ *   r   register block (unused)
+ *   pw  private word (unused)
+ *
+ * Returns: NULL.
+ */
+_kernel_oserror *callback_handler(_kernel_swi_regs *r, void *pw) {
+  static unsigned ticks_since_types_forgotten;
+
+  UNUSED(r);
+  UNUSED(pw);
+  switch (callbackflag) {
+  case 1:
+    Cache_KeepTime();
+
+    /* Drop the file types remembered from MimeMap now and then, so an edit to the MimeMap file is seen.  Nothing waits on the network. */
+    if (++ticks_since_types_forgotten >= LM_MIME_CACHE_TTL) {
+      ticks_since_types_forgotten = 0u;
+      Xlt_ForgetTypes();
+    }
+
+    /* Leave the network alone while a foreground call is using it: the callback can fire inside one whenever it
+     * waits.  A filing-system call in progress also shows the connection is not idle.
+     */
+    if (SMB2_IsBusy()) {
+      callbackflag = 0;
+      break;
+    }
+
+    /* Everything below holds up the whole desktop while it waits on the network, so it runs to the short background deadline. */
+    SMB2_SetBackground(true);
+
+    /* Drain server-initiated async messages (CHANGE_NOTIFY responses) and the deferred-close queue.  The callevery cadence sets the upper
+     * bound on how quickly a server-side mutation reaches the cache and the Filer on an otherwise-idle mount.
+     */
+    SMB2_PollNotifications();
+
+    /* Dead-server recovery probe and live-server keep-alive. */
+    SMB_AntiIdle();
+    SMB2_SetBackground(false);
+    callbackflag = 0;
+  }
+  return 0;
+}
+
+/* Remove any pending transient callback. */
+static void clearcallback(void) {
+  if (callbackflag != 0) {
+    (void)_swix(OS_RemoveCallBack, _INR(0, 1), callback_entry, LM_pw);
+    callbackflag = 0;
+  }
+}
+
+/* Ticker-event handler called from the cmhg veneer.
+ *
+ * Queues the transient callback if one is not already pending.  Kept minimal so the work runs in
+ * a safer re-entrancy context.
+ *
+ * Parameters:
+ *   r   register block (unused)
+ *   pw  private word forwarded to OS_AddCallBack
+ *
+ * Returns: NULL.
+ */
+_kernel_oserror *callevery_handler(_kernel_swi_regs *r, void *pw) {
+  UNUSED(r);
+  if (callbackflag == 0 && _swix(OS_AddCallBack, _INR(0, 1), callback_entry, pw) == NULL) {
+    callbackflag = 1;
+  }
+  return 0;
+}
+
+/* Start the periodic callevery timer.  See LM_CALLEVERY_TICKS in h/LanMan for the cadence rationale. */
+static void startcallbacks(void) {
+  (void)_swix(OS_CallEvery, _INR(0, 2), LM_CALLEVERY_TICKS, callevery_entry, LM_pw);
+}
+
+/* Stop the periodic callevery timer and drop any pending transient callback. */
+static void stopcallbacks(void) {
+  (void)_swix(OS_RemoveTickerEvent, _INR(0, 1), callevery_entry, LM_pw);
+  clearcallback();
+}

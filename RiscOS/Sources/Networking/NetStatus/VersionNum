@@ -1,0 +1,21 @@
+/* (2.10)
+ *
+ * This file is automatically maintained by srccommit, do not edit manually.
+ *
+ */
+#define Module_MajorVersion_CMHG        2.10
+#define Module_MinorVersion_CMHG
+#define Module_Date_CMHG                16 Nov 2024
+
+#define Module_MajorVersion             "2.10"
+#define Module_Version                  210
+#define Module_MinorVersion             ""
+#define Module_Date                     "16 Nov 2024"
+
+#define Module_ApplicationDate          "16-Nov-24"
+
+#define Module_ComponentName            "NetStatus"
+
+#define Module_FullVersion              "2.10"
+#define Module_HelpVersion              "2.10 (16 Nov 2024)"
+#define Module_LibraryVersionInfo       "2:10"

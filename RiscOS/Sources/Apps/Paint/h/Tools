@@ -1,0 +1,217 @@
+/* Copyright 1996 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#ifndef tools_H
+#define tools_H
+
+/* > h.Tools */
+/*
+ *  Export tool structure defs
+ *
+ */
+
+extern toolwindow_block
+    tools_pixelpaint,
+    tools_circlepaint,
+    tools_linepaint,
+    tools_circleoutlinepaint,
+    tools_trianglepaint,
+    tools_ellipsepaint,
+    tools_ellipseoutlinepaint,
+    tools_sectorpaint,
+    tools_arcpaint,
+    tools_segmentpaint,
+    tools_parallelogrampaint,
+    tools_parallelogramoutlinepaint,
+    tools_rectanglepaint,
+    tools_rectangleoutlinepaint,
+    tools_floodfillpaint,
+    tools_scissorpaint,
+    tools_grabberpaint,
+    tools_camerapaint,
+    tools_textpaint,
+    tools_spraycanpaint,
+    tools_brushpaint;
+
+extern char
+    tools_text_buffer [256],
+    tools_text_xsize [6],
+    tools_text_ysize [6],
+    tools_text_units [5],
+    tools_fontname_buffer [64],
+    tools_spray_density[],
+    tools_spray_radius[],
+    tools_brushsprite[],
+    tools_newbrushsprite[],
+    tools_brush_nxscalem[],
+    tools_brush_nyscalem[],
+    tools_brush_nxscaled[],
+    tools_brush_nyscaled[],
+    tools_brush_cxscalem[],
+    tools_brush_cyscalem[],
+    tools_brush_cxscaled[],
+    tools_brush_cyscaled[];
+
+extern wimp_i tools_icons [];
+extern main_sprite *tools_textstencil_ptr;
+extern main_sprite *tools_brushsprite_ptr;
+extern main_sprite *tools_brushmouse_ptr;
+extern main_file tools_brushfile;
+extern main_scaling_block tools_brushscale;
+extern BOOL
+    tools_flood_local,
+    tools_exporting_sprite,
+    tools_system_font,
+    tools_fonts_blend,
+    tools_font_changed,
+    tools_grabber_wrap;
+extern int textxsize,
+           textysize,
+           tools_brush_use_gcol;
+
+typedef enum
+{ tools_bicon_BrushText,
+  tools_bicon_NameText,
+  tools_bicon_NewName,
+  tools_bicon_XScText,
+  tools_bicon_XNScBox,
+  tools_bicon_XNScaleM,
+  tools_bicon_XNScaleMUp,
+  tools_bicon_XNScaleMDown,
+  tools_bicon_XNScaleD,
+  tools_bicon_XNScaleDUp,
+  tools_bicon_XNScaleDDown,
+  tools_bicon_YScText,
+  tools_bicon_YNScBox,
+  tools_bicon_YNScaleM,
+  tools_bicon_YNScaleMUp,
+  tools_bicon_YNScaleMDown,
+  tools_bicon_YNScaleD,
+  tools_bicon_YNScaleDUp,
+  tools_bicon_YNScaleDDown,
+  tools_bicon_UseNew,
+  tools_bicon_UseGCOL,
+  tools_bicon_UseStamp,
+  tools_bicon_UseTint,
+  tools_bicon_OpacText,
+  tools_bicon_OpacBrdr,
+  tools_bicon_OpacBgnd,
+  tools_bicon_OpacBar,
+  tools_bicon_Opacity,
+  tools_bicon_Max                /* use as a limit */
+} tools_brushicon_number;
+
+typedef enum
+{ tools_sicon_DensityText,
+  tools_sicon_Density,
+  tools_sicon_RadiusText,
+  tools_sicon_Radius,
+  tools_sicon_OpacText,
+  tools_sicon_OpacBrdr,
+  tools_sicon_OpacBgnd,
+  tools_sicon_OpacBar,
+  tools_sicon_Opacity,
+  tools_sicon_Max                /* use as a limit */
+} tools_sprayicon_number;
+
+typedef enum
+{
+  tools_ticon_SizeText,
+  tools_ticon_Size,
+  tools_ticon_SizeUnits,
+  tools_ticon_HeightText,
+  tools_ticon_Height,
+  tools_ticon_HeightUnits,
+  tools_ticon_FontName,
+  tools_ticon_FontPop,
+  tools_ticon_Text,
+  tools_ticon_Max                /* use as a limit */
+} tools_text_number;
+
+typedef enum
+{
+  tools_gicon_Wrap,
+  tools_gicon_Max                /* use as a limit */
+} tools_grab_number;
+
+typedef struct tools_layer
+{ main_sprite *layersprite;
+  main_sprite *basesprite;
+  main_ttab *screentranstab;
+  BOOL mergepending;
+} tools_layer;
+
+extern void tools_mouse_to_pixel (main_window *, wimp_mousestr *,
+    int *, int *);
+
+extern void tools_mouse_to_pixel_overflow (main_window *, wimp_mousestr *,
+                            int *, int *, int *, int *);
+
+extern int tools_extent_to_pixel_x (const main_sprite_window *, int);
+extern int tools_extent_to_pixel_y (const main_sprite_window *, int);
+
+extern main_sprite *tools_get_layer (main_sprite *);
+extern main_ttab *tools_get_layer_screen_transtab (main_sprite *);
+extern void tools_remove_brush (void);
+extern void tools_replace_brush (void);
+extern os_error *tools_make_brushmouse_sprite (void);
+extern void tools_delete_brushmouse_sprite (void);
+main_sprite *tools_create_layer (main_window *);
+void tools_merge_layer_onto (main_sprite *);
+extern void tools_delete_layer (void);
+
+extern main_file layersfile;
+extern tools_layer toolslayer;
+
+/* note the following must allow for any dynamic icons too */
+#define tools_COUNT 22
+#define tools_DESC_ICON 22
+#define tools_ACTION_ICON_BASE 24
+#define tools_ACTION_SET 0 /* Maps directly to GCOL plot actions 0-3 */
+#define tools_ACTION_OR  1
+#define tools_ACTION_AND 2
+#define tools_ACTION_EOR 3
+#define tools_ACTION_COUNT (tools_ACTION_EOR - tools_ACTION_SET + 1)
+#define tools_SCOPE_ICON_BASE 28
+#define tools_SCOPE_LOCAL 0
+#define tools_SCOPE_EXPORT 1
+#define tools_SCOPE_COUNT (tools_SCOPE_EXPORT - tools_SCOPE_LOCAL + 1)
+#define tools_ICON_COUNT (tools_COUNT + tools_bicon_Max + 6)
+#define tools_MAX_BRUSH_ICONS 21
+#define tools_MAX_BUILTIN_BRUSHES 20
+#define tools_BRUSH_ICON_SIZE 42
+#define tools_BRUSH_ICON_MARGIN 4
+#define tools_BRUSH_ICON_PADDING 4
+#define tools_BRUSH_ICON_BORDER 4
+/* This gives the distance between the same point on two adjacent icons */
+#define tools_BRUSH_ICON_STRIDE (2 * (tools_BRUSH_ICON_BORDER + tools_BRUSH_ICON_PADDING) + tools_BRUSH_ICON_SIZE + tools_BRUSH_ICON_MARGIN)
+
+typedef struct
+{ wimp_wind t;
+  wimp_icon i [tools_ICON_COUNT + 1];
+} tools_template;
+
+typedef struct
+{ wimp_wind t;
+  wimp_icon i [tools_MAX_BRUSH_ICONS];
+} tools_brush_pane_template;
+
+extern tools_template tools_tool_template;
+extern tools_brush_pane_template tools_brushpane_template;
+
+#define tools_BRUSH_MAGIC ('X' << 24 | 'L' << 16 | 'E' << 8 | 'F')
+
+extern void Temporary_Name(sprite_area *, char *);
+
+#endif

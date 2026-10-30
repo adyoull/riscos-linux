@@ -1,0 +1,56 @@
+---
+# Applies to C, C++, and ObjC (covers RISC OS extensionless files)
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth: 2
+UseTab: Never
+ContinuationIndentWidth: 4
+
+# Braces: K&R everywhere (opening brace on same line)
+BreakBeforeBraces: Attach
+InsertBraces: true
+
+# No single-line shortcuts
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortCaseLabelsOnASingleLine: false
+
+# Parentheses: no inner spaces
+SpacesInParentheses: false
+SpaceInEmptyParentheses: false
+SpacesInCStyleCastParentheses: false
+SpacesInConditionalStatement: false
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatementsExceptControlMacros
+
+# Column limit: generous to avoid over-wrapping (existing files already run to ~136).
+ColumnLimit: 140
+
+# Includes: don't reorder
+SortIncludes: Never
+
+# Pointer alignment
+PointerAlignment: Right
+
+# Don't reformat comments aggressively
+ReflowComments: false
+
+# Keep array/struct initialisers readable
+AlignArrayOfStructures: Left
+
+# Bin packing
+BinPackParameters: true
+BinPackArguments: true
+
+# Alignment
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+
+# Penalty settings
+PenaltyBreakAssignment: 100
+PenaltyBreakBeforeFirstCallParameter: 100
+PenaltyReturnTypeOnItsOwnLine: 200
+---

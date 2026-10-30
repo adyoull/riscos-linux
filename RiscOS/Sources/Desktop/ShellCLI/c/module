@@ -1,0 +1,473 @@
+/* Copyright 2020 Julie Stamp
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* From CLib */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include "swis.h"
+
+#include "Global/NewErrors.h"
+#include "Global/EnvNumbers.h"
+#include "Global/OsBytes.h"
+#include "Global/ModHand.h"
+#include "Global/Services.h"
+#include "Global/Variables.h"
+#include "Global/VduExt.h"
+#include "AsmUtils/rminfo.h"
+
+/* RISC_OSLib */
+#include "wimp.h"
+#include "bbc.h"
+
+/* Local */
+#include "module.h"
+#include "ShellCLIHdr.h"
+#include "veneer.h"
+
+#define MAKE_ERROR_BLOCK(N,S) \
+ static const internaterr_t ErrorBlock_##N = \
+ { \
+   .errnum = ErrorNumber_##N, \
+   .errmess = S \
+ };
+
+#define COMMAND_BUFFER_SIZE 1024
+#define MESSAGE_BUFFER_SIZE 256
+
+#define wimp_COLOUR_WHITE      0x0
+#define wimp_COLOUR_BLACK      0x7
+
+typedef struct
+{
+  uint32_t errnum;
+  char     errmess[8];
+} internaterr_t;
+
+typedef struct
+{
+  asm_routine handler;
+  void *handle;
+  void *buffer;
+} env_handler_t;
+
+typedef struct
+{
+  void *pc;
+  _kernel_oserror e;
+} error_t;
+
+typedef struct
+{
+  char command_buffer[COMMAND_BUFFER_SIZE];
+  error_t env_error;
+  env_handler_t old_exit;
+  wimp_t task_handle;
+} wk_t;
+
+static void acknowledge_escape(void);
+static void set_handlers(env_handler_t *old_exit);
+
+static wk_t *wk = NULL;
+/* We can't pass this to Shell_Create in wk because
+   wk is only allocated by Shell_Create */
+static void *wk_stack = NULL;
+
+MAKE_ERROR_BLOCK(WimpCantKill, "WActive")
+MAKE_ERROR_BLOCK(ShellCreation, "NoSpawn")
+MAKE_ERROR_BLOCK(ShellRemoval, "SActive")
+
+static void setup_error(_kernel_oserror *error)
+{
+  tracef("Setup error");
+  _swix(Wimp_CommandWindow, _IN(0), -1); /* Make errors in a box */
+  _swix(Wimp_ReportError, _INR(0,2), error, wimp_ECANCEL | wimp_EHICANCEL, Module_Title);
+}
+
+static void setup_vdu(void)
+{
+  tracef("Setup VDU");
+  static const char vdu_commands[] =
+  {
+    6,                             /* Enable VDU */
+    4,                             /* VDU 4 mode */
+    23, 1, 1, 0, 0, 0, 0, 0, 0, 0, /* enable text cursor */
+    26,                            /* text and graphics windows to default */
+    30,                            /* text cursor homed */
+    29, 0, 0, 0, 0,                /* graphics origin to (0,0) */
+    25, 4, 0, 0, 0, 0,             /* graphics cursor to (0,0) */
+    15,                            /* Paged mode off */
+    18, 0, 7,                      /* graphics foreground to colour 7 */
+    18, 0, 128                     /* graphics background to colour 0 */
+  };
+
+  char move_cursor[] =
+  {
+    bbc_MoveText,0,0,10
+  };
+
+  int list[2] = { VduExt_TWBRow, -1 };
+
+  /* Flush VDU queue */
+  _swix(OS_Byte, _INR(0,2), OsByte_RW_VDUQueue, 0, 0);
+  _swix(OS_WriteN, _INR(0,1), vdu_commands, sizeof(vdu_commands));
+  _swix(Wimp_TextColour, _IN(0), wimp_COLOUR_BLACK);
+  _swix(Wimp_TextColour, _IN(0), wimp_SETCOLOUR_background | wimp_COLOUR_WHITE);
+  _swix(OS_ReadVduVariables, _INR(0,1), list, list);
+  move_cursor[2] = (char)list[0];
+  _swix(OS_WriteN, _INR(0,1), move_cursor, sizeof(move_cursor));
+  /* Get rid of the mouse */
+  _swix(OS_Byte, _INR(0,1), OsByte_SelectPointer, 0);
+}
+
+static void display_prompt(void)
+{
+  _kernel_oserror *error;
+  int used;
+
+  _swix(OS_WriteI + bbc_TextToText, 0);
+  error = _swix(OS_ReadVarVal, _INR(0,4) | _OUT(2), "CLI$Prompt",
+                               wk->command_buffer, COMMAND_BUFFER_SIZE, 0, VarType_Expanded,
+                               &used);
+  if(error)
+  {
+    _swix(OS_WriteI + '*', 0);
+  }
+  else
+  {
+    _swix(OS_WriteN, _INR(0,1), wk->command_buffer, used);
+  }
+}
+
+static void command_loop(void)
+{
+  _kernel_oserror *error;
+  int used, psr;
+
+  while(1)
+  {
+    display_prompt();
+    error = _swix(OS_ReadLine32, _INR(0,4) | _OUT(1) | _OUT(_FLAGS),
+                                 wk->command_buffer, COMMAND_BUFFER_SIZE, ' ', 255, 0,
+                                 &used, &psr);
+    if(error)
+    {
+      if(_swix(OS_Write0, _IN(0), error->errmess) ||
+         _swix(OS_NewLine, 0))
+      {
+        setup_error(error);
+        return;
+      }
+      continue;
+    }
+
+    if(psr & _C)
+    {
+      acknowledge_escape();
+      continue;
+    }
+
+    if(used == 0)
+    {
+      return;
+    }
+    tracef("Calling XOS_CLI '%s'\n", wk->command_buffer);
+    error = _swix(OS_CLI, _IN(0), wk->command_buffer);
+    tracef("Returned from XOS_CLI\n");
+    if(error)
+    {
+      if(_swix(OS_Write0, _IN(0), error->errmess) ||
+         _swix(OS_NewLine, 0))
+      {
+        setup_error(error);
+        return;
+      }
+      continue;
+    }
+  }
+}
+
+static void acknowledge_escape(void)
+{
+  _kernel_oserror *error;
+  const char *result;
+  int used;
+
+  error = _swix(OS_Byte, _IN(0), OsByte_AcknowledgeEscape);
+  if(error) return;
+  error = _swix(OS_NewLine, 0);
+  if(error) return;
+  error = _swix(MessageTrans_Lookup, _INR(0,2) | _OUTR(2,3), NULL, "Escape", NULL,
+                                     &result, &used);
+  if(error) return;
+  error = _swix(OS_WriteN, _INR(0,1), result, used);
+  if(error) return;
+  _swix(OS_NewLine, 0);
+}
+
+/* Looks up an error and dumps the result in
+  wk->env_error.e */
+static _kernel_oserror *get_error(wk_t *wk, const internaterr_t *err_token)
+{
+  _kernel_oserror *error;
+  int msgblock[4];
+  error = _swix(MessageTrans_OpenFile, _INR(0,2), msgblock, Module_MessagesFile, NULL);
+  if(error) return error;
+  error = _swix(MessageTrans_ErrorLookup, _INR(0,7), err_token, msgblock, &wk->env_error.e, sizeof(wk->env_error.e),
+                                          Module_Title, NULL, NULL, NULL);
+  _swix(MessageTrans_CloseFile, _IN(0), msgblock);
+  return error;
+}
+
+static _kernel_oserror *create_handler(_kernel_swi_regs *r, void *pw)
+{
+  IGNORE(r);
+  IGNORE(pw);
+  _kernel_oserror *error;
+  tracef("Create handler");
+  if(wk != NULL)
+    return get_error(wk, &ErrorBlock_ShellCreation);
+  error = _swix(OS_Module, _IN(0) | _IN(3) | _OUT(2), ModHandReason_Claim, sizeof(wk_t), &wk);
+  if(error) return error;
+  set_handlers(&wk->old_exit);
+  return NULL;
+}
+
+static _kernel_oserror *destroy_handler(_kernel_swi_regs *r, void *pw)
+{
+  IGNORE(r);
+  IGNORE(pw);
+  tracef("Destroy handler");
+  if(wk != NULL)
+  {
+    _swix(OS_ChangeEnvironment, _INR(0,3) | _OUTR(1,3), ExitHandler,
+                                wk->old_exit.handler, wk->old_exit.handle, wk->old_exit.buffer,
+                                &wk->old_exit.handler, &wk->old_exit.handle, &wk->old_exit.buffer);
+    _swix(OS_Module, _IN(0) | _IN(2), ModHandReason_Free, wk);
+    wk = NULL;
+  }
+  return NULL;
+}
+
+/* Set everything to default handler, except exit and error,
+   which we set to ours. Return the old exit handler. */
+static void set_handlers(env_handler_t *old_exit)
+{
+  _kernel_oserror *error;
+  asm_routine handler;
+  void *handle;
+  void *buffer;
+  int i;
+
+  for(i = 0; i < MaxEnvNumber; i++)
+  {
+    error = _swix(OS_ReadDefaultHandler, _IN(0) | _OUTR(1,3), i, &handler, &handle, &buffer);
+    if(error) return;
+    if(i == ExitHandler)
+    {
+      handler = exit_veneer;
+      handle = wk_stack;
+    }
+    else if(i == ErrorHandler)
+    {
+      handler = error_veneer;
+      handle = wk_stack;
+      buffer = &wk->env_error;
+    }
+
+    _swix(OS_ChangeEnvironment, _INR(0,3) | _OUTR(1,3), i,
+                                handler, handle, buffer,
+                                &handler, &handle, &buffer);
+
+    if(i == ExitHandler)
+    {
+      old_exit->handler = handler;
+      old_exit->handle = handle;
+      old_exit->buffer = buffer;
+    }
+  }
+}
+
+void exit_handlerC(void)
+{
+  /* We're going to lose access to wk in a mo */
+  wimp_t task_handle = wk->task_handle;
+  env_handler_t h_dummy;
+  tracef("exit_handlerC");
+  set_handlers(&h_dummy);
+
+  command_loop();
+
+  _swix(Shell_Destroy, 0);
+
+  _swix(Wimp_CloseDown, _INR(0,1), task_handle, *(int *)"TASK");
+  _swix(Wimp_CommandWindow, _IN(0), -1);
+  _my_exitmodule(wk_stack);
+  /* Mustn't return */
+}
+
+void error_handlerC(void)
+{
+  tracef("error_handlerC %s\n", wk->env_error.e.errmess);
+  _swix(OS_WriteI + bbc_TextToText, 0);
+  printf("%s\n", wk->env_error.e.errmess);
+  _swix(OS_Exit, 0);
+  /* Mustn't return */
+}
+
+
+void module_enter(char const *command_tail, void *pw, void *stack)
+{
+  IGNORE(pw);
+  IGNORE(command_tail);
+  _kernel_oserror *error = NULL;
+  wimp_t task_handle;
+  int used;
+  wk_stack = stack; /* Remember it for when we set up exit/error handlers */
+
+  if(_swix(Shell_Create, 0))
+    /* Nothing initialised yet, so just give up */
+    return;
+
+  _swix(Wimp_Initialise, _INR(0,3) | _OUT(1),
+                         300, *(int *)"TASK", Module_Title, NULL,
+                         &task_handle);
+
+  wk->task_handle = task_handle;
+  setup_vdu();
+  /* Let the WIMP know there's going to be VDU 4 output */
+  error = _swix(Wimp_CommandWindow, _IN(0), 1);
+  if(error)
+  {
+    setup_error(error);
+    goto finish;
+  }
+
+  /* Pretend we're not the current task */
+  error = _swix(OS_ChangeEnvironment, _INR(0,3), CAOPointer, (void *)exit_veneer, 0, 0);
+  if(error)
+  {
+    setup_error(error);
+    goto finish;
+  }
+
+  error = _swix(OS_ReadVarVal, _INR(0,4) | _OUT(2), "CLI$Greeting",
+                               wk->env_error.e.errmess, sizeof(wk->env_error.e.errmess), 0, VarType_Expanded,
+                               &used);
+  if(!error)
+  {
+    _swix(OS_WriteI + bbc_TextToText, 0);
+    wk->env_error.e.errmess[used] = 0;
+    _swix(OS_PrettyPrint, _INR(0,2), wk->env_error.e.errmess, NULL, NULL);
+    _swix(OS_NewLine, 0);
+  }
+
+  command_loop();
+
+finish:
+  _swix(Shell_Destroy, 0);
+
+  /* Send something so that WIMP knows to do a refresh */
+  _swix(OS_WriteI + bbc_NoOperation, 0);
+  _swix(Wimp_CloseDown, _INR(0,1), task_handle, *(int *)"TASK");
+  _swix(Wimp_CommandWindow, _IN(0), -1);
+  /* Don't OS_Exit here -- the veneer has some freeing to do currently */
+}
+
+/* Sets up CLI$Greeting */
+_kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
+{
+  IGNORE(cmd_tail);
+  IGNORE(podule_base);
+  IGNORE(pw);
+  /* Try to open the messages file */
+  _kernel_oserror *error;
+  int msgblock[4];
+  char buffer[MESSAGE_BUFFER_SIZE];
+  int used;
+  error = _swix(MessageTrans_OpenFile, _INR(0,2), msgblock, Module_MessagesFile, NULL /* Buffer */);
+  if(error) goto finish;
+  /* Lookup the greeting string */
+  error = _swix(MessageTrans_Lookup, _INR(0,3) | _OUT(3), msgblock, "Greeting", buffer, MESSAGE_BUFFER_SIZE, &used);
+  if(error) goto finish;
+  /* Keep it in a variable */
+  _swix(OS_SetVarVal, _INR(0,4), "CLI$Greeting", buffer, used, 0, VarType_String);
+  _swix(MessageTrans_CloseFile, _IN(0), msgblock);
+finish:
+  /* Don't fail to start if no greeting */
+  return NULL;
+}
+
+void module_service_handler(int service_number, _kernel_swi_regs *r, void *pw)
+{
+  IGNORE(pw);
+  /* Are we currently active? */
+  if(service_number == Service_Memory && (uintptr_t)r->r[2] == Image_RO_Base)
+  {
+    /* Is it the Wimp testing us? -- tell it we want to keep the app slot. */
+    if(r->r[0] == INTPTR_MIN)
+    {
+      r->r[1] = 0;
+    }
+  }
+  /* Is it Wimp_Initialise, with us the current task? */
+  else if(service_number == Service_WimpCloseDown &&
+          r->r[0] > 0)
+  {
+    if(wk && wk->task_handle == (wimp_t)r->r[2])
+    {
+      r->r[0] = (int)get_error(wk, &ErrorBlock_WimpCantKill);
+    }
+  }
+}
+
+_kernel_oserror *module_swis(int swi_offset, _kernel_swi_regs *r, void *pw)
+{
+  switch(swi_offset)
+  {
+    case Shell_Create - Shell_00:
+      return create_handler(r, pw);
+    case Shell_Destroy - Shell_00:
+      return destroy_handler(r, pw);
+    default:
+      return error_BAD_SWI;
+  }
+}
+
+_kernel_oserror *module_commands(const char *arg_string, int argc, int cmd_no, void *pw)
+{
+  IGNORE(pw);
+  IGNORE(argc);
+  IGNORE(arg_string);
+  IGNORE(cmd_no);
+  if(wk)
+  {
+    return get_error(wk, &ErrorBlock_ShellCreation);
+  }
+  return _swix(OS_Module, _INR(0,2), ModHandReason_Enter, Module_Title, NULL);
+}
+
+_kernel_oserror *module_final(int fatal, int podule, void *pw)
+{
+  IGNORE(fatal);
+  IGNORE(pw);
+  IGNORE(podule);
+  if(wk)
+  {
+    return get_error(wk, &ErrorBlock_ShellRemoval);
+  }
+  return NULL;
+}

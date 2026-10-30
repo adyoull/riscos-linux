@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "3.78"
+Module_Version          SETA    378
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "15 Apr 2023"
+Module_ApplicationDate  SETS    "15-Apr-23"
+Module_ComponentName    SETS    "FileCore"
+Module_FullVersion      SETS    "3.78"
+Module_HelpVersion      SETS    "3.78 (15 Apr 2023)"
+                        END

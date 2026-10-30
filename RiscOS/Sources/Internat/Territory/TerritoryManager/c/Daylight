@@ -1,0 +1,415 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <assert.h>
+#include "swis.h"
+
+#include "Global/NewErrors.h"
+#include "Global/Services.h"
+#include "Global/CMOS.h"
+#include "Global/OsBytes.h"
+#include "Global/OsWords.h"
+#include "DebugLib/DebugLib.h"
+#include "Interface/Territory.h"
+
+#include "MsgCode.h"
+#include "TerrMgrInt.h"
+#include "Daylight.h"
+#include "Time.h"
+#include "TerritoryMgrHdr.h"
+
+#define DAYLIGHTRULES_SUPPORTED 0
+#define DAYLIGHTRULES_BOUNDS    1
+
+/*!
+ * \brief  Read/modify/write the daylight savings CMOS
+ * \param  andmask Mask to apply
+ * \param  eormask Mask to apply
+ * \note   CMOS is updated such that new := (old AND andmask) EOR eormask
+ * \return Old value
+ */
+uint8_t daylight_modify_cmos(uint8_t andmask, uint8_t eormask)
+{
+	_kernel_oserror *err;
+	uint32_t new, dbtb, alarmandtime;
+
+	err = _swix(OS_Byte, _INR(0,1) | _OUT(2), OsByte_ReadCMOS,
+	            DBTBCMOS, &dbtb);
+	if (err == NULL)
+	{
+		err = _swix(OS_Byte, _INR(0,1) | _OUT(2), OsByte_ReadCMOS,
+		            AlarmAndTimeCMOS, &alarmandtime);
+	}
+	if (err != NULL) return 0; /* As blank CMOS */
+
+	/* Modify and writeback */
+	new = dbtb;
+	if ((andmask & AutoDSTCMOSBit) == 0) new = new & ~AutoDSTCMOSBit;
+	if ((eormask & AutoDSTCMOSBit) != 0) new = new ^  AutoDSTCMOSBit;
+	if (new != dbtb) _swix(OS_Byte, _INR(0,2), OsByte_WriteCMOS, DBTBCMOS, new);
+
+	new = alarmandtime;
+	if ((andmask & DSTCMOSBit) == 0) new = new & ~DSTCMOSBit;
+	if ((eormask & DSTCMOSBit) != 0) new = new ^  DSTCMOSBit;
+	if (new != alarmandtime) _swix(OS_Byte, _INR(0,2), OsByte_WriteCMOS, AlarmAndTimeCMOS, new);
+
+	/* Mix previous values */
+	static_assert(DSTCMOSBit != AutoDSTCMOSBit, "CMOS bits must not coincide");
+
+	return (uint8_t)((dbtb & AutoDSTCMOSBit) | (alarmandtime & DSTCMOSBit));
+}
+
+/*!
+ * \brief  Something changed so check if there are any side effects for daylight savings
+ * \note   Called when * callback expires
+ *                     * the territory is set
+ *                     * the timezone or DST CMOS is set
+ *                     * the soft RTC is resynchronised with hard RTC
+ *         Note that using OS_Word 15 behind our back is not trapped, you must
+ *         set the time with SWI Territory_SetTime when using auto switch over.
+ * \return Error block pointer
+ */
+_kernel_oserror *daylight_switch_check(void)
+{
+	_kernel_oserror *err = NULL;
+	uint8_t setting, old_dst_bits;
+	int32_t offset, old_tzone_centis;
+	size_t  tz;
+
+	_swix(OS_RemoveTickerEvent, _INR(0,1), daylight_switchover, private_word);
+
+	/* Read current configuration */
+	tz = which_timezone(&offset);
+	setting = daylight_modify_cmos(DSTCMOSBit | AutoDSTCMOSBit, 0);
+
+	/* Don't book a callback unless automatic */
+	if (setting & AutoDSTCMOSBit)
+	{
+		uint8_t   block[5];
+		ordfull_t ordinals;
+		bool      northern = true, checkjan01 = false;
+		int       year;
+		uint32_t  delta;
+		int64_t   dststart, dstend, now, booking, temp;
+
+		dprintf(("", "Contemplating AutoDST\n"));
+
+		/* Find out which year it is */
+		block[0] = OWReadRTC_5ByteInt;
+		err = _swix(OS_Word, _INR(0,1), OsWord_ReadRealTimeClock, block);
+		if (err != NULL) return err;
+
+		/* Year now from the ordinals */
+		time_40b_ordinals(block, &ordinals);
+		year = ordinals.year;
+		IMPORT40b(now, block);
+
+		/* Unknown timezone can't deduce DST rules */
+		if (tz != UNKNOWN_INDEX)
+		{
+			dprintf(("", "Get rules for year %d\n", year));
+			err = _swix(Territory_DaylightSaving, _INR(0,5),
+			            CURRENT_TERRITORY, DaylightSaving_GetBounds, tz, year,
+			            &dststart, &dstend);
+		}
+		if ((err != NULL) || (tz == UNKNOWN_INDEX))
+		{
+			dprintf(("", "No rule, forcing standard time\n"));
+			checkjan01 = true; /* Check again next year */
+			daylight_modify_cmos(AutoDSTCMOSBit, 0); /* Clear DST bit, keep auto bit */
+		}
+		else
+		{
+			/* Locate the time now on a timeline
+			 *
+			 * | Jan01-----Start+++++Stop-----Dec31 |
+			 * |           <-- DST on -->           |
+			 */
+			if (dstend < dststart)
+			{
+				/* Swap for southern hemisphere */
+				temp = dststart;
+				dststart = dstend;
+				dstend = temp;
+				northern = false;
+				dprintf(("", "Southern hemisphere"));
+			}
+			else
+			{
+				dprintf(("", "Northern hemisphere"));
+			}
+
+			static_assert(ticksperyear <= 0xFFFFFFFFuL, "Can't book that far ahead");
+			if (now < dststart)
+			{
+				/* In the region between 'Jan01' and 'Start' */
+				daylight_modify_cmos(AutoDSTCMOSBit, northern ? 0 : DSTCMOSBit);
+				booking = dststart;
+			}
+			else
+			{
+				if (now < dstend)
+				{
+					/* In the region between 'Start' and 'Stop' */
+					daylight_modify_cmos(AutoDSTCMOSBit, northern ? DSTCMOSBit : 0);
+					booking = dstend;
+				}
+				else
+				{
+					/* In the region between 'Stop' and 'Dec31' */
+					daylight_modify_cmos(AutoDSTCMOSBit, northern ? 0 : DSTCMOSBit);
+					checkjan01 = true; /* Check again next year */
+				}
+			}
+		}
+
+		if (checkjan01)
+		{
+			dprintf(("", "Recheck rule on new year's day\n"));
+			ordinals.centis =
+			ordinals.secs =
+			ordinals.mins =
+			ordinals.hours = 0;
+			ordinals.day =
+			ordinals.month = 1;
+			ordinals.year = year + 1; /* 00:00:00.00 on 01 Jan YYYY+1 */
+			booking = 0;
+			time_ordinals_40b((ordmin_t *)&ordinals, (uint8_t *)&booking);
+		}
+
+		/* Come back here on the next interesting boundary */
+		delta = (uint32_t)(booking - now);
+		dprintf(("", "Scheduling switch in +%ucs\n", delta));
+		err = _swix(OS_CallAfter, _INR(0,2), delta, daylight_switchover, private_word);
+	}
+
+	/* Did any net change occur? */
+	old_dst_bits = last_dst_bits;
+	last_dst_bits = daylight_modify_cmos(DSTCMOSBit | AutoDSTCMOSBit, 0);
+	old_tzone_centis = last_tzone_centis;
+	last_tzone_centis = offset;
+	if ((old_dst_bits != last_dst_bits) ||
+	    (old_tzone_centis != last_tzone_centis))
+	{
+		uint32_t flags = 0;
+
+		/* Tell other interested souls */
+		dprintf(("", "Timezone changed to %d\n", last_tzone_centis));
+		dprintf(("", "DST CMOS bits changed to %02x\n", last_dst_bits));
+		if (last_dst_bits & DSTCMOSBit) flags |= DaylightSaving_DSTBit;
+		if (last_dst_bits & AutoDSTCMOSBit) flags |= DaylightSaving_AutoDSTBit;
+		_swix(OS_ServiceCall, _INR(1,3), Service_TimeZoneChanged, flags, offset);
+	}
+	return err;
+}
+
+_kernel_oserror *daylight_switchover_handler(_kernel_swi_regs *r, void *pw)
+{
+	/* Reassess next move */
+	daylight_switch_check();
+
+	UNUSED(r);
+	UNUSED(pw);
+
+	return NULL;
+}
+
+/*!
+ * \brief  Apply daylight saving rules to 5 byte time
+ * \param  territory Territory whose rules to use
+ * \param  tz Timezone within the territory to use
+ * \param  gotords Whether the input is ordinals or a 5 byte time
+ * \param  in Pointer to either ordinals or a 5 byte time
+ * \param  onoff Variable to update with flag whether DST would be on or off
+ * \return Error block pointer
+ */
+static _kernel_oserror *op_applyrule(tanumber_t territory, size_t tz, bool gotords, void *in, bool *onoff)
+{
+	_kernel_oserror *err;
+	const uint8_t *block = (const uint8_t *)in;
+	uint8_t convert[5];
+	int     year;
+	int64_t dststart, dstend, temp;
+	bool    northern = true;
+
+	if (gotords)
+	{
+		const ordmin_t *ordinals = (const ordmin_t *)in;
+
+		/* Convert to 5 byte time and pass on */
+		if (!time_ordinals_40b(ordinals, convert))
+		{
+			return messages_errorlookup(TerritoryError_BadTimeBlock, "BadTime");
+		}
+		year = ordinals->year;
+		block = convert;
+	}
+	else
+	{
+		ordfull_t ordinals;
+
+		/* Break 5 byte time into ordinals just to get the year */
+		time_40b_ordinals(block, &ordinals);
+		year = ordinals.year;
+	}
+
+	/* Ask for bounds for that year */
+	dststart = 0;
+	dstend = 0;
+	err = _swix(Territory_DaylightRules, _INR(0,5), territory, DAYLIGHTRULES_BOUNDS,
+	                                                tz, year, &dststart, &dstend);
+	if (err != NULL)
+	{
+		/* No rule, default to standard time */
+		*onoff = false;
+		return NULL;
+	}
+
+	if (dstend < dststart)
+	{
+		/* Swap for southern hemisphere */
+		temp = dststart;
+		dststart = dstend;
+		dstend = temp;
+		northern = false;
+	}
+
+	/* Import user's time block */
+	IMPORT40b(temp, block);
+	if ((temp >= dststart) && (temp < dstend))
+	{
+		/* Daylight saving is active */
+		*onoff = northern;
+	}
+	else
+	{
+		/* Outside of start to end */
+		*onoff = !northern;
+	}
+	return NULL;
+}
+
+/*!
+ * \brief  Read bounds of daylight saving
+ * \note   Remember that in the southern hemisphere DST ends
+ *         earlier in the year than it starts so dstend < dststart.
+ * \param  territory Territory whose rules to use
+ * \param  tz Timezone within the territory to use
+ * \param  year Year, or -1 for current
+ * \param  dststart Block to update with the start 5 byte time of DST
+ * \param  dstend Block to update with the end 5 byte time of DST
+ * \return Error block pointer
+ */
+static _kernel_oserror *op_getbounds(tanumber_t territory, size_t tz, int32_t year, uint8_t *dststart, uint8_t *dstend)
+{
+	_kernel_oserror *err;
+	uint8_t   block[5];
+	ordfull_t ordinals;
+
+	if (year == -1)
+	{
+		/* This year */
+		block[0] = OWReadRTC_5ByteInt;
+		err = _swix(OS_Word, _INR(0,1), OsWord_ReadRealTimeClock, block);
+		if (err != NULL) return err;
+
+		/* Find the year from the 5 byte time */
+		time_40b_ordinals(block, &ordinals);
+		year = ordinals.year;
+	}
+	err = _swix(Territory_DaylightRules, _INR(0,5), territory, DAYLIGHTRULES_BOUNDS,
+	                                                tz, year, dststart, dstend);
+	if (err != NULL)
+	{
+		/* Remap territory failure to a consistent error */
+		err = messages_errorlookup(TerritoryError_NoRuleDefined, "NoRule");
+	}
+	return err;
+}
+
+/*!
+ * \brief  Despatcher for daylight saving operations
+ * \param  r Original SWI register set
+ * \return Error block pointer
+ */
+_kernel_oserror *daylight_saving_ops(_kernel_swi_regs *r)
+{
+	_kernel_oserror *err;
+	tanumber_t territory = r->r[0];
+	bool state;
+
+	switch (r->r[1])
+	{
+		case DaylightSaving_ReadDSTState:
+			/* Only apply to the active territory */
+			if ((territory == CURRENT_TERRITORY) || (territory == configured_territory))
+			{
+				uint8_t cmos;
+
+				cmos = daylight_modify_cmos(DSTCMOSBit | AutoDSTCMOSBit, 0);
+				r->r[0] = ((cmos & DSTCMOSBit) ? DaylightSaving_DSTBit : 0) |
+				          ((cmos & AutoDSTCMOSBit) ? DaylightSaving_AutoDSTBit : 0);
+				return NULL;
+			}
+			return messages_errorlookup(TerritoryError_UnknownTerritory, "UnkTerr");
+
+		case DaylightSaving_WriteDSTState:
+			/* Only apply to the active territory */
+			if ((territory == CURRENT_TERRITORY) || (territory == configured_territory))
+			{
+				uint8_t andmask, eormask;
+
+				if (r->r[2] & DaylightSaving_AutoDSTBit)
+				{
+					andmask = DSTCMOSBit; /* If auto enabled, preserve DST bit */
+					eormask = AutoDSTCMOSBit;
+				}
+				else
+				{
+					andmask = eormask = 0;
+					if (r->r[2] & DaylightSaving_DSTBit)
+					{
+						eormask |= DSTCMOSBit; /* Not auto, do set DST bit */
+					}
+				}
+				daylight_modify_cmos(andmask, eormask);
+				return daylight_switch_check();
+			}
+			return messages_errorlookup(TerritoryError_UnknownTerritory, "UnkTerr");
+
+		case DaylightSaving_Supported:
+			err = _swix(Territory_DaylightRules, _INR(0,1), territory, DAYLIGHTRULES_SUPPORTED);
+			r->r[0] = (err == NULL);
+			return NULL;
+
+		case DaylightSaving_ApplyRuleToOrdinals:
+			err = op_applyrule(territory, r->r[2], true, (void *)r->r[3], &state);
+			r->r[0] = state;
+			return err;
+
+		case DaylightSaving_ApplyRuleToTime:
+			err = op_applyrule(territory, r->r[2], false, (void *)r->r[3], &state);
+			r->r[0] = state;
+			return err;
+
+		case DaylightSaving_GetBounds:
+			return op_getbounds(territory, (size_t)r->r[2], (int32_t)r->r[3],
+			                    (uint8_t *)r->r[4], (uint8_t *)r->r[5]);
+	}
+	return messages_errorlookup(ErrorNumber_OutOfRange, "UnkSub");
+}

@@ -1,0 +1,4447 @@
+/* Copyright 1996 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* > c.Menus
+ *
+ *  Paint: Arthur 2 sprite editor
+ *   Menu handling
+ *
+ *  Author: A.P. Thompson
+ *  Others:
+ *     DAHE David Elworthy
+ *     JAB  James Bye
+ *     CDP  Christopher Partington (Cambridge Systems Design)
+ *     TMD  Tim Dobson
+ *
+ *  DAHE, 28 Aug  89 - internationalisation
+ *         1 Sept 89 - made menu divisions symbolic
+ *         6 Sept 89 - enable nulls during dboxtcol
+ *  JAB,   3 Oct  90 - Changed sprite creation stuff
+ *  JAB,  26 Oct  90 - Gave all dboxes raw event handlers for
+ *                     interactive help purposes
+ *  JAB,  30 Oct  90 - Added interactive menu help
+ *  JAB,  22 Oct  90 - Now auto opens sprite window on sprite creation
+ *  JAB,  04 Feb  91 - Fixed bug where lanscape/portrait always = portrait on
+ *                     start up
+ *  JAB,  06 May  91 - Added 'Misc' entry to sprite menu
+ *  JAB,  08 May  91 - Added 'Misc' entry to sprite filer menu
+ *  CDP,  20 Feb  92
+ *     Added FIX9544: part of fix of G-RO-9544 (large shear factor causes
+ *     arithmetic exception). Checks flex requests. See also PSprite.c.
+ *     Added FIX0770: fixes RP-0770 (adjust size smaller causes crash) by
+ *     substantial changes to menus_ensure_size (flex de/allocator).
+ *     Added FIXDELSPR: fixes deletion of sprites causing crash, a bug that
+ *     only showed up when the flex routine was sorted out.
+ *  CDP,  27 Feb  92
+ *     Added FIX0553: fixes a bug similar to RP-0553 (summary window not
+ *     updated on create sprite) but copy rather than create sprite.
+ *  TMD,  11 Mar  92
+ *     Added FIX1764: fixes copy sprite to same name not giving error
+ *  TMD,  12 Mar  92
+ *     Disallow zero for width or height in 'Adjust size'
+ */
+
+#include <assert.h>
+#include <ctype.h>
+#include <stddef.h>
+#include <swis.h>
+#include <signal.h>
+#include <limits.h>
+#include "Global/FileTypes.h"
+#include "Global/VduExt.h"
+#include "Global/Sprite.h"
+#include "Global/NewErrors.h"
+
+#include "bbc.h"
+#include "colourmenu.h"
+#include "colourtran.h"
+#include "dbox.h"
+#include "dboxquery.h"
+#include "dboxtcol.h"
+#include "flex.h"
+#include "help.h"
+#include "magnify.h"
+#include "msgtrans.h"
+#include "saveas.h"
+#include "visdelay.h"
+#include "werr.h"
+#include "wimpt.h"
+#include "xfersend.h"
+
+#include "m.h"
+#include "ftrace.h"
+#include "main.h"
+#include "PSprite.h"
+#include "PaintChoice.h"
+#include "Menus.h"
+#include "SprWindow.h"
+#include "ToolWindow.h"
+#include "Tools.h"
+#include "Colours.h"
+#include "MenuD.h"
+#include "trace.h"
+#include "PaintLib.h"
+#include "AltRename.h"
+#include "Clipboard.h"
+#include "Export.h"
+
+static int Do_Print (char *, void *);
+
+typedef struct
+{
+  union
+  {
+    char       orgname[NAME_LIMIT + 1];
+    int        orgsize;
+  } type;
+  main_sprite *orgsprite;
+} sprite_tosort;
+
+/***********************
+ * Static menu handles *
+ ***********************/
+
+static menu
+  sprite_main_menu,
+  sprite_save_menu,
+  sprite_paint_menu,
+  sprite_edit_menu,
+  spritefile_main_menu,
+  spritefile_misc_menu,
+  filedisplay_menu,
+  colours_main_menu,
+  sprite_colour_menu,
+  sprite_selection_menu,
+  sprite_misc_menu,
+  /* Submenus of sprite_edit_menu */
+  sprite_palette_menu,
+  sprite_mask_menu,
+  sprite_rotate_menu;
+
+static char Spritename [32], Editnumber[32];
+static main_sprite *hit_sprite;
+
+static int Row;
+static int Column;
+
+/* data for graphic entry of insert/delete */
+
+static int insdel_pending = 0; /* to frig entry by click in sprite window */
+static int insdel_rowfield;
+static int insdel_colfield;
+static int insdel_row;
+static int insdel_col;
+static main_sprite *insdel_sprite;
+static toolwindow_block *insdel_tool;
+static dbox insdel_d;
+static dbox artistfriendly_dbox;
+
+static char
+  spritenamebuffer [13],
+  rotatebuffer [13] = "0",
+  scalebuffer [13] = "1",
+  shearbuffer [13] = "0";
+
+/*************************************
+ *   Static variables for printing   *
+ *************************************/
+
+#define PRINT_INCHES_TO_72000 72000.0
+#define PRINT_CM_TO_72000 (18144.0*72000.0/ (180<<8))
+ /* above is at least the same as Draw uses */
+
+print_positionstr
+    menus_print_where = {0, 0}, menus_print_last_where = {0, 0};
+static int print_copies = 1;
+static int print_landscape = 1;
+static main_scaling_block print_scale = {1, 1, 1, 1};
+static double print_scalefactor = PRINT_INCHES_TO_72000;
+
+/*************************************
+ *   Generate sprite info dbox       *
+ *************************************/
+
+static void display_sprite_info (main_sprite *sprite)
+
+{ dbox d;
+  psprite_description desc;
+
+  ftracef0 ("display_sprite_info\n");
+  psprite_describe_sprite (&desc, sprite, TRUE);
+
+  if ((d = dbox_new ("spriteInfo")) != 0)
+  { dbox_setfield (d, d_Info_Name, desc.name);
+    dbox_setfield (d, d_Info_Mode, desc.mode);
+    dbox_setfield (d, d_Info_Size, desc.bytesize);
+    dbox_setfield (d, d_Info_Colours, desc.colours);
+    dbox_setfield (d, d_Info_DPI, desc.dpi);
+    dbox_setfield (d, d_Info_MaskType, desc.masktype);
+    dbox_setfield (d, d_Info_MaskSize, desc.mask);
+    dbox_setfield (d, d_Info_Palette, desc.palette);
+    dbox_setfield (d, d_Info_Width, desc.width);
+    dbox_setfield (d, d_Info_Height, desc.height);
+    dbox_setfield (d, d_Info_Compat, desc.compat);
+
+    dbox_show (d);
+    dbox_raw_eventhandler (d, &help_dboxrawevents, (void *) "PntHA");
+  }
+}
+/********************************
+ * Generate info dbox           *
+ ********************************/
+
+static void show_info_box (void)
+
+{ dbox d;
+
+  ftracef0 ("show_info_box\n");
+  if ((d = dbox_new ("progInfo"))!= 0)
+  { dbox_setfield (d, d_Prog_Name,     msgs_lookup ("Pnt00"));
+    dbox_setfield (d, d_Prog_Copy,     msgs_lookup ("PntM1"));
+    dbox_setfield (d, d_Prog_WhatIsIt, msgs_lookup ("PntM2"));
+    dbox_setfield (d, d_Prog_Version,  msgs_lookup ("_Version"));
+    dbox_show (d);
+
+    dbox_raw_eventhandler (d, &help_dboxrawevents, (void *) "PntH8");
+  }
+}
+
+/********************************
+ *  Force rethink on a file     *
+ ********************************/
+
+static void iconsize_has_changed (main_window *window)
+
+{ main_file *file = &window->data->file;
+
+  ftracef0 ("iconsize_has_changed\n");
+  psprite_set_plot_info (file);
+
+  window->data->file.lastwidth = 0; /*force screen update*/
+  main_set_extent (window);
+  main_force_redraw (window->handle);
+}
+
+void menus_file_has_changed (main_window *window)
+
+{ main_file *file = &window->data->file;
+
+  ftracef0 ("menus_file_has_changed\n");
+  psprite_recalculate_offsets (file);
+  iconsize_has_changed (window);
+}
+
+/****************************
+ * Common create/copy code  *
+ ****************************/
+
+void menus_sprite_new (main_window *window, BOOL hack_palette)
+
+{ main_file *file = &window->data->file;
+  main_sprite **sprptr, *sprite;
+  int o, offset = 0 /**/, spriteno;
+
+  ftracef0 ("menus_sprite_new\n");
+  /* find linked list end */
+  for (sprptr = &file->sprites; *sprptr != NULL; sprptr = &(*sprptr)->link)
+    ;
+
+  /*Find the right offset and spriteno - they are actually used by
+    psprite_new to get the number of colours.*/
+  spriteno = 0;
+  for (o = psprite_first (&file->spritearea); o != 0;
+      o = psprite_next (&file->spritearea, o))
+  { offset = o;
+    spriteno++;
+  }
+
+  ftracef2 ("creating main_sprite for offset %d, spriteno %d\n",
+      offset, spriteno);
+  if ((sprite = *sprptr = psprite_new (offset, spriteno, file) /* at end */) == NULL)
+    werr (FALSE, msgs_lookup ("PntEG"));
+
+  menus_file_has_changed (window);   /* force recache of offsets */
+  sprite->gcol.colour = colours_count (sprite) - 1;
+  sprite->gcol.alpha = 255;
+  sprite->gcol.ecf = FALSE;
+  sprite->gcol2.colour = 0;
+  sprite->gcol2.alpha = 255;
+  sprite->gcol2.ecf = FALSE;
+
+  if (hack_palette) menus_hack_palette (sprite);
+  psprite_set_colour (sprite);
+  psprite_set_brush_translation (sprite, FALSE);
+}
+
+/*************************************
+ * Ensure spritearea large enough    *
+ *************************************/
+
+BOOL menus_ensure_size (sprite_area **sarea, int bytesneeded)
+
+{ int bytesfree = (*sarea)->size - (*sarea)->freeoff;
+  int newsize;
+
+  /*
+   * OK: this is what I think menus_ensure_size() is supposed to do.
+   *
+   * bytesneeded > 0: if not at least <bytesneeded> bytes free in sprite area,
+   *                  extend it.
+   * bytesneeded < 0: reduce size of sprite area by <bytesneeded> bytes. This
+   *                  used to do this regardless but I have changed it so
+   *                  that it never reduces it such that the free offset points
+   *                  outside the area. This should fix many bugs.
+   * bytesneeded = 0: reduce size of sprite area to exactly what is needed by
+   *                  the contents of the area.
+   *
+   * Hence I expect an operation that changes the size of a sprite area to
+   * do an menus_ensure_size( , 0) on completion to release the free space. This seems
+   * to be what is done so was probably the intention.
+   *
+   * Christopher Partington  18-Feb-1992
+   */
+
+  ftracef1 ("menus_ensure_size of %d\n", bytesneeded);
+  ftracef3("bytesfree = %d - %d = %d\n", (*sarea)->size, (*sarea)->freeoff,
+                                         bytesfree);
+  #if TRACE
+    assert (bytesfree >= 0);
+  #endif
+
+  ftracef1 ("menus_ensure_size: %d bytes free\n", bytesfree);
+
+  if (bytesneeded > 0 && bytesneeded <= bytesfree)
+  { ftracef0 ("... enough space already - do nothing\n"); /*JRC*/
+    return TRUE;
+  }
+
+  bytesneeded -= bytesfree;         /* amount needed */
+  if (bytesneeded > 0)
+    bytesneeded += 256;             /* and a little headroom */
+
+  ftracef1 ("... do flex_extend of %d\n", bytesneeded);
+
+  if (bytesneeded < 0)
+  {
+    ftracef1("shrinking area, change = %d bytes\n", bytesneeded);
+    /* shrinking area - make sure that ok to do so */
+    if ((*sarea)->size + bytesneeded < (*sarea)->freeoff)
+    {
+       bytesneeded = - ((*sarea)->size - (*sarea)->freeoff);
+       ftracef1("...would be too much - change by %d instead\n", bytesneeded);
+    }
+  }
+  if (bytesneeded == 0)
+  {
+    ftracef0("area is just the right size - no change\n");
+    return TRUE;
+  }
+
+  newsize = flex_size((flex_ptr) sarea) + bytesneeded;
+  /* check for overflow before calling flex */
+#if TRACE
+  if (newsize < 0)
+     ftracef0("arithmetic overflow, so not enough memory\n");
+#endif
+  if (newsize < 0 || !flex_extend((flex_ptr) sarea, newsize))
+    return FALSE;
+
+  (*sarea)->size += bytesneeded;
+  ftracef1 ("menus_ensure_size: leaving area with %d bytes free\n",
+      (*sarea)->size - (*sarea)->freeoff);
+  return TRUE;
+}
+
+/**********************************
+ * Check for sprite existence     *
+ **********************************/
+
+BOOL menus_sprite_exists (sprite_area *sarea, char *name)
+
+{ sprite_id sid;
+
+  ftracef0 ("menus_sprite_exists\n");
+  sid.s.name = name; sid.tag = sprite_id_name;
+  if (!sprite_select (sarea, &sid))
+  { werr (FALSE, msgs_lookup ("PntE6"), name);
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+/************************************************
+ * xfersend handlers for sprite and file saving *
+ ************************************************/
+
+static BOOL myxfersend (int filetype, char *name, int estsize,
+    xfersend_saveproc p1, xfersend_sendproc p2, xfersend_printproc p3,
+    void *handle)
+
+{ wimp_w nullc = win_idle_event_claimer ();
+  BOOL res;
+
+  ftracef0 ("myxfersend\n");
+  main_claim_idle ((wimp_w) -1);
+
+  ftracef1 ("myxfersend: calling saveas (..., \"%s\", ...)\n", name);
+  res = saveas (filetype, name, estsize, p1, p2, p3, handle);
+
+  main_claim_idle (nullc);
+  return res;
+}
+
+static int My_File_Is_Safe;
+static int File_Saved;
+
+static BOOL save_file_proc (char *filename, void *handle)
+
+{ main_window *window = (main_window *) handle;
+  os_error *error = NULL;
+
+  ftracef1 ("save_file_proc %s\n", filename);
+
+  visdelay_begin ();
+
+  if ((error = sprite_area_save (window->data->file.spritearea,
+      filename)) != NULL)
+    goto finish;
+
+  if (My_File_Is_Safe || xfersend_file_is_safe ())
+  { main_set_title (window, filename);
+    window->data->file.modified = 0;
+    main_set_extent (window);
+  }
+
+  File_Saved = 1;
+
+finish:
+  visdelay_end ();
+
+  return wimpt_complain (error) == NULL;
+}
+
+BOOL save_sprite (char *filename, void *shandle)
+
+{ main_sprite *sprite = (main_sprite *) shandle;
+  sprite_header *spriteaddr = psprite_address (sprite);
+  int spritesize = spriteaddr->next, handle = 0, hdr [3];
+  os_regset reg_set;
+  os_filestr file_str;
+  os_gbpbstr gbpb_str;
+  os_error *error;
+  char *txt = NULL;
+
+  ftracef1 ("save_sprite %s\n", filename);
+
+  visdelay_begin ();
+
+  /* Open file */
+  reg_set.r [0] = 0x8C;
+  reg_set.r [1] = (int) filename;
+  if ((error = os_find (&reg_set)) != NULL)
+  { txt = error->errmess;
+    goto finish;
+  }
+  handle = reg_set.r [0];
+
+  if (handle == 0)
+  { /*In case the FileSwitch bug returns a 0 handle.*/
+    txt = msgs_lookup ("PntE4");
+    goto finish;;
+  }
+
+  hdr [0] = 1;               /* no of sprites */
+  hdr [1] = 16;              /* offset to sprite */
+  hdr [2] = spritesize + 16; /* offset to first free */
+
+  /* GBPB the header */
+  gbpb_str.action = 2;
+  gbpb_str.file_handle = handle;
+
+  gbpb_str.data_addr = hdr;
+  gbpb_str.number = sizeof hdr;
+  if ((error = os_gbpb (&gbpb_str)) != NULL)
+  { txt = error->errmess;
+    goto finish;
+  }
+
+  gbpb_str.data_addr = spriteaddr;
+  gbpb_str.number = spritesize;
+  if ((error = os_gbpb (&gbpb_str)) != NULL)
+  { txt = error->errmess;
+    goto finish;
+  }
+
+finish:
+  if (handle != 0)
+  { /* Close the file */
+    os_error *error1;
+
+    reg_set.r [0] = 0;
+    reg_set.r [1] = handle;
+    error1 = os_find (&reg_set);
+    if (txt == NULL && error1 != NULL) txt = error1->errmess;
+
+    /*Set the file to type "Sprite"*/
+    file_str.action = 18;
+    file_str.name = filename;
+    file_str.loadaddr = FileType_Sprite;
+    error1 = os_file (&file_str);
+    if (txt == NULL && error1 != NULL) txt = error1->errmess;
+  }
+
+  visdelay_end ();
+
+  if (txt != NULL)
+    werr (FALSE, txt, filename);
+
+  return txt == NULL;
+}
+
+#if 0
+static char vdu19bytes [] =
+  { 0, 16,     1, 16,     2, 16,     3, 16,
+    4, 16,     5, 16,     6, 16,     7, 16,
+    8, 16,     9, 16,    10, 16,    11, 16,
+   12, 16,    13, 16,    14, 16,    15, 16,
+    0, 24,     1, 25,     2, 25,     3, 25 /*oops*/
+  };
+#endif
+
+static void build_sprite_palette_file (main_sprite *sprite,
+    char *palette)
+
+{ int len, i;
+  char *p = palette;
+  os_error *error = NULL;
+
+  static int *Palette = NULL;
+
+  ftracef0 ("build_sprite_palette_file\n");
+  if ((error = psprite_build_palette (sprite, &Palette)) != NULL)
+    goto finish;
+
+  len = psprite_palsize (sprite)/sizeof (int);
+
+  for (i = 0; i < len; i++)
+  { *p++ = 19;
+    *p++ = i;
+    *p++ = 16;
+    *p++ = Palette [i] >> 8;
+    *p++ = Palette [i] >> 16;
+    *p++ = Palette [i] >> 24;
+  }
+
+  if (len == 16)
+  { /*Append the current mouse and border colours, for historical reasons.*/
+    wimp_palettestr palette_str;
+
+    if ((error = wimp_readpalette (&palette_str)) != NULL)
+      goto finish;
+    for (i = 0; i < 4; i++)
+    { *p++ = 19;
+      *p++ = i;
+      *p++ = i == 0? 24: 25;
+      *p++ = palette_str.c [16 + i].bytes.red;
+      *p++ = palette_str.c [16 + i].bytes.green;
+      *p++ = palette_str.c [16 + i].bytes.blue;
+    }
+  }
+
+finish:
+  wimpt_noerr (error);
+}
+
+static BOOL save_sprite_palette (char *filename, void *shandle)
+
+{ main_sprite *sprite = (main_sprite *) shandle;
+  char palette [6*256];
+  os_regset r;
+  int len, oldattribs = -1;
+  BOOL saved;
+
+  ftracef1 ("save_sprite_palette %s\n", filename);
+
+  /*Work out how long this palette file is.*/
+  len = 6*(psprite_palsize (sprite)/sizeof (int));
+  if (len == 6*16) len += 6*4;
+
+  build_sprite_palette_file (sprite, palette);
+
+  r.r [0] = 17; /* Read cat info */
+  r.r [1] = (int) filename;
+  (void) os_swix (OS_File, &r);
+  /* if something is already there, remember its attributes */
+  if (r.r [0] != 0) oldattribs = r.r [5];
+
+  r.r [0] = 10;
+  r.r [2] = FileType_Palette;
+  r.r [4] = (int) &palette;
+  r.r [5] = (int) &palette + len;
+
+  visdelay_begin ();
+  saved = wimpt_complain (os_swix (OS_File, &r)) == NULL;
+
+  if (oldattribs != -1) {
+    r.r [0] = 4; /* Write attribs */
+    r.r [5] = oldattribs;
+    (void) os_swix (OS_File, &r);
+  };
+
+  visdelay_end ();
+
+  return saved;
+}
+
+BOOL mysendbuf (char **buffer, int size, int *max, int fudge)
+
+{ BOOL OK = TRUE;
+  int done = 0;
+
+  ftracef0 ("mysendbuf\n");
+  while (done < size && OK)
+  { int buffsize = size - done;
+
+    if (*max < buffsize) buffsize = *max;
+    OK = xfersend_sendbuf (*buffer + done + fudge, buffsize);
+    done += buffsize;
+  }
+
+  return OK;
+}
+
+static BOOL buffer_file_proc (void *handle, int *max)
+
+{ main_window *window = (main_window *)handle;
+  sprite_area **sarea = &window->data->file.spritearea;
+
+  ftracef1 ("buffer_file_proc %s\n", window->data->file.filename);
+  return File_Saved = mysendbuf ((char **) sarea, (*sarea)->freeoff - 4,
+      max, sizeof (int));
+}
+
+static BOOL print_file_proc (char *filename, void *handle)
+
+{ main_sprite *sprite = ((main_window *) handle)->data->file.sprites;
+
+  filename = filename; /*for Norcroft*/
+  return sprite != NULL && menus_do_print (sprite)? xfersend_printPrinted:
+      xfersend_printFailed;
+}
+
+static BOOL buffer_sprite (void *shandle, int *max)
+
+{ main_sprite *sprite = (main_sprite *)shandle;
+  int  hdr [3], i;
+  char name [13];
+  sprite_header *spriteaddr = psprite_address (sprite);
+  int spritesize = spriteaddr->next;
+  char *buffer;
+
+  ftracef0 ("buffer_sprite\n");
+  saveas_read_leafname_during_send (name, 13);
+  ftracef1 ("sprite name is \"%.12s\"\n", name);
+
+  if (strlen (name) == 0)
+  { werr (FALSE, msgs_lookup ("PntE7"));
+    return 0;
+  }
+
+  for (i = 0 ; i < 13 && name [i] != 0 ; i++) name [i] = tolower (name [i]);
+
+  ftracef2 ("Buffering out sprite @ %x, size %d\n", spriteaddr, spritesize);
+  hdr [0] = 1;       /* no of sprites */
+  hdr [1] = 16;      /* offset to sprite */
+  hdr [2] = spritesize + 16; /* offset to first free */
+
+  buffer = (char *)hdr;
+  if (!mysendbuf (&buffer, 12, max, 0)) return 0;
+  if (!mysendbuf ((char **)&sprite->file->spritearea,
+                 4, max, sprite->offset)) return 0;
+
+  buffer = (char *) &name;
+  if (!mysendbuf (&buffer, 12, max, 0)) return 0;
+
+  return mysendbuf ((char **)&sprite->file->spritearea,
+                   spritesize, max, sprite->offset+16);
+}
+
+static BOOL buffer_sprite_palette (void *shandle, int *max)
+
+{ main_sprite *sprite = (main_sprite *)shandle;
+  char palette [6*256], *pp = palette;
+  int len;
+
+  ftracef0 ("buffer_sprite_palette\n");
+
+  /*Work out how long this palette is.*/
+  len = 6*(psprite_palsize (sprite)/sizeof (int));
+  if (len == 6*16) len += 6*4;
+
+  build_sprite_palette_file (sprite, palette);
+  return mysendbuf (&pp, len, max, 0);
+}
+
+static void menus_save_selection (main_window *window)
+
+{ ftracef0 ("menus_save_selection\n");
+
+  if (window->selection.count==1)
+  { main_sprite *sprite;
+
+    /* Just one selected, find it, and save it on its own with
+       the sprite name as the filename instead */
+    for (sprite = window->data->file.sprites; sprite != NULL; sprite = sprite->link)
+    { if (sprite->flags & MSF_SELECTED)
+      { menus_save_sprite (sprite);
+        break;
+      }
+    }
+    return;
+  }
+
+  myxfersend (FileType_Sprite, msgs_lookup ("PntG6"),
+              main_selection_file_size (window),
+              main_save_selection, 0, 0, window);
+}
+
+void menus_save_sprite (main_sprite *sprite)
+
+{ char name [NAME_LIMIT + 1];
+
+  ftracef0 ("menus_save_sprite\n");
+  (void) COPY_N (name, psprite_address (sprite)->name, NAME_LIMIT);
+
+  ftracef1 ("sprite called \"%s\"\n", name);
+
+  myxfersend (FileType_Sprite, name,
+              psprite_address (sprite)->next + sizeof (sprite_area),
+              &save_sprite, &buffer_sprite, &Do_Print, sprite);
+}
+
+BOOL menus_save_file (main_window *window, int askfor_name)
+
+{ char *name = window->data->file.filename;
+  File_Saved = 0;
+
+  ftracef0 ("menus_save_file\n");
+  if (name == NULL)
+  { name = msgs_lookup ("PntF1");
+    askfor_name = TRUE; /*JRC 12 July 1991*/
+  }
+
+  if (askfor_name)
+  { My_File_Is_Safe = FALSE;
+    ftracef0 ("menus_save_file: myxfersend\n");
+    myxfersend (FileType_Sprite, name, window->data->file.spritearea->size,
+        &save_file_proc, &buffer_file_proc,
+        &print_file_proc, /*Protocol now in xfersend(), immediate printing
+          allowed. Was NULL. JRC 4 Apr 1992*/
+        /*FIX G-RO-7139 JRC 16 Oct '91 Use new printer protocol - was
+          print_spritefile*/
+        window);
+  }
+  else
+  { My_File_Is_Safe = TRUE;
+    save_file_proc (name, window);
+  }
+
+  return File_Saved;
+}
+
+/*******************************
+ *  Add/delete columns/rows    *
+ *******************************/
+
+static void Change_Size (sprite_area **sarea, sprite_id *sid,
+    main_sprite *sprite, int number, BOOL rows, int at)
+
+{ BOOL insert = number > 0, hourglass = FALSE;
+  main_sprite_window *sprw;
+  psprite_info info;
+  char *msg = NULL;
+  os_error *error;
+
+  ftracef3 ("Change_Size: number %d, rows %s, at %d\n",
+      number, WHETHER (rows), at);
+  sprwindow_remove_wastage (sprite);
+
+  psprite_read_full_info (sprite, &info);
+  ftracef2 ("BEFORE: sprite is %d columns by %d rows\n",
+      info.width, info.height);
+  if (at < 0) at = 0;      /* can menu outside the sprite */
+  if (rows)
+    {if (at > info.height) at = info.height;}
+  else
+    {if (at > info.width) at = info.width;}
+
+  ftracef4 ("Insert %d %s%s at %d\n", number, rows? "row": "column",
+      number == 1? "": "s", at);
+
+  if (insert)
+  { int newsize;
+
+    newsize = psprite_size (info.width + (!rows? number: 0),
+        info.height + (rows? number: 0), info.mode, info.mask,
+        !info.palette? 0: !info.truepalette? 1: 2);
+    ftracef2 ("newsize %d, oldsize %d\n", newsize, info.size);
+    if (!menus_ensure_size (sarea, newsize - info.size))
+    { msg = msgs_lookup ("PntEG");
+      goto finish;
+    }
+  }
+  else
+  { /* Deleting - find the maximum number or rows or columns that can go */
+    int max;
+
+    max = (rows? info.height: info.width) - at;
+
+    number = -number;
+    if (number > max) number = max;
+  }
+  if (number == 0) goto finish;
+
+  visdelay_begin ();
+  hourglass = TRUE;
+
+  ftracef3 ("sprite_change_size: rows %s, at %d, number %d\n",
+      WHETHER (rows), at, insert? number: -number);
+  if ((error = sprite_change_size (*sarea, sid, rows, at,
+      insert? number: -number)) != NULL)
+  { msg = error->errmess;
+    goto finish;
+  }
+
+finish:
+  if (hourglass) visdelay_end ();
+
+  #if TRACE
+    psprite_read_full_info (sprite, &info);
+    ftracef2 ("AFTER: sprite is %d columns by %d rows\n",
+        info.width, info.height);
+  #endif
+
+  sprwindow_invalidate (sprite);
+  psprite_set_icon_scale (sprite);
+  psprite_recalculate_offsets (sprite->file);
+
+  for (sprw = sprite->windows; sprw != NULL; sprw = sprw->link)
+    sprwindow_set_work_extent (sprw->window, TRUE);
+
+  if (msg != NULL) werr (FALSE, msg);
+}
+
+/********************************************
+ * Fudge dbox position if opened by hotkey  *
+ ********************************************/
+
+static void nudge_dbox_caret_position (const wimp_mousestr *mouse)
+
+{ wimp_eventstr *last_event = wimpt_last_event ();
+  if (last_event && last_event->e == wimp_EKEY)
+  { /* We'll set the caret position near the mouse coordinates */
+    wimp_wstate s;
+    wimp_caretstr c;
+    wimp_get_caret_pos (&c);
+    if (c.w != (wimp_w) -1)
+    { wimpt_noerr (wimp_get_wind_state (c.w, &s));
+      c.x = mouse->x - (s.o.box.x0 - s.o.x) - 52;
+      c.y = mouse->y - (s.o.box.y1 - s.o.y) + 72;
+      wimpt_noerr (wimp_set_caret_pos (&c));
+    }
+  }
+}
+
+/***************************************
+ * Graphical display of insert/delete  *
+ ***************************************/
+
+void menus_restart_tool (void)
+
+{ main_window *window;
+  main_sprite *sprite;
+
+  ftracef0 ("menus_restart_tool\n");
+  for (window = main_windows; window != NULL; window = window->link)
+  if (window->tag == main_window_is_file)
+    for (sprite = window->data->file.sprites; sprite != NULL;
+         sprite = sprite->link)
+      sprite->needsnull = 1;
+}
+
+static void stop_insdel_graphics (void)
+
+{ ftracef0 ("stop_insdel_graphics\n");
+  toolwindow_current_tool->stop_action (insdel_sprite);
+  toolwindow_current_tool = insdel_tool;
+
+  /* now restart the tool if necessary */
+  if (toolwindow_current_tool == &tools_textpaint ||
+      toolwindow_current_tool == &tools_brushpaint)
+    menus_restart_tool ();
+}
+
+static void insdel_drawEOR(main_sprite_window *sprw, int x0, int y0)
+{
+  int xmul = sprw->blobsize.scale_xmul*insdel_sprite->mode.scale_xmul;
+  int xdiv = sprw->blobsize.scale_xdiv;
+  int ymul = sprw->blobsize.scale_ymul*insdel_sprite->mode.scale_ymul;
+  int ydiv = sprw->blobsize.scale_ydiv;
+  os_swi2 (OS_SetColour, 3, -1);
+#if 0 /*replace the following to avoid checking for full-palette modes.
+    J R C 22nd Feb 1994*/
+  bbc_gcol (3, 127);
+  bbc_tint (2, 3); /*27 August 1991*/
+#endif
+
+  if (insdel_rowfield != -1)
+  { ftracef0 ("insdel_EOR row\n");
+    int top = MAX(insdel_row, Row) + 1;
+    int bottom = MIN(insdel_row, Row);
+    bbc_rectanglefill (MAX (x0, 0), y0 + bottom*ymul/ydiv,
+        0x1FFF, (top - bottom)*ymul/ydiv-1);
+  }
+
+  if (insdel_colfield != -1)
+  { ftracef0 ("insdel_EOR column\n");
+    int left = MIN(insdel_col, Column);
+    int right = MAX(insdel_col, Column) + 1;
+    bbc_rectanglefill (x0 + left*xmul/xdiv, MAX (y0, 0),
+        (right-left)*xmul/xdiv-1, 0x1FFF);
+  }
+}
+
+static void insdel_EOR (void)
+
+{ main_sprite_window *sprw;
+
+  ftracef0 ("insdel_EOR\n");
+
+  for (sprw = insdel_sprite->windows; sprw != NULL; sprw = sprw->link)
+  { int more, x0, y0;
+    wimp_redrawstr rds;
+    wimp_winfo curr;
+
+    curr.w = sprw->window->handle;
+    wimpt_noerr (paintlib_get_wind_info (&curr));
+    rds.w = sprw->window->handle;
+    rds.box = main_big_extent;
+    wimpt_noerr (wimp_update_wind (&rds, &more));
+
+    x0 = rds.box.x0 - rds.scx;
+    y0 = rds.box.y1 - rds.scy + curr.info.ex.y0;
+
+    while (more)
+    { insdel_drawEOR(sprw, x0, y0);
+      wimpt_noerr (wimp_get_rectangle (&rds, &more));
+    }
+  }
+}
+
+static void insdeltool_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("insdeltool_click\n");
+
+  if ((mpos->bbits & wimp_BLEFT) && window->data->sprite.sprite == insdel_sprite)
+                           /* only SELECT in appropriate window */
+  { int hit = (insdel_pending>>30)&3;
+    sprite_area **sarea = &insdel_sprite->file->spritearea;
+    sprite_id sid;
+    char name [NAME_LIMIT + 1];
+
+    ftracef0 ("perform insdeltool_click\n");
+
+    insdel_pending &= 0x3FFFFFFF;
+    sid.tag = sprite_id_name;
+    sid.s.name = COPY_N (name, psprite_address (insdel_sprite)->name,
+        NAME_LIMIT); /*doesn't flex*/
+
+    if (hit > 1) insdel_pending = -insdel_pending;
+    Change_Size (sarea, &sid, insdel_sprite, insdel_pending, hit & 1,
+        hit & 1? MIN (Row, insdel_row): MIN (Column, insdel_col));
+    menus_ensure_size (sarea, 0);
+  }
+}
+
+static void insdeltool_null (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("insdeltool_null\n");
+  if (mpos->w == window->handle)
+  {
+    int x, y;
+
+    tools_mouse_to_pixel (window, mpos, &x, &y);
+
+    ftracef2 ("extent coords are (%d, %d)\n", x, y);
+
+    if (x != insdel_col || y != insdel_row)
+    { insdel_EOR ();       /* remove old data */
+      insdel_col = x; insdel_row = y;
+
+      if (insdel_rowfield != -1)
+        dbox_setnumeric (insdel_d, 0, abs (insdel_row - Row)+1);
+      if (insdel_colfield != -1)
+        dbox_setnumeric (insdel_d, 0, abs (insdel_col - Column)+1);
+
+      insdel_EOR ();       /* EOR on the new */
+    }
+  }
+}
+
+static void insdeltool_redraw (main_window *window, int x0, int y0)
+
+{
+  ftracef0 ("insdeltool_redraw\n");
+
+  if (window->data->sprite.sprite->needsnull)
+    insdel_drawEOR(&window->data->sprite, x0, y0);
+}
+
+static void insdeltool_stop (main_sprite *sprite)
+
+{ ftracef0 ("insdeltool_stop\n");
+  if (sprite->needsnull)
+  { sprwindow_release_idle_events (sprite);
+    insdel_EOR ();        /* get rid of on-screen guff */
+  }
+}
+
+static toolwindow_block insdel_toolblock =
+ { &insdeltool_click,
+   &insdeltool_null,
+   &insdeltool_redraw,
+   &insdeltool_stop,
+   NULL
+ };
+
+static void start_insdel_graphics (main_sprite *sprite, int rowfield,
+    int colfield)
+
+{ main_window *window;
+
+  ftracef0 ("start_insdel_graphics\n");
+  insdel_rowfield = rowfield;
+  insdel_colfield = colfield;
+  insdel_sprite   = sprite;
+
+  if (toolwindow_current_tool != &insdel_toolblock)
+      insdel_tool = toolwindow_current_tool;
+  spencer (else ftracef0 ("!"))
+
+  insdel_row = Row; insdel_col = Column;
+
+  /* stop the tool in all sprite windows */
+  for (window = main_windows; window != NULL; window = window->link)
+    if (window->tag == main_window_is_sprite)
+      toolwindow_current_tool->stop_action (window->data->sprite.sprite);
+
+  toolwindow_current_tool = &insdel_toolblock;
+  sprite->needsnull = 1;
+
+  insdel_EOR ();        /* EOR current data on */
+}
+
+void menus_insdel_frig (void)
+
+{ ftracef0 ("menus_insdel_frig\n");
+  if (insdel_pending) stop_insdel_graphics ();
+  insdel_pending = 0;
+}
+
+BOOL menus_insdel (main_window *window, BOOL col, BOOL insert,
+                   BOOL show_dbox, BOOL refetch_coords)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  sprite_area **sarea = &sprite->file->spritearea;
+  int number = 0 /*for Norcroft*/;
+  sprite_id sid;
+  char name [NAME_LIMIT + 1];
+
+  ftracef0 ("menus_insdel\n");
+
+  sid.tag = sprite_id_name;
+  sid.s.name = COPY_N (name, psprite_address (sprite)->name, NAME_LIMIT);
+     /*doesn't flex*/
+
+  wimp_mousestr mouse;
+  wimpt_noerr (wimp_get_point_info (&mouse));
+  if (refetch_coords)
+  {
+    tools_mouse_to_pixel (window, &mouse, &Column, &Row);
+    ftracef4 ("row %d, column %d, width %d, height %d\n", Row, Column,
+        psprite_address (sprite)->width + 1,
+        psprite_address (sprite)->height + 1);
+  }
+
+  ftracef0 ("submenu hit - start graphics and show dbox\n");
+  menus_insdel_frig ();
+  insdel_pending = 0;
+  start_insdel_graphics (sprite, col? -1: 1, !col? -1: 1);
+
+  if (show_dbox)
+  { wimp_i i;
+
+    if (col)
+    { if (insert)
+        insdel_d = dbox_new ("insertcols");
+      else
+        insdel_d = dbox_new ("deletecols");
+    }
+    else
+    { if (insert)
+        insdel_d = dbox_new ("insertrows");
+      else
+        insdel_d = dbox_new ("deleterows");
+    }
+    if (insdel_d == 0)
+      return FALSE;
+    ftracef0 ("dbox made\n");
+
+    /* If last event was a keypress, RISCOS_Lib will open the dbox near */
+    /* the caret, which we need to reposition on the sprite window.     */
+    nudge_dbox_caret_position (&mouse);
+
+    dbox_setnumeric (insdel_d, 0, 1);
+    dbox_show (insdel_d);
+    i = dbox_fillin (insdel_d);
+    insdel_pending = dbox_getnumeric (insdel_d, 0);
+
+    if (i != dbox_CLOSE)
+    { ftracef0 ("Non-close menu event\n");
+      number = insdel_pending;
+      insdel_pending = 0;
+    }
+    else
+    { int flags = insert? (col? 4: 5): (col? 6: 7);
+
+      ftracef0 ("Close menu event\n");
+      insdel_pending |= flags << 30; /*top two bits are flags*/
+      number = (int)0x80000000;
+      insert = col = FALSE; /* A fiddle */
+    }
+    dbox_dispose (&insdel_d);
+  }
+
+  if (!insdel_pending) stop_insdel_graphics ();
+
+  if (show_dbox)
+  { if (!insert) number = -number;
+    ftracef1 ("number %d\n", number);
+    if (number != 0x80000000)
+    { Change_Size (sarea, &sid, sprite, number, !col,
+          !col? MIN (Row, insdel_row): MIN (Column, insdel_col));
+      menus_ensure_size (sarea, 0);
+      return TRUE; /* Modified */
+    }
+  }
+  return FALSE; /* Not modified */
+}
+
+static BOOL edit_dpi_dboxrawevents (dbox d, void *event, void *handle)
+
+{ wimp_eventstr *e = wimpt_last_event();
+
+  if (
+       (e->e == wimp_ESEND || e->e == wimp_ESENDWANTACK)
+       &&
+       e->data.msg.hdr.action == wimp_MHELPREQUEST
+     )
+  { return help_dboxrawevents (d, event, (void *)"PntHL");
+  }
+  IGNORE(handle);
+  /* RISCOS_Lib still needs to handle the message */
+  return(FALSE);
+}
+
+BOOL menus_edit_dpi (main_sprite *sprite, sprite_id *sid)
+
+{ BOOL open, modified = FALSE;
+  int xeig, yeig, oldxeig, oldyeig;
+  dbox d;
+  main_sprite_window *sprw;
+  wimp_mousestr mouse;
+
+  ftracef0 ("edit dpi");
+
+  wimpt_noerr (wimp_get_point_info (&mouse));
+  ftracef2 ("x %d, y %d\n", mouse.x, mouse.y);
+
+  if ((d = dbox_new ("editdpi")) != 0)
+  { unsigned int mode_out, mode_in = psprite_address (sprite)->mode;
+    sprite_area **sarea = &sprite->file->spritearea;
+
+    oldxeig = bbc_modevar (mode_in, bbc_XEigFactor);
+    oldyeig = bbc_modevar (mode_in, bbc_YEigFactor);
+    dbox_setnumeric (d, d_EditDPI_XEIG_2, oldxeig == 2);
+    dbox_setnumeric (d, d_EditDPI_XEIG_1, oldxeig == 1);
+    dbox_setnumeric (d, d_EditDPI_XEIG_0, oldxeig == 0);
+    dbox_setnumeric (d, d_EditDPI_YEIG_2, oldyeig == 2);
+    dbox_setnumeric (d, d_EditDPI_YEIG_1, oldyeig == 1);
+    dbox_setnumeric (d, d_EditDPI_YEIG_0, oldyeig == 0);
+
+    /* If last event was a keypress, RISCOS_Lib will open the dbox near */
+    /* the caret, which we need to reposition on the sprite window.     */
+    nudge_dbox_caret_position (&mouse);
+
+    dbox_show (d);
+    dbox_raw_eventhandler (d, &edit_dpi_dboxrawevents, (void *) sprite);
+
+    open = TRUE;
+    while (open)
+    { wimp_which_block which_block;
+      wimp_i results [3];
+      wimp_i i = dbox_fillin (d);
+      sprite_header *header;
+
+      ftracef1 ("Got event on icon %d\n", i);
+
+      switch (i)
+      { case d_EditDPI_Ok:
+        { which_block.window   = dbox_syshandle (d);
+          which_block.bit_mask = wimp_ISELECTED | 31 << 16;
+
+          which_block.bit_set = wimp_ISELECTED | 3 << 16; /*x eig E S G is 3*/
+          wimpt_noerr (wimp_which_icon (&which_block, results));
+          ftracef1 ("x dpi icon %d\n", results [0]);
+          switch (results [0])
+          { case d_EditDPI_XEIG_0:          xeig = 0; break;
+            case d_EditDPI_XEIG_1: default: xeig = 1; break;
+            case d_EditDPI_XEIG_2:          xeig = 2; break;
+          }
+          ftracef1 ("x_eig %d\n", xeig);
+
+          which_block.bit_set = wimp_ISELECTED | 4 << 16; /*y eig E S G is 4*/
+          wimpt_noerr (wimp_which_icon (&which_block, results));
+          ftracef1 ("y dpi icon %d\n", results [0]);
+          switch (results [0])
+          { case d_EditDPI_YEIG_0:          yeig = 0; break;
+            case d_EditDPI_YEIG_1: default: yeig = 1; break;
+            case d_EditDPI_YEIG_2:          yeig = 2; break;
+          }
+          ftracef1 ("y_eig %d\n", yeig);
+
+          if (oldxeig != xeig || oldyeig != yeig)
+          { /* Compute the new mode word, reduced to the most compatible form */
+            if ((mode_in & 0x780F000F) == 0x78000001)
+              mode_out = (mode_in & ~0xF0u) | xeig << 4 | yeig << 6; /*RO5*/
+            else if (mode_in >= 256u)
+              mode_out = (mode_in & 0xF8000001) | (180 >> yeig) << 14
+                                                | (180 >> xeig) << 1; /*RO350+*/
+            else /* For numbered modes derive a RO350 equivalent */
+              mode_out = ((1 + bbc_modevar (mode_in, bbc_Log2BPP)) << 27) | 1 |
+                         (180 >> yeig) << 14 | (180 >> xeig) << 1;
+            mode_out = psprite_reduce_mode_word (mode_out);
+            header = psprite_address (sprite);
+
+            /* Leave the image data alone, only modify the resolution. This is 
+             * complicated by not all resolutions having a corresponding mode
+             * number and with that the mask data format changes. Wide masks are
+             * always wide, so the only cases to catch are:
+             *
+             * In \ Out | Numbered  RO350      RO5xx     
+             * ---------+--------------------------------
+             * Numbered | Mode      Mask/Mode  Mask/Mode 
+             * RO350    | Mask/Mode Mode       Mode      
+             * RO5xx    | Mask/Mode Mode       Mode      
+             */
+            if (((mode_in < 256u) != (mode_out < 256u)) &&
+                psprite_transparency_type (sprite) == transparency_type_onoffmask) 
+            { int slb_bpp = bbc_modevar (mode_in, bbc_Log2BPP), smasksz;
+              int dlb_bpp = bbc_modevar (mode_out, bbc_Log2BPP), dmasksz;
+              void *copymask, *realmask;
+
+              dmasksz = (header->width + 1); /* Image words per row */
+              smasksz = (((dmasksz << (5 - slb_bpp)) + 31) & ~31) >> 3; /* Mask bytes per row @ 1bpp */
+              dmasksz *= 4 * (header->height + 1); /* Image bytes per image */
+              smasksz *= (header->height + 1); /* Mask bytes per image @ 1bpp */
+              if (mode_out < 256u)
+              { /* Destination is numbered mode, source is 1bpp mask -> expand */
+                if (!menus_ensure_size (sarea, dmasksz - smasksz))
+                  goto dpi_nomem;
+                slb_bpp = 0;
+              }
+              else
+              { /* Destination is 1bpp mask, source mask has same bpp as the image -> contract */
+                int swap = smasksz;
+                smasksz = dmasksz, dmasksz = swap;
+                dlb_bpp = 0;
+              }
+              ftracef2 ("Need mask resample from %d bytes to %d bytes\n", smasksz, dmasksz);
+
+              /* Copy aside the current mask */
+              if (!flex_alloc ((flex_ptr) &copymask, smasksz))
+                goto dpi_nomem;
+              header = psprite_address (sprite); /* May have flex'd */
+              realmask = (char *) header + header->mask;
+              memcpy (copymask, realmask, smasksz);
+              if (mode_out >= 256u)
+                sprwindow_remove_wastage (sprite);
+
+              /* Delete old mask, create replacement and fill it */
+              sprite_remove_mask (*sarea, sid);
+              header->mode = mode_out;
+              ftracef1 ("Resolution changed to new mode %x, creating mask\n", mode_out);
+              sprite_create_mask (*sarea, sid);
+              psprite_resample_onoffmask (realmask, 1 << dlb_bpp,
+                                          copymask, 1 << slb_bpp, header);
+              flex_free ((flex_ptr) &copymask);
+            }
+            else
+            { /* Simple case which only needs the mode word replacing */
+              header->mode = mode_out;
+              ftracef1 ("Resolution changed to new mode %x\n", mode_out);
+            }
+            menus_ensure_size (sarea, 0);
+            psprite_recalculate_offsets (sprite->file);
+            modified = TRUE;
+
+            /* This is needed to update the scale values */
+            sprwindow_invalidate (sprite);
+            psprite_set_plot_info (sprite->file);
+            psprite_set_icon_scale (sprite);
+
+            for (sprw = sprite->windows; sprw != NULL; sprw = sprw->link)
+            { /* Reset offsets for zoom calculation */
+              sprw->resizestart.offsetx = -1;
+              sprw->resizestart.offsety = -1;
+              sprw->resizestart.window_width = 0;
+              sprw->resizestart.window_height = 0;
+              sprwindow_set_work_extent (sprw->window, TRUE);
+            }
+            sprwindow_redisplay (sprite, NULL);
+            mode_in = mode_out;
+            oldxeig = xeig;
+            oldyeig = yeig;
+          }
+        }
+        /*fall through*/
+
+        case d_EditDPI_Cancel:
+          open = dbox_persist ();
+          if (open)
+          { /* Reset values after right click */
+            dbox_setnumeric (d, d_EditDPI_XEIG_2, oldxeig == 2);
+            dbox_setnumeric (d, d_EditDPI_XEIG_1, oldxeig == 1);
+            dbox_setnumeric (d, d_EditDPI_XEIG_0, oldxeig == 0);
+            dbox_setnumeric (d, d_EditDPI_YEIG_2, oldyeig == 2);
+            dbox_setnumeric (d, d_EditDPI_YEIG_1, oldyeig == 1);
+            dbox_setnumeric (d, d_EditDPI_YEIG_0, oldyeig == 0);
+          }
+        break;
+
+        case dbox_CLOSE:
+          open = FALSE;
+        break;
+      }
+    }
+    dbox_dispose (&d);
+  }
+  return modified;
+
+dpi_nomem:
+  dbox_dispose (&d);
+  werr (FALSE, msgs_lookup ("PntEG"));
+  return FALSE;
+}
+
+void menus_zoom_savemouse (main_sprite_window *sprite, wimp_mousestr *mpos)
+
+{ int x, y;
+  tools_mouse_to_pixel (sprite->window, mpos, &x, &y);
+  sprite->resizestart.mousepixelx = x;
+  sprite->resizestart.mousepixely = y;
+  sprite->resizestart.mx = mpos->x;
+  sprite->resizestart.my = mpos->y;
+  ftracef4 ("mouse x: %d y: %d pixel x: %d pixel y: %d (before zoom)\n", mpos->x, mpos->y, x, y);
+}
+
+void menus_showmag (void *handle)
+
+{ menus_showmag_getstate (handle, 0, 0, TRUE);
+  /* Reset the offsets for the Ctrl-resize zoom function */
+  /* An actual Ctrl-resize will call menus_showmag_getstate() directly */
+  main_sprite_window *sprite = (main_sprite_window *) handle;
+  sprite->resizestart.offsetx = -1;
+  sprite->resizestart.offsety = -1;
+  sprite->resizestart.window_width = 0;
+  sprite->resizestart.window_height = 0;
+}
+
+wimp_wstate menus_showmag_getstate (void *handle, int window_width, int window_height, BOOL keep_win_dims)
+
+{ main_sprite_window *sprite = (main_sprite_window *) handle;
+  int m, d;
+  wimp_wstate wstate;
+  wimp_winfo winfo;
+  BOOL mouseoverwind = TRUE;
+  BOOL keeponscreen = FALSE;
+
+  ftracef0 ("menus_showmag_getstate\n");
+  wimpt_noerr (wimp_get_wind_state (sprite->window->handle, &wstate));
+  m = sprite->blobsize.scale_ymul;
+  d = sprite->blobsize.scale_ydiv;
+
+  if (keep_win_dims)
+  { winfo.w = sprite->window->handle;
+    wimpt_noerr (paintlib_get_wind_info (&winfo));
+  }
+
+  main_current_options.zoom.mul =
+    sprite->blobsize.scale_ymul = sprite->blobsize.scale_xmul;
+  main_current_options.zoom.div =
+    sprite->blobsize.scale_ydiv = sprite->blobsize.scale_xdiv;
+
+  sprwindow_set_work_extent_custom (sprite->window, FALSE,
+                                    MAX(window_width, sprite->minwidth), window_height);
+
+  if (keep_win_dims)
+  { /* Keeping window dimensions the same if possible (exception will be if sprite fills the window). */
+    wimp_mousestr mpos;
+    int newmousepixx, newmousepixy;
+
+    window_width = wstate.o.box.x1 - wstate.o.box.x0;
+    window_height = wstate.o.box.y1 - wstate.o.box.y0;
+
+    /* We'll try to keep the same sprite pixel under the mouse pointer before and after zooming. */
+    /* If less than the entire sprite is visible, we'll first attempt to do it by moving the scroll bars */
+    /* If a scroll bar can't be moved far enough to do it (due to reaching an end or the whole sprite being visible),
+       we'll try moving the window position, whilst avoiding making window furniture inaccessible. */
+
+    mpos.x = sprite->resizestart.mx;
+    mpos.y = sprite->resizestart.my;
+    mpos.w = sprite->window->handle;
+    mpos.i = -1;
+
+    ftracef2 ("mpos.x: %d y: %d ", mpos.x, mpos.y);
+    ftracef4 ("box.x0: %d x1: %d y0: %d y1: %d\n", winfo.info.box.x0, winfo.info.box.x1, winfo.info.box.y0, winfo.info.box.y1);
+    ftracef4 ("wstate.o.box.x0: %d x1: %d y0: %d y1: %d ", wstate.o.box.x0, wstate.o.box.x1, wstate.o.box.y0, wstate.o.box.y1);
+
+    /* If mouse pointer's already outside the window, zoom in on the centre of the window instead */
+    if (mpos.x >= wstate.o.box.x1 || mpos.x < wstate.o.box.x0 || mpos.y >= wstate.o.box.y1 || mpos.y < wstate.o.box.y0)
+    { mouseoverwind = FALSE;
+      mpos.x = wstate.o.box.x0 + window_width / 2;
+      mpos.y = wstate.o.box.y0 + window_height / 2;
+      ftracef2 ("mpos was out of range. Set to window centre, %d, %d\n", mpos.x, mpos.y);
+    }
+    if (!mouseoverwind)
+    { /* A bit messy but we have to put the old scale factors back and recalculate
+         which pixel the mouse was over, since we've moved it to the centre. */
+      sprite->blobsize.scale_xdiv = d;
+      sprite->blobsize.scale_xmul = m;
+      d = sprite->blobsize.scale_ydiv;
+      m = sprite->blobsize.scale_ymul;
+      sprite->blobsize.scale_ydiv = sprite->blobsize.scale_xdiv;
+      sprite->blobsize.scale_ymul = sprite->blobsize.scale_xmul;
+
+      sprite->resizestart.mousepixelx = tools_extent_to_pixel_x(sprite, mpos.x - wstate.o.box.x0 + wstate.o.x);
+      sprite->resizestart.mousepixely = tools_extent_to_pixel_y(sprite, -winfo.info.ex.y0 + winfo.info.scy + mpos.y - winfo.info.box.y1);
+
+      sprite->blobsize.scale_xdiv = d;
+      sprite->blobsize.scale_xmul = m;
+      d = sprite->blobsize.scale_ydiv;
+      m = sprite->blobsize.scale_ymul;
+      sprite->blobsize.scale_ydiv = sprite->blobsize.scale_xdiv;
+      sprite->blobsize.scale_ymul = sprite->blobsize.scale_xmul;
+    }
+    wimpt_noerr (paintlib_get_wind_info (&winfo));
+
+    /* Work out which pixel would be under the mouse at the new zoom level, so we know how far we need to correct things */
+    newmousepixx = tools_extent_to_pixel_x (sprite, mpos.x - wstate.o.box.x0 + (wstate.o.x * d / m) * main_current_options.zoom.mul / main_current_options.zoom.div);
+    newmousepixy = tools_extent_to_pixel_y (sprite, -winfo.info.ex.y0 + (winfo.info.scy * d / m) * main_current_options.zoom.mul / main_current_options.zoom.div + mpos.y -
+        winfo.info.box.y1);
+
+    ftracef5 ("wstate.o.x: %d div: %d mul: %d newmousepixx: %d prev mousepixelx: %d\n", wstate.o.x, d, m, newmousepixx, sprite->resizestart.mousepixelx);
+    ftracef5 ("wstate.o.y: %d div: %d mul: %d newmousepixy: %d prev mousepixely: %d\n", wstate.o.y, d, m, newmousepixy, sprite->resizestart.mousepixely);
+
+    /* Adjust the scroll bar offsets in OS units. The new zoom mul and div get applied to them further down. */
+    sprite->resizestart.offsetx = (wstate.o.x * d / m) + sprite->sprite->mode.scale_xmul * (sprite->resizestart.mousepixelx - newmousepixx);
+    sprite->resizestart.offsety = (wstate.o.y * d / m) + sprite->sprite->mode.scale_ymul * (sprite->resizestart.mousepixely - newmousepixy);
+
+    if (mouseoverwind)
+    { /* If entire sprite is visible in one dimension, then in that dimension move the window over so same pixel is under the mouse pointer. */
+      /* We'll also now handle the cases where the scroll bars couldn't move far enough to put our pixel under the mouse pointer. */
+
+      int oldx0 = wstate.o.box.x0;
+      int oldy0 = wstate.o.box.y0;
+      psprite_info sinfo;
+      psprite_read_full_info (sprite->sprite, &sinfo);
+      int swidth;
+      int sheight;
+
+      /* Convert sprite dimensions to OS Units */
+      swidth = sinfo.width << bbc_modevar (sinfo.mode, bbc_XEigFactor);
+      sheight = sinfo.height << bbc_modevar (sinfo.mode, bbc_YEigFactor);
+
+      /* Now convert to on-screen zoomed dimensions in OS Units */
+      swidth = swidth * sprite->blobsize.scale_xmul / sprite->blobsize.scale_xdiv;
+      sheight = sheight * sprite->blobsize.scale_ymul / sprite->blobsize.scale_ydiv;
+
+      if (swidth <= window_width)
+      { /* Work out how much the visible region of the sprite shrunk by */
+        int dx = sprite->sprite->mode.scale_xmul * (-newmousepixx + sprite->resizestart.mousepixelx);
+        dx = dx * main_current_options.zoom.mul / main_current_options.zoom.div;
+        /* Reposition the window to keep the same pixel under the mouse pointer */
+        /* If dx is less than one screen pixel, we probably shouldn't move the window as it was tending to move too far.
+           We therefore round dx down to nearest number of screen pixels. */
+        dx &= ~((1 << bbc_modevar (-1, bbc_XEigFactor)) - 1);
+        wstate.o.box.x0 -= dx;
+        wstate.o.box.x1 -= dx;
+      }
+      else
+      { int scx = sprite->resizestart.offsetx * main_current_options.zoom.mul / main_current_options.zoom.div;
+        int xextentpos = winfo.info.ex.x0 + scx;
+        int rightoverflow = xextentpos + window_width - winfo.info.ex.x1;
+        int leftoverflow = -xextentpos;
+        if (rightoverflow >= 0)
+        { /* Moving horizontal scroll bar all the way to the right isn't enough to keep the pixel under the
+             mouse pointer */
+          /* Work out how far we need to move the window to the left */
+          rightoverflow++;
+          /* Round amount to move down to nearest number of screen pixels */
+          rightoverflow &= ~((1 << bbc_modevar (-1, bbc_XEigFactor)) - 1);
+          /* And move the window position */
+          wstate.o.box.x0 -= rightoverflow;
+          wstate.o.box.x1 -= rightoverflow;
+        }
+        else if (leftoverflow > 0)
+        { /* Moving horizontal scroll bar all the way to the left isn't enough to keep the pixel under the
+             mouse pointer */
+          /* Work out how far we need to move the window to the right */
+          /* Round amount to move down to nearest number of screen pixels */
+          leftoverflow &= ~((1 << bbc_modevar (-1, bbc_XEigFactor)) - 1);
+          /* And move the window position */
+          wstate.o.box.x0 += leftoverflow;
+          wstate.o.box.x1 += leftoverflow;
+        }
+      }
+
+      if (sheight <= window_height)
+      { /* Work out how much the visible region of the sprite shrunk by */
+        int dy = sprite->sprite->mode.scale_ymul * (-newmousepixy + sprite->resizestart.mousepixely);
+        dy = dy * main_current_options.zoom.mul / main_current_options.zoom.div;
+        /* Reposition the window to keep the same pixel under the mouse pointer */
+        dy &= ~((1 << bbc_modevar (-1, bbc_YEigFactor)) - 1);
+        wstate.o.box.y0 -= dy;
+        wstate.o.box.y1 -= dy;
+      }
+      else
+      { int scy = sprite->resizestart.offsety * main_current_options.zoom.mul / main_current_options.zoom.div;
+        int yextentpos = winfo.info.ex.y1 + scy;
+        int bottomoverflow = -(yextentpos - window_height - winfo.info.ex.y0);
+        if (yextentpos >= 0)
+        { /* Moving horizontal scroll bar all the way to the top isn't enough to keep the pixel under the
+             mouse pointer */
+          /* Work out how far we need to move the window down */
+          yextentpos++;
+          /* Round amount to move down to nearest number of screen pixels */
+          yextentpos &= ~((1 << bbc_modevar (-1, bbc_YEigFactor)) - 1);
+          /* And move the window position */
+          wstate.o.box.y0 -= yextentpos;
+          wstate.o.box.y1 -= yextentpos;
+        }
+        else if (bottomoverflow > 0)
+        { /* Moving horizontal scroll bar all the way to the bottom isn't enough to keep the pixel under the
+             mouse pointer */
+          /* Work out how far we need to move the window up */
+          /* Round amount to move down to nearest number of screen pixels */
+          bottomoverflow &= ~((1 << bbc_modevar (-1, bbc_XEigFactor)) - 1);
+          /* And move the window position */
+          wstate.o.box.y0 += bottomoverflow;
+          wstate.o.box.y1 += bottomoverflow;
+        }
+      }
+      /* If we're moving the window make sure it won't go off the edge of the screen */
+      /* The WIMP seems to stop this happening if the window wasn't previously over the edge but if part of it
+         was, it might move further, making window furntiure unreachable */
+      if (wstate.o.box.x0 != oldx0 || wstate.o.box.y0 != oldy0)
+        keeponscreen = TRUE;
+    }
+    /* Make sure the scroll offsets don't get reassigned further down */
+    if (sprite->resizestart.offsetx < 0)
+      sprite->resizestart.offsetx = 0;
+  }
+  else if (window_width < 1)
+  { window_width = (wstate.o.box.x1-wstate.o.box.x0) * d * main_current_options.zoom.mul /
+                   (m * main_current_options.zoom.div);
+  }
+  /* Prevent the user from making the window narrow enough to squash
+     the buttons. With the colour panel present, this is possible for
+     very short sprite names */
+  if (window_width < sprite->minwidth)
+    window_width = sprite->minwidth;
+  ftracef1 ("Window width will be set to %d\n", window_width);
+
+  /* now scale window size too */
+  spencer (ftracef (__FILE__, __LINE__, "psize %d %d %d %d\n",
+                      wstate.o.box.x0, wstate.o.box.x1,
+                      wstate.o.box.y0, wstate.o.box.y1))
+  wstate.o.box.x1 = wstate.o.box.x0 + window_width;
+  wstate.o.box.y0 = wstate.o.box.y1 -
+     ((window_height > 0) ? window_height : ((wstate.o.box.y1-wstate.o.box.y0)*d*main_current_options.zoom.mul/
+     (m*main_current_options.zoom.div)));
+  spencer (ftracef (__FILE__, __LINE__, "nsize %d %d %d %d\n",
+                      wstate.o.box.x0, wstate.o.box.x1,
+                      wstate.o.box.y0, wstate.o.box.y1))
+
+  /* and keep the same point at the top left */
+  if (sprite->resizestart.offsetx < 0)
+  { /* Bug fix. Previously the scroll offsets were updated and truncated at
+     * every change in zoom level, causing the scrollbars to wander, so now
+     * we store the sprite offsets independent of zoom level and only
+     * recalculate when the scroll bars are moved.
+     */
+    sprite->resizestart.offsetx = wstate.o.x * d / m;
+    sprite->resizestart.offsety = wstate.o.y * d / m;
+  }
+#if 0
+  /* Old code with accumulated rounding errors */
+  wstate.o.x = wstate.o.x*d*main_current_options.zoom.mul/
+      (m*main_current_options.zoom.div);
+  wstate.o.y = wstate.o.y*d*main_current_options.zoom.mul/
+      (m*main_current_options.zoom.div);
+#else
+  wstate.o.x = sprite->resizestart.offsetx * main_current_options.zoom.mul / main_current_options.zoom.div;
+  wstate.o.y = sprite->resizestart.offsety * main_current_options.zoom.mul / main_current_options.zoom.div;
+#endif
+
+  wimpt_noerr (wimp_open_wind (&wstate.o));
+
+  /* If we repositioned the window, see if bits of it moved off the edges of the screen */
+  if (keeponscreen)
+  { /* We subtract 40 OS units from maxx and maxy to make space for window furniture. Strictly speaking,
+       Wimp_Extend should be invoked to get the measurements but this will at least leave enough of it
+       on the screen for the user to click on it. */
+    int minx = bbc_vduvar( bbc_OrgX );
+    int maxx = (bbc_modevar( -1, bbc_XWindLimit ) << bbc_modevar( -1, bbc_XEigFactor )) - 40;
+    int miny = bbc_vduvar( bbc_OrgY );
+    int maxy = (bbc_modevar( -1, bbc_YWindLimit ) << bbc_modevar( -1, bbc_YEigFactor )) - 40;
+
+    window_width = wstate.o.box.x1 - wstate.o.box.x0;
+    window_height = wstate.o.box.y1 - wstate.o.box.y0;
+    ftracef4 ("Desktop bounds (%d, %d) (%d, %d)\n", minx, miny, maxx, maxy);
+    ftracef4 ("Prev window bounds (%d, %d) (%d, %d)\n", wstate.o.box.x0, wstate.o.box.y0, wstate.o.box.x1, wstate.o.box.y1);
+
+    /* This moves the client area of the window back onto the screen */
+    wstate.o.box.x0 = MAX(minx, wstate.o.box.x0);
+    wstate.o.box.x0 = MIN(maxx - window_width, wstate.o.box.x0);
+    wstate.o.box.x1 = wstate.o.box.x0 + window_width;
+    wstate.o.box.y0 = MAX(miny, wstate.o.box.y0);
+    wstate.o.box.y0 = MIN(maxy - window_height, wstate.o.box.y0);
+    wstate.o.box.y1 = wstate.o.box.y0 + window_height;
+
+    ftracef4 ("New window bounds (%d, %d) (%d, %d)\n", wstate.o.box.x0, wstate.o.box.y0, wstate.o.box.x1, wstate.o.box.y1);
+    wimpt_noerr (wimp_open_wind (&wstate.o));
+  }
+  return wstate;
+}
+
+
+/**************************
+ * Palette handling       *
+ **************************/
+
+static void sprite_palette_has_changed (main_sprite *sprite)
+
+{ ftracef0 ("sprite_palette_has_changed\n");
+  sprite->artistfriendly = artist_unknown;
+  psprite_set_colour (sprite);
+  psprite_set_brush_translation (sprite, FALSE);
+  /*Layer used for translucent painting will need recreating*/
+  tools_delete_layer ();
+
+  sprwindow_redisplay (sprite, NULL);
+
+  if (sprite->colourdialogue == 0) colours_set_extent (sprite);
+  main_sprite_window *windows = sprite->windows;
+  if (windows)
+    colourpanel_redraw (windows->window);
+  main_set_modified (sprite->file);
+}
+
+void menus_set_palette (main_sprite *sprite, int entries, int *palette)
+
+  /*Note: this routine assumes the palette is the right length for the
+    sprite.*/
+
+{ BOOL create = palette != NULL;
+  char *start, *end;
+  int old_size, new_size, diff;
+  sprite_area **sarea = &sprite->file->spritearea;
+  sprite_header *header;
+
+  ftracef1 ("%s palette\n", create? "Create": "Delete");
+
+  header = psprite_address (sprite);
+  old_size = MIN (header->image, header->mask) - sizeof (sprite_header);
+  new_size = create ?2 * sizeof (int) * abs(entries): 0;
+  diff = new_size - old_size;
+
+  ftracef3 ("Sprite \"%.12s\" had %d bytes of palette; wants %d bytes\n",
+      header->name, old_size, new_size);
+
+  /*Adjust the area to insert/delete 'diff' bytes at the right
+    place for this sprite. The "right place" is the start of the image or the
+    start of the mask, whichever comes first.*/
+  if (diff > 0 && !menus_ensure_size (sarea, diff))
+  { werr (FALSE, msgs_lookup ("PntEG"));
+    return;
+  }
+
+  header = psprite_address (sprite); /*flex moved?*/
+
+  if (create && entries == -256)
+  { /* Special handling to create a full 256 entry */
+    os_error *error = os_swix4 (OS_SpriteOp, SpriteReason_CreateRemovePalette | 0x200,
+                                (int) *sarea, (int) header, 1 /*create*/ | (1U << 31));
+    if (error != NULL)
+    { werr (FALSE, error->errmess);
+      return;
+    }
+  }
+  else
+  { /* Generic add/remove */
+    start  = (char *) header + MIN (header->image, header->mask);
+    end    = (char *) *sarea + (*sarea)->freeoff /*end of whole area*/;
+    memmove (start + diff, start, end - start);
+
+    if (create)
+    { /*Now copy the new palette into the space just made.*/
+      int i, *e = (int *) ((char *) header + sizeof (sprite_header));
+
+      for (i = 0; i < entries; i++)
+      { *e = *(e + 1) = palette [i];
+        e += 2;
+      }
+    }
+
+    /*Fix up every pointer in the world.*/
+    header->image     += diff;
+    header->mask      += diff;
+    header->next      += diff;
+    (*sarea)->freeoff += diff;
+  }
+
+  sprwindow_invalidate (sprite);
+  menus_ensure_size (sarea, 0);
+  psprite_recalculate_offsets (sprite->file);
+  sprite_palette_has_changed (sprite);
+}
+
+/*********************************
+ *                               *
+ *  Sprite window menu handler.  *
+ *                               *
+ *********************************/
+
+static BOOL remap_to_artistfriendly_dboxrawevents (dbox d, void *event, void *handle)
+
+{
+  wimp_eventstr *e = wimpt_last_event();
+  if (
+       (e->e == wimp_ESEND || e->e == wimp_ESENDWANTACK)
+       &&
+       e->data.msg.hdr.action == wimp_MHELPREQUEST
+     )
+  { return help_dboxrawevents (d, event, handle);
+  }
+  e = (wimp_eventstr*)event;
+
+  if (e->e == wimp_EOPEN)
+  { /* Keep the window on top */
+    e->data.o.behind = -1;
+    wimpt_noerr (wimp_open_wind (&e->data.o));
+    return(TRUE); /* message has been handled. */
+  }
+  else
+    return(FALSE);
+}
+
+static int remap_to_artistfriendly_dbox (void)
+
+{ char question [512];
+  sprintf (question, msgs_lookup ("PntWG"));
+  dbox_field answer;
+  artistfriendly_dbox = dbox_new ("remap");
+  if (artistfriendly_dbox == 0) return dboxquery_CANCEL; /* out of space - embarassing */
+  if (question == 0 || question[0] == 0) return 2;
+
+  dbox_raw_eventhandler (artistfriendly_dbox, remap_to_artistfriendly_dboxrawevents, "PntHK");
+  dbox_setfield (artistfriendly_dbox, 1, question);
+  dbox_show (artistfriendly_dbox);
+  /* Set an invisible caret so Return works */
+  wimp_caretstr caretstr;
+  caretstr.w = dbox_syshandle (artistfriendly_dbox);
+  caretstr.i = -1;
+  caretstr.x = 0;
+  caretstr.y = 0;
+  caretstr.height = 0; /* Invisible caret */
+  caretstr.index = 0;
+  wimpt_noerr (wimp_set_caret_pos (&caretstr));
+  wimp_msgstr msg;
+  msg.hdr.size = 24;
+  msg.hdr.your_ref = 0;
+  msg.hdr.action = wimp_MCLAIMENTITY;
+  msg.data.claimentity.flags = wimp_MCLAIMENTITY_flags_caretselect;
+  wimpt_noerr (wimp_sendmessage (wimp_ESEND, &msg, 0));
+
+  do
+  { answer = dbox_fillin (artistfriendly_dbox);
+  }
+  while (dbox_persist ());
+
+  ftracef1 ("Remap to Artist Friendly dbox answer: %d.\n", answer);
+  return (int)answer;
+}
+
+static void destroy_artistfriendly_dbox (void)
+
+{ if (artistfriendly_dbox != 0)
+  { dbox_hide (artistfriendly_dbox);
+    dbox_dispose (&artistfriendly_dbox);
+    artistfriendly_dbox = 0;
+  }
+}
+
+static void Apply_Colour (dboxtcol_colour col, void *handle)
+
+{ main_sprite *sprite = (main_sprite *) handle;
+  sprite_header *spr = psprite_address (sprite);
+  /* If we need to remap the palette layout to artist-friendly
+     without showing the confirmation dbox, then we must do it AFTER
+     the user has edited the colour, so it's on a click rather than
+     just a menu hit */
+  BOOL could_remap = (sprite->artistfriendlyopts & artist_friendly_view & artist_remap_palette)
+                     && colours_is_artist_friendly (sprite);
+  if (could_remap && !(sprite->artistfriendlyopts & artist_ask_to_remap))
+  { sprite->artistfriendly = artist_friendly;
+    colours_remap_to_artist_friendly (sprite);
+    /* Don't forget to remap the currently selected colours too! */
+    sprite->gcol.colour = colours_get_artist_friendly_index (sprite->gcol.colour, sprite);
+    sprite->gcol2.colour = colours_get_artist_friendly_index (sprite->gcol2.colour, sprite);
+    sprite->artistfriendly = artist_unfriendly;
+  }
+  int *colour = &(&spr->mode + 1) [2*sprite->gcol.colour];
+
+  ftracef0 ("Apply_Colour\n");
+  /*Update source of colour.*/
+  *colour = *(colour + 1) = col;
+
+  sprite_palette_has_changed (sprite);
+}
+
+void menus_select_colour (main_window *window, BOOL backgrnd_col, BOOL refetch_coords)
+
+{ main_sprite_window *sprw = &window->data->sprite;
+  main_sprite *sprite = sprw->sprite;
+  main_colour *gcol = backgrnd_col ? &sprite->gcol2 : &sprite->gcol;
+
+  ftracef0 ("menus_select_colour\n");
+  sprite_id sid;
+  char name [NAME_LIMIT + 1];
+  sprite_maskstate mask = sprite_masksolid;
+  sprite_colour colour;
+
+  if (refetch_coords)
+  { wimp_mousestr mouse;
+
+    wimpt_noerr (wimp_get_point_info (&mouse));
+    tools_mouse_to_pixel (window, &mouse, &Column, &Row);
+    ftracef4 ("row %d, column %d, width %d, height %d\n", Row, Column,
+        psprite_address (sprite)->width + 1,
+        psprite_address (sprite)->height + 1);
+  }
+
+  ftracef2 ("pick pixel colour %d %d\n", Column, Row);
+
+  sid.tag = sprite_id_name;
+  sid.s.name = COPY_N (name, psprite_address (sprite)->name,
+      NAME_LIMIT); /*doesn't flex*/
+
+  /*Redraw all colour panels.*/
+  colourpanel_redraw (window);
+
+  /*Force a redraw of the colours window, if necessary.*/
+  colours_redraw (sprite);
+
+  if (psprite_hasmask (sprite))
+    wimpt_noerr (sprite_readmask (sprite->file->spritearea, &sid,
+          Column, Row, &mask));
+
+  wimpt_noerr (main_read_pixel (sprite->file->spritearea,
+        &sid, Column, Row, &colour));
+
+  *gcol = colours_unpack_colour2(sprite, colour, mask);
+
+  ftracef1 ("select colour 0x%X\n", *gcol);
+
+  if ((!backgrnd_col && sprite->colourdialogue != 0) ||
+    (backgrnd_col && sprite->bgcolourdialogue != 0)
+  )
+  { colourpicker_dialogue dialogue;
+
+    if (!gcol->alpha)
+    { dialogue.flags = colourpicker_DIALOGUE_TRANSPARENT;
+      ftracef0 ("ColourPicker_UpdateDialogue: setting transparent\n");
+      os_swi3 (ColourPicker_UpdateDialogue,
+          colourpicker_UPDATE_TRANSPARENT,
+          (backgrnd_col) ? sprite->bgcolourdialogue : sprite->colourdialogue,
+          &dialogue);
+    }
+    else
+    { dialogue.colour = colours_entry (psprite_address(sprite)->mode, gcol->colour);
+
+      ftracef1 ("ColourPicker_UpdateDialogue: setting RGB colour to 0x%X\n",
+          dialogue.colour);
+      os_swi3 (ColourPicker_UpdateDialogue,
+          colourpicker_UPDATE_COLOUR,
+          (backgrnd_col) ? sprite->bgcolourdialogue : sprite->colourdialogue,
+          &dialogue);
+    }
+  }
+}
+
+static int count_dbox_digits (dbox d, dbox_field f)
+
+{ char a[20];
+  int n = 0;
+  int i = 0;
+  BOOL neg = FALSE;
+  BOOL leading0s = TRUE;
+
+  dbox_getfield ((dbox) d, f, a, 20);
+
+  while (1)
+  { if (a[i] == 0)
+      break;
+    if (a[i] == '-')
+    { if (neg || !leading0s)
+      { /* Fail */
+        return 0;
+      }
+      else
+        neg = TRUE;
+    }
+    else if (a[i] >= '0' && a[i] <= '9')
+    { if (a[i] > '0' || !leading0s)
+      {
+        n++;
+        leading0s = FALSE;
+      }
+    }
+    else
+    { /* Fail */
+      return 0;
+    }
+    i++;
+  }
+
+  if (neg)
+  { /* Negative no. of digits indicates negative number */
+    return -n;
+  }
+  return n;
+}
+
+static BOOL adjust_size_dboxrawevents (dbox d, void *event, void *handle)
+
+{ int top, bottom, left, right, rows, cols, toadd, newrows, newcols;
+  int roomw, roomh;
+  int icon;
+  psprite_info info;
+  main_sprite *sprite = (main_sprite *)handle;
+  wimp_eventstr *e = wimpt_last_event();
+
+  if (
+       (e->e == wimp_ESEND || e->e == wimp_ESENDWANTACK)
+       &&
+       e->data.msg.hdr.action == wimp_MHELPREQUEST
+     )
+  { return help_dboxrawevents (d, event, (void *)"PntHD");
+  }
+
+  e = (wimp_eventstr*)event;
+  icon = -1;
+
+  switch (e->e)
+  {
+    case wimp_EKEY:
+      icon = e->data.key.c.i;
+      /* Fall through */
+    case wimp_EBUT:
+      psprite_read_full_info (sprite, &info);
+      rows    = info.height;
+      cols    = info.width;
+
+      /* We validate everything but don't correct a field visibly while the
+         user is typing in it. */
+      top = dbox_getnumeric (d, d_Adjust_Top);
+      bottom = dbox_getnumeric (d, d_Adjust_Bottom);
+      left = dbox_getnumeric (d, d_Adjust_Left);
+      right = dbox_getnumeric (d, d_Adjust_Right);
+      newcols = dbox_getnumeric (d, d_Adjust_Cols);
+      newrows = dbox_getnumeric (d, d_Adjust_Rows);
+
+      /* Overflow is possible if 10 digits are entered. It can't happen
+         with a negative number as only 9 digits will fit with the '-' */
+      if (count_dbox_digits (d, d_Adjust_Top) > 9 ||
+          top > 999999999)
+        top = 999999999;
+      else if (top < -999999999)
+        top = -999999999;
+
+      if (count_dbox_digits (d, d_Adjust_Bottom) > 9 ||
+          bottom > 999999999)
+        bottom = 999999999;
+      else if (bottom < -999999999)
+        bottom = -999999999;
+
+      if (count_dbox_digits (d, d_Adjust_Left) > 9 ||
+          left > 999999999)
+        left = 999999999;
+      else if (left < -999999999)
+        left = -999999999;
+
+      if (count_dbox_digits (d, d_Adjust_Right) > 9 ||
+          right > 999999999)
+        right = 999999999;
+      else if (right < -999999999)
+        right = -999999999;
+
+      if (newcols < 1)
+        newcols = 1;
+      else if (newcols > 999999999)
+        newcols = 999999999;
+
+      if (newrows < 1)
+        newrows = 1;
+      else if (newrows > 999999999)
+        newrows = 999999999;
+
+      /*Check for integer overflow*/
+      roomw = INT_MAX - cols;
+      if (cols < 0) roomw = 0;
+      roomh = INT_MAX - rows;
+      if (rows < 0) roomh = 0;
+
+      switch (icon)
+      { case d_Adjust_Top:
+        case d_Adjust_Bottom:
+          toadd = top + bottom;
+          if (toadd < 0 && -toadd >= rows)
+          { /* Can't make sprite shorter than 1 pixel */
+            toadd = 1 - rows;
+          }
+          if (toadd > roomh)
+            toadd = roomh;
+
+          if (rows + toadd > 999999999)
+            newrows = 999999999;
+          else
+            newrows = rows + toadd;
+
+          dbox_setnumeric (d, d_Adjust_Rows, newrows);
+        break;
+        case d_Adjust_Left:
+        case d_Adjust_Right:
+          toadd = left + right;
+          if (toadd < 0 && -toadd >= cols)
+          { /* Can't make sprite narrower than 1 pixel */
+            toadd = 1 - cols;
+          }
+          if (toadd > roomw)
+            toadd = roomw;
+
+          if (cols + toadd > 999999999)
+            newcols = 999999999;
+          else
+            newcols = cols + toadd;
+
+          dbox_setnumeric (d, d_Adjust_Cols, newcols);
+        break;
+        case d_Adjust_Cols:
+          toadd = newcols - cols;
+          if (toadd > roomw)
+            toadd = roomw;
+          right = toadd - left;
+
+          if (right > 999999999)
+            right = 999999999;
+          else if (right < -999999999)
+            right = -999999999;
+
+          dbox_setnumeric (d, d_Adjust_Right, right);
+        break;
+        case d_Adjust_Rows:
+          toadd = newrows - rows;
+          if (toadd > roomh)
+            toadd = roomh;
+          top = toadd - bottom;
+
+          if (top > 999999999)
+            top = 999999999;
+          else if (top < -999999999)
+            top = -999999999;
+
+          dbox_setnumeric (d, d_Adjust_Top, top);
+        break;
+      }
+
+      if (icon != d_Adjust_Top)
+        dbox_setnumeric (d, d_Adjust_Top, top);
+      if (icon != d_Adjust_Bottom)
+        dbox_setnumeric (d, d_Adjust_Bottom, bottom);
+      if (icon != d_Adjust_Left)
+        dbox_setnumeric (d, d_Adjust_Left, left);
+      if (icon != d_Adjust_Right)
+        dbox_setnumeric (d, d_Adjust_Right, right);
+      if (icon != d_Adjust_Cols)
+        dbox_setnumeric (d, d_Adjust_Cols, newcols);
+      if (icon != d_Adjust_Rows)
+        dbox_setnumeric (d, d_Adjust_Rows, newrows);
+
+    break;
+  }
+  /* RISCOS_Lib still needs to handle the message */
+  return(FALSE);
+}
+
+void menus_sprite_handler (void *handle, char *hit)
+
+{ main_window *window = (main_window *) handle;
+  main_sprite_window *sprw = &window->data->sprite;
+  main_sprite *sprite = sprw->sprite;
+
+  ftracef0 ("menus_sprite_handler\n");
+  ftracef5 ("menu hit is {%d, %d, %d, %d, %d}\n",
+      hit [0], hit [1], hit [2], hit [3], hit [4]);
+
+  /*First make sure any outstanding layer merge was handled*/
+  tools_merge_layer_onto (window->data->sprite.sprite);
+
+  switch (hit [0])
+  { case s_Misc:
+      switch (hit [1])
+      { case s_Misc_AppInfo:
+          if (hit [2]) show_info_box ();
+        break;
+
+        case s_Misc_SpriteInfo:
+          if (hit [2]) display_sprite_info (sprite);
+        break;
+
+        case s_Misc_NewView:
+          sprwindow_new (sprite);
+        break;
+
+        case s_Misc_Print:
+          /*FIX G-RO-9923 JRC 15 Oct '91 Print on choosing Print.*/
+          menus_print_sprite (sprite, /*ask?*/ hit [2] != 0);
+        break;
+      }
+    break;
+
+    case s_Save:
+      switch (hit [1])
+      { case s_Save_Sprite:
+          ftracef1 ("Sprite save: hit [2] == %d\n", hit [2]);
+          if (hit [2] != 0)
+          { /*If there is only one sprite, offer to save the whole sprite
+              file. This acts as a counterpart to the code that opens a
+              sprite window if there is only one sprite. J R C 7th Feb 1995*/
+            if (sprite->file->spritearea->number == 1)
+              menus_save_file (sprite->file->window, TRUE);
+            else
+              menus_save_sprite (sprite);
+          }
+        break;
+
+        case s_Save_PNG:
+          if (hit [2] != 0) export_start (sprite, FileType_PNG);
+        break;
+
+        case s_Save_JPEG:
+          if (hit [2] != 0) export_start (sprite, FileType_JPEG);
+        break;
+
+        case s_Save_Palette:
+          if (hit [2] != 0)
+          { int size = psprite_palsize (sprite);
+
+            ftracef0 ("Sprite palette save\n");
+            myxfersend (FileType_Palette, msgs_lookup ("PntG5"), size,
+                &save_sprite_palette, &buffer_sprite_palette, 0, sprite);
+          }
+        break;
+      }
+    break;
+
+    case s_Paint:
+      switch (hit [1])
+      { case s_Paint_ECF: /*rewritten. JRC 4 June 1991*/
+        { BOOL open;
+          dbox d;
+
+          ftracef0 ("Select E C F\n");
+          if ((d = dbox_new ("selectECF")) != NULL)
+          { dbox_setfield (d, d_ECF_Sprite, "");
+
+            dbox_raw_eventhandler (d, &help_dboxrawevents,
+                (void *) "PntHC");
+            dbox_show (d);
+
+            open = TRUE;
+            while (open)
+            { wimp_i i = dbox_fillin (d);
+
+              ftracef1 ("Got event on icon %d\n", i);
+
+              switch (i)
+              { case d_ECF_Ok:
+                { char name [13];
+                  int ECF, i;
+                  main_sprite *ECFsprite;
+
+                  /*Get the selected icon number (0, ..., 3).*/
+                  ECF = -1;
+                  for (i = 0; i < 4; i++)
+                    if (dbox_getnumeric (d, d_ECF_1 + i))
+                    { ECF = i;
+                      break;
+                    }
+
+                  if (ECF != -1)
+                  { dbox_getfield (d, d_ECF_Sprite, name, 13);
+
+                    if ((ECFsprite = psprite_find (name, "PntE5b")) != NULL)
+                      psprite_setup_ecf (sprite, ECF, ECFsprite);
+                  }
+
+                  open = dbox_persist ();
+                }
+                break;
+
+                case dbox_CLOSE:
+                  open = FALSE;
+                break;
+              }
+            }
+            dbox_dispose (&d);
+          }
+        }
+        break;
+
+        case s_Paint_Sel_Col:
+          menus_select_colour (window, FALSE, FALSE);
+        break;
+
+        case s_Paint_Show_Col:
+          ftracef0 ("show colour menu\n");
+          colours_create_window (sprite, FALSE);
+          main_current_options.colours.show_colours = TRUE;
+        break;
+
+        case s_Paint_Show_Tool:
+          ftracef0 ("show tool menu\n");
+          toolwindow_display (/*at pointer?*/ TRUE);
+          main_current_options.tools.show_tools = TRUE;
+        break;
+
+        case s_Paint_Edit_Pal:
+          if (hit [2])
+          { wimp_eventstr ev = { wimp_ENULL }, *ev2;
+            int mx = 0, my = 0;
+            BOOL couldRemap = (sprite->artistfriendlyopts & artist_friendly_view
+              & artist_remap_palette) && colours_is_artist_friendly (sprite);
+
+            if (couldRemap)
+            { int dboxResult;
+              BOOL inMenu = FALSE;
+              /* Save coordinates from the menu. We'll need them for dboxtcol */
+              ev2 = wimpt_last_event ();
+              if (ev2 && (ev2->e == wimp_EMENU || ev2->e == wimp_ESEND) &&
+                ev2->data.msg.hdr.action == wimp_MMENUWARN)
+              { inMenu = TRUE;
+                mx = ev2->data.msg.data.menuwarn.x;
+                my = ev2->data.msg.data.menuwarn.y;
+              }
+              else
+              { wimp_mousestr mouse_str;
+                wimpt_noerr (wimp_get_point_info (&mouse_str));
+                mx = mouse_str.x;
+                my = mouse_str.y;
+              }
+              /* dbox can be disabled in the options. If so, the remap
+               will just go ahead without asking. */
+              if (sprite->artistfriendlyopts & artist_ask_to_remap)
+              { dboxResult = remap_to_artistfriendly_dbox ();
+
+                if (dboxResult == 0) /* if Rearrange */
+                { colours_remap_to_artist_friendly (sprite);
+                  /* Don't forget to remap the currently selected colours too! */
+                  sprite->gcol.colour = colours_get_artist_friendly_index (sprite->gcol.colour, sprite);
+                  sprite->gcol2.colour = colours_get_artist_friendly_index (sprite->gcol2.colour, sprite);
+                  sprite_palette_has_changed (sprite);
+                }
+                if (dboxResult == -1)
+                { /* They cancelled the operation. We'll just ask again next time */
+                  destroy_artistfriendly_dbox ();
+                  break;
+                }
+
+                sprite->artistfriendly = artist_unfriendly;
+
+                /* Hide this dialogue box but keep the menus open */
+                if ((sprite->artistfriendlyopts & artist_ask_to_remap) &&
+                    artistfriendly_dbox != NULL)
+                { int dboxhandle = dbox_syshandle (artistfriendly_dbox);
+                  if (dboxhandle != NULL)
+                    wimpt_noerr (wimp_close_wind (dbox_syshandle (artistfriendly_dbox)));
+                }
+
+                /*if (inMenu)*/
+                { /* Now we have to make dboxtcol think it was opened from the menu */
+                  ev.e = wimp_ESEND;
+                  ev.data.msg.hdr.action = wimp_MMENUWARN;
+                  ev.data.msg.data.menuwarn.x = mx;
+                  ev.data.msg.data.menuwarn.y = my;
+                  wimpt_fake_event (&ev);
+                  wimpt_poll ((wimp_emask)0, &ev);
+                }
+              }
+            }
+            else if (!sprite->artistfriendlyopts & artist_friendly_view)
+            { /* Make sure artist-friendly logic will be re-run if the
+              setting is later re-enabled */
+              sprite->artistfriendly = artist_unknown;
+            }
+
+            sprite_header *spr = psprite_address (sprite);
+            int colour = (&spr->mode + 1) [sprite->gcol.colour*2];
+            wimp_emask emask;
+
+            ftracef0 ("Edit colour\n");
+            /* Enable nulls, so slider drags work */
+            event_setmask ((wimp_emask) (((emask = event_getmask ()) & ~wimp_EMNULL)));
+
+            dboxtcol (&colour, /*allow transparent?*/ FALSE,
+                msgs_lookup ("PntW8"), &Apply_Colour, (void *) sprite);
+
+            event_setmask (emask);
+
+            destroy_artistfriendly_dbox ();
+          }
+        break;
+      }
+    break;
+
+    case s_Edit:
+    { sprite_area **sarea = &sprite->file->spritearea;
+      sprite_id sid;
+      char name [NAME_LIMIT + 1];
+      BOOL modified = TRUE;
+
+      sid.tag = sprite_id_name;
+      sid.s.name = COPY_N (name, psprite_address (sprite)->name, NAME_LIMIT);
+        /*doesn't flex*/
+
+      switch (hit [1])
+      { case s_Edit_FlipV:
+        case s_Edit_FlipH :
+          ftracef1 ("flip %c\n", hit [1] == s_Edit_FlipV ? 'x' : 'y');
+          wimpt_complain
+             ((hit [1] == s_Edit_FlipV? sprite_flip_x: sprite_flip_y)
+             (*sarea, &sid));
+        break;
+
+        case s_Edit_Rotate:
+          ftracef0 ("Rotate\n");
+          if (hit [2])
+          { int angle, n;
+
+            if (sscanf (rotatebuffer, "%d%n", &angle, &n) == 1 &&
+                n == strlen (rotatebuffer))
+              psprite_rotate (sprite, angle);
+          }
+        break;
+
+        case s_Edit_Scale_X:
+          ftracef0 ("Scale X\n");
+          if (hit [2])
+          { double factor = 1.0;
+            int n;
+
+            ftracef1 ("menus_sprite_handler: scalebuffer: %s\n",
+                scalebuffer);
+            if (sscanf (scalebuffer, "%lg%n", &factor, &n) == 1 &&
+                n == strlen (scalebuffer) &&
+                factor > 0.0)
+              psprite_scale (sprite, factor, 1.0);
+          }
+        break;
+
+        case s_Edit_Scale_Y:
+          ftracef0 ("Scale Y\n");
+          if (hit [2])
+          { double factor = 1.0;
+            int n;
+
+            ftracef1 ("menus_sprite_handler: scalebuffer: %s\n",
+                scalebuffer);
+            if (sscanf (scalebuffer, "%lg%n", &factor, &n) == 1 &&
+                n == strlen (scalebuffer) &&
+                factor > 0.0)
+              psprite_scale (sprite, 1.0, factor);
+          }
+        break;
+
+        case s_Edit_Shear:
+          ftracef0 ("Shear\n");
+          if (hit [2])
+          { double factor = 1.0;
+            int n;
+
+            if (sscanf (shearbuffer, "%lg%n", &factor, &n) == 1 &&
+                n == strlen (shearbuffer))
+              psprite_shear (sprite, factor);
+          }
+        break;
+
+        case s_Edit_Size:
+          modified = menus_adjust_size (sprite);
+        break;
+
+        case s_Edit_InsCol:
+        case s_Edit_InsRow:
+        case s_Edit_DelCol:
+        case s_Edit_DelRow:
+        { BOOL col = hit [1] == s_Edit_InsCol || hit [1] == s_Edit_DelCol,
+            insert = hit [1] == s_Edit_InsCol || hit [1] == s_Edit_InsRow;
+          modified = menus_insdel (window, col, insert, hit [2], FALSE);
+        }
+        break;
+
+        case s_Edit_DPI:
+          modified = menus_edit_dpi (sprite, &sid);
+        break;
+
+        case s_Edit_Mask:
+        { char *msg = NULL;
+          os_error *error;
+
+          if (hit[2])
+          { int bgnd, bytesneeded;
+            sprite_header *header = psprite_address (sprite);
+            transparency_type current = psprite_transparency_type (sprite);
+            transparency_type choice = (transparency_type)(hit[2] - 1);
+
+            if (current == choice)
+            { modified = FALSE;
+              break;
+            }
+            ftracef2 ("mask type changing from %d to %d\n", current, choice);
+
+            /* Stop brush */
+            if (sprite == tools_brushsprite_ptr && toolwindow_current_tool == &tools_brushpaint)
+              toolwindow_stop_all_tools ();
+
+            if (choice == transparency_type_none)
+            { /* Removing a mask/alpha/alpha channel */
+              error = sprite_remove_mask (*sarea, &sid);
+              if (error != NULL)
+              { msg = error->errmess;
+                goto masked;
+              }
+
+              if (header->mode & 0x80000000)
+              { /* Unset wide mask flag as it can cause maskless sprites not to render correctly */
+                header->mode &= ~0x80000000;
+              }
+              if ((bbc_modevar (header->mode, bbc_ModeFlags) & 0xB000) == 0x8000)
+              { /* RGB family with alpha channel has no "mask" to remove, this requires a mode word change */
+                header->mode &= ~0x8000;
+              }
+
+              /* Ensure opaque colour selection */
+              sprite->gcol.alpha = 255;
+              sprite->gcol2.alpha = 255;
+            }
+            else if (current == transparency_type_none && choice == transparency_type_onoffmask)
+            { /* Adding a mask */
+              bytesneeded = psprite_address (sprite)->next; /* Allow for mask being as large as the sprite */
+              if (!menus_ensure_size (sarea, bytesneeded))
+              { msg = msgs_lookup ("PntEG");
+                goto masked;
+              }
+              error = sprite_create_mask(*sarea, &sid);
+              if (error != NULL)
+              { msg = error->errmess;
+                goto masked;
+              }
+            }
+            else
+            { int op, try;
+              unsigned int newmode;
+
+              /* Addition or format change involving alpha or alpha channel */
+              if ((unsigned int) header->mode < 256)
+              { /* Numbered modes not allowed by CreateRemoveAlpha */
+                sprwindow_remove_wastage (sprite);
+                newmode = ((180 >> bbc_modevar (header->mode, bbc_XEigFactor)) << 1) |
+                          ((180 >> bbc_modevar (header->mode, bbc_YEigFactor)) << 14) |
+                          ((1 + bbc_modevar (header->mode, bbc_Log2BPP)) << 27) | 1;
+                if (current == transparency_type_onoffmask)
+                { void *copymask, *realmask;
+                  int slb_bpp = bbc_modevar (header->mode, bbc_Log2BPP), smasksz;
+
+                  /* Hmph, also need to reduce mask to 1bpp */
+                  ftracef1 ("reducing mask to 1bpp from %dbpp\n", 1<<slb_bpp);
+                  smasksz = 4 * (header->width + 1) * (header->height + 1);
+                  if (!flex_alloc ((flex_ptr) &copymask, smasksz))
+                  { msg = msgs_lookup ("PntEG");
+                    goto masked;
+                  }
+                  header = psprite_address (sprite); /* May have flex'd */
+                  realmask = (char *) header + header->mask;
+                  memcpy (copymask, realmask, smasksz);
+
+                  /* Delete old mask, create replacement and fill it */
+                  sprite_remove_mask (*sarea, &sid);
+                  header->mode = newmode;
+                  sprite_create_mask (*sarea, &sid);
+                  psprite_resample_onoffmask (realmask, 1 /* bpp */,
+                                              copymask, 1 << slb_bpp, header);
+                  flex_free ((flex_ptr) &copymask);
+                }
+                else
+                { /* No mask to worry about */
+                  header->mode = newmode;
+                }
+              }
+              for (try = 0; try <= 1; try++)
+              { static_assert(transparency_type_alphamask == 2, "Op wrong");
+                static_assert(transparency_type_alphachannel == 3, "Op wrong");
+                op = (choice == transparency_type_onoffmask) ? 0x80 : (choice << 30);
+                ftracef3 ("alpha op %x on '%s', try %d\n", op, name, try);
+                error = os_swix4r (OS_SpriteOp, SpriteReason_CreateRemoveAlpha | 0x100, *sarea, name, op,
+                                                NULL, NULL, NULL, &bytesneeded);
+                if (error != NULL)
+                { if (error->errnum == ErrorNumber_Sprite_NotEnoughRoom)
+                  { if (!menus_ensure_size (sarea, bytesneeded))
+                    { msg = msgs_lookup ("PntEG");
+                      goto masked;
+                    }
+                    continue; /* Retry with more memory */
+                  }
+                  msg = error->errmess;
+                  goto masked;
+                }
+                break; /* No error, no retry */
+              }
+            }
+
+            /* Restart brush */
+            if (sprite == tools_brushsprite_ptr && toolwindow_current_tool == &tools_brushpaint)
+              menus_restart_tool ();
+
+            menus_ensure_size (sarea, 0);
+            sprwindow_invalidate (sprite);
+
+            /* Fix up colour window dialogue */
+            if (sprite->colourdialogue == 0) colours_set_extent (sprite);
+
+            /* Fix up fore/background colour picker dialogues */
+            for (bgnd = 0; bgnd <= 1; bgnd++)
+            { if ((!bgnd && sprite->colourdialogue) || (bgnd && sprite->bgcolourdialogue))
+              { colourpicker_dialogue settings;
+                colourpicker_d dialogue = bgnd ? sprite->bgcolourdialogue
+                                               : sprite->colourdialogue;
+                if (choice == transparency_type_none)
+                { /* Unset transparent if it is currently selected */
+                  settings.flags = 0;
+                  ftracef0 ("ColourPicker_UpdateDialogue: unsetting 'transparent'\n");
+                  error = os_swix3 (ColourPicker_UpdateDialogue, colourpicker_UPDATE_TRANSPARENT,
+                                    dialogue, &settings);
+                  if (error != NULL)
+                  { msg = error->errmess;
+                    goto masked;
+                  }
+                }
+
+                /* Offering transparent if there's mask/alpha/alpha channel */
+                settings.flags = (choice == transparency_type_none) ? 0
+                                                                    : colourpicker_DIALOGUE_OFFERS_TRANSPARENT;
+                ftracef1 ("ColourPicker_UpdateDialogue: offers transparent = %d\n", settings.flags);
+                error = os_swix3 (ColourPicker_UpdateDialogue, colourpicker_UPDATE_OFFERS_TRANSPARENT,
+                                  dialogue, &settings);
+                if (error != NULL)
+                { msg = error->errmess;
+                  goto masked;
+                }
+              }
+            }
+
+            /* Reflect changes in the colour panel swatch */
+            colourpanel_redraw (window);
+          }
+masked:
+          if (msg != NULL) werr (FALSE, msg);
+        }
+        break;
+
+        case s_Edit_Palette:
+          if (hit[2])
+          { sprite_header *header = psprite_address (sprite);
+            int lb_bpp = bbc_modevar (header->mode, bbc_Log2BPP);
+            int i, entries = ENTRIES (lb_bpp);
+            int *palette;
+            palette_type current = psprite_palette_type (sprite);
+            palette_type choice = (palette_type)(hit[2] - 1);
+
+            if (current == choice)
+            { modified = FALSE;
+              break;
+            }
+            ftracef2 ("palette type changing from %d to %d\n", current, choice);
+
+            if (lb_bpp == 3)
+            { /* Special handling of 8bpp sprites */
+              if (current == palette_type_colour && choice == palette_type_none)
+              { /* When deleting the palette, see if it was previously remapped
+                 * to the artist-friendly layout. If that's detected, the pixel
+                 * remap will be reversed to the default colours.
+                 */
+                if (colours_try_remap_from_artist_friendly (sprite))
+                { sprite->gcol.colour = colours_get_artist_friendly_colour (sprite->gcol.colour, NULL);
+                  sprite->gcol2.colour = colours_get_artist_friendly_colour (sprite->gcol2.colour, NULL);
+                }
+              }
+              if (choice == palette_type_64fixed) entries = 64;
+              else if (choice == palette_type_16fixed) entries = 16;
+              else entries = -256; /* Full colour or greys */
+
+              /* Be careful with 256 grey -> 256 colour as CreateRemovePalette skips writing
+               * out the palette entries since it sees a 256 entry palette already exists.
+               * Delete it to get the defaults (256 colour -> 256 grey is handled below manually).
+               */
+              if (current == palette_type_greyscale && choice == palette_type_colour)
+                menus_set_palette (sprite, entries, NULL);
+            }
+            if (choice == palette_type_none)
+              palette = NULL;
+            else
+              palette = psprite_std_palettes [sprite->file->use_current_palette ? 0 : 1][lb_bpp];
+
+            /* Leave the image data alone, this might result in a strangely coloured outcome! */
+            menus_set_palette (sprite, entries, palette);
+
+            /* Go back and replace the colour palette if greys chosen */
+            if (choice == palette_type_greyscale)
+            { static const int N [] = { 0xFFFFFF, 0x555555, 0x111111, 0x010101 };
+
+              header = psprite_address (sprite);
+              entries = 1 << (1 << lb_bpp);
+              palette = (int *) (&header->mode + 1);
+              ftracef2 ("greying %d entry palette at %p", entries, (void *) palette);
+              for (i = 0; i < entries; i++)
+                palette [2*i] = palette [2*i + 1] = i*N [lb_bpp] << 8;
+            }
+            sprite_palette_has_changed (sprite);
+          }
+        break;
+      }
+      if (modified) psprite_recalculate_offsets (sprite->file);
+      sprwindow_redisplay (sprite, NULL);
+    }
+    break;
+
+    case s_Zoom:
+      if (hit [1])
+        magnify_select (&sprw->blobsize.scale_xmul,
+            &sprw->blobsize.scale_xdiv, MAXZOOMFACTOR, MAXZOOMFACTOR, menus_showmag, sprw);
+    break;
+
+    case s_Grid:
+      switch (hit [1])
+      { case 0:
+          /*Toggle grid*/
+          sprw->gridcol =
+              sprw->gridcol == 255? main_current_options.grid.colour: 255;
+
+          main_current_options.grid.show = sprw->gridcol != 255;
+        break;
+
+        default:
+          sprw->gridcol = hit [1] - 1;
+
+          main_current_options.grid.show = TRUE;
+          main_current_options.grid.colour = hit [1] - 1;
+        break;
+      }
+      main_force_redraw (window->handle);
+    break;
+  }
+}
+
+void menus_transform_dbox (main_window *window, int which)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int number = 0;
+  double factor = 0.0;
+  char buffer[13];
+  dbox transform_d = 0;
+
+  ftracef0 ("menus_transform_dbox\n");
+
+  wimp_mousestr mouse;
+
+  wimpt_noerr (wimp_get_point_info (&mouse));
+  ftracef2 ("x %d, y %d\n", mouse.x, mouse.y);
+
+  wimp_i i;
+  char *initvalue = NULL;
+
+  switch (which)
+  {
+    case s_Edit_Rotate:
+      transform_d = dbox_new ("rotate");
+      initvalue = rotatebuffer;
+      break;
+    case s_Edit_Scale_X:
+      transform_d = dbox_new ("scalex");
+      initvalue = scalebuffer;
+      break;
+    case s_Edit_Scale_Y:
+      transform_d = dbox_new ("scaley");
+      initvalue = scalebuffer;
+      break;
+    case s_Edit_Shear:
+      transform_d = dbox_new ("shear");
+      initvalue = shearbuffer;
+      break;
+  }
+
+  if (transform_d == 0)
+    return;
+  ftracef0 ("dbox made\n");
+
+  /* If last event was a keypress, RISCOS_Lib will open the dbox near */
+  /* the caret, which we need to reposition on the sprite window.     */
+  nudge_dbox_caret_position (&mouse);
+
+  dbox_setfield (transform_d, 0, initvalue);
+  dbox_show (transform_d);
+  i = dbox_fillin (transform_d);
+
+  switch (which)
+  {
+    case s_Edit_Rotate:
+      number = dbox_getnumeric (transform_d, 0);
+    break;
+
+    default:
+    { int n;
+      /* Parse double */
+      dbox_getfield(transform_d, 0, buffer, 13);
+      if (!(sscanf (buffer, "%lg%n", &factor, &n) == 1 &&
+        n == strlen (buffer) &&
+        factor > 0.0))
+        factor = 0.0;
+      break;
+    }
+  }
+
+  if (i == dbox_CLOSE)
+  { ftracef0 ("Close menu event\n");
+    number = 0;
+    factor = 0.0;
+  }
+  dbox_dispose (&transform_d);
+
+  ftracef1 ("number %d\n", number);
+
+  switch (which)
+  {
+    case s_Edit_Rotate:
+      sprintf (rotatebuffer, "%d", number);
+      psprite_rotate (sprite, number);
+      break;
+    case s_Edit_Scale_X:
+      if (factor > 0.0)
+      { strcpy (scalebuffer, buffer);
+        psprite_scale (sprite, factor, 1.0);
+      }
+      else strcpy (scalebuffer, "0");
+      break;
+    case s_Edit_Scale_Y:
+      if (factor > 0.0)
+      { strcpy (scalebuffer, buffer);
+        psprite_scale (sprite, 1.0, factor);
+      }
+      else strcpy (scalebuffer, "0");
+      break;
+    case s_Edit_Shear:
+      if (factor > 0.0)
+      { strcpy (shearbuffer, buffer);
+        psprite_shear (sprite, factor);
+      }
+      else strcpy (shearbuffer, "0");
+      break;
+  }
+}
+
+BOOL menus_adjust_size (main_sprite *sprite)
+
+{ BOOL open, modified = FALSE;
+  int rows, columns, old_width, old_height;
+  int left, right, top, bottom;
+  psprite_info info;
+  dbox d;
+  sprite_area **sarea = &sprite->file->spritearea;
+  sprite_id sid;
+  sid.tag = sprite_id_name;
+  char name [NAME_LIMIT + 1];
+  sid.s.name = COPY_N (name, psprite_address (sprite)->name, NAME_LIMIT);
+    /*doesn't flex*/
+
+  ftracef0 ("adjust size");
+  if ((d = dbox_new ("spritesize"))!=0)
+  { psprite_read_full_info (sprite, &info);
+    old_height = rows = info.height;
+    old_width = columns = info.width;
+
+    dbox_setnumeric (d, d_Adjust_Cols, columns);
+    dbox_setnumeric (d, d_Adjust_Rows, rows);
+    dbox_setnumeric (d, d_Adjust_Left, 0);
+    dbox_setnumeric (d, d_Adjust_Right, 0);
+    dbox_setnumeric (d, d_Adjust_Top, 0);
+    dbox_setnumeric (d, d_Adjust_Bottom, 0);
+
+    dbox_raw_eventhandler (d, &adjust_size_dboxrawevents, (void *) sprite);
+    dbox_show (d);
+
+    open = TRUE;
+    while (open)
+    { int new_width, new_height;
+      wimp_i i = dbox_fillin (d);
+      wimp_mousestr mouse_str;
+      BOOL adjust;
+
+      ftracef1 ("Got event on icon %d\n", i);
+
+      columns = dbox_getnumeric (d, d_Adjust_Cols);
+      rows    = dbox_getnumeric (d, d_Adjust_Rows);
+      top = dbox_getnumeric (d, d_Adjust_Top);
+      right = dbox_getnumeric (d, d_Adjust_Right);
+      left = dbox_getnumeric (d, d_Adjust_Left);
+      bottom = dbox_getnumeric (d, d_Adjust_Bottom);
+      wimpt_noerr (wimp_get_point_info (&mouse_str));
+      adjust = (mouse_str.bbits & wimp_BRIGHT) != 0;
+
+      switch (i)
+      { case d_Adjust_Ok:
+        { int width_by, height_by, size_by, room;
+
+          if (rows == 0 || columns == 0)
+          {
+            werr (FALSE, msgs_lookup ("PntEA"));
+            open = dbox_persist ();
+            break;
+          }
+
+          sprwindow_remove_wastage (sprite);
+
+          /*Adjust the smaller dimension first: then you don't run
+            out of store in an intermediate step.*/
+
+          old_width = info.width;
+          old_height = info.height;
+
+          /*Check for integer overflow*/
+          room = INT_MAX - old_width;
+          if (left + right > room || room < 0 || old_width < 0)
+          { werr (FALSE, msgs_lookup ("PntEN"));
+            open = dbox_persist ();
+            break;
+          }
+          room = INT_MAX - old_height;
+          if (top + bottom > room || room < 0 || old_height < 0)
+          { werr (FALSE, msgs_lookup ("PntEN"));
+            open = dbox_persist ();
+            break;
+          }
+
+          /*If the parameters supplied are somehow inconsistent,
+             width and height and bottom and left will override
+             top and right.*/
+          if (old_width + left + right != columns)
+          { right = columns - old_width - left;
+            dbox_setnumeric (d, d_Adjust_Right, right);
+          }
+          if (old_height + top + bottom != rows)
+          { top = rows - old_height - bottom;
+            dbox_setnumeric (d, d_Adjust_Top, top);
+          }
+
+          height_by = rows - old_height;
+          width_by  = columns - old_width;
+          size_by   = psprite_size (columns, rows, info.mode,
+              info.mask, 0) - psprite_size (old_width,
+              old_height, info.mode, info.mask, 0);
+
+          /*Make sure there's enough space for the new sprite.*/
+          if (!menus_ensure_size (sarea, size_by))
+          {
+            werr (FALSE, msgs_lookup ("PntEG"));
+            open = dbox_persist ();
+            break;
+          }
+
+          /*With four edges to adjust, there are 24 possible
+            orders in which we can perform the adjustments,
+            so we do an insertion sort rather than hard-coding
+            every permutation!*/
+          int edge_IDs[] = {ADJUST_TOP, ADJUST_RIGHT, ADJUST_BOTTOM, ADJUST_LEFT};
+          int edge_values[4];
+          edge_values[ADJUST_TOP] = top;
+          edge_values[ADJUST_RIGHT] = right;
+          edge_values[ADJUST_BOTTOM] = bottom;
+          edge_values[ADJUST_LEFT] = left;
+
+          for (int i = 1; i < 4; i++)
+          { int ei = edge_IDs[i];
+            int ev = edge_values[ei];
+            int j = i - 1;
+            for (; j >= 0 && edge_values[edge_IDs[j]] > ev; j--)
+            { edge_IDs[j + 1] = edge_IDs[j];
+            }
+            edge_IDs[j + 1] = ei;
+          }
+
+          /*Now we're ready to actually do the adjustments.*/
+          for (i = 0; i < 4; i++)
+          { switch (edge_IDs[i])
+            { case ADJUST_TOP:
+                ftracef1("adjust top: %d\n", top);
+                /*adjust no of rows at top*/
+                if (top != 0)
+                { Change_Size (sarea, &sid, sprite, top, 1,
+                      top > 0? old_height: rows - bottom);
+                  old_height += top;
+                }
+              break;
+
+              case ADJUST_RIGHT:
+                ftracef1("adjust right: %d\n", right);
+                /*adjust no of columns on right*/
+                if (right != 0)
+                { Change_Size (sarea, &sid, sprite, right, 0,
+                      right > 0? old_width: columns - left);
+                  old_width += right;
+                }
+              break;
+
+              case ADJUST_BOTTOM:
+                ftracef1("adjust bottom: %d\n", bottom);
+                /*adjust no of rows at bottom*/
+                if (bottom != 0)
+                { Change_Size (sarea, &sid, sprite, bottom, 1,
+                      0);
+                  old_height += bottom;
+                }
+              break;
+
+              case ADJUST_LEFT:
+                ftracef1("adjust left: %d\n", left);
+                /*adjust no of columns on left*/
+                if (left != 0)
+                { Change_Size (sarea, &sid, sprite, left, 0,
+                      0);
+                  old_width += left;
+                }
+              break;
+            }
+          }
+
+          menus_ensure_size (sarea, 0);
+          psprite_recalculate_offsets (sprite->file);
+          sprwindow_redisplay (sprite, NULL);
+          modified = TRUE;
+        }
+        /*fall through*/
+
+        case d_Adjust_Cancel:
+          open = dbox_persist ();
+          if (open)
+          { /* Reset values after right click */
+            psprite_read_full_info (sprite, &info);
+            old_height = rows = info.height;
+            old_width = columns = info.width;
+
+            dbox_setnumeric (d, d_Adjust_Cols, columns);
+            dbox_setnumeric (d, d_Adjust_Rows, rows);
+            dbox_setnumeric (d, d_Adjust_Left, 0);
+            dbox_setnumeric (d, d_Adjust_Right, 0);
+            dbox_setnumeric (d, d_Adjust_Top, 0);
+            dbox_setnumeric (d, d_Adjust_Bottom, 0);
+          }
+        break;
+
+        case d_Adjust_RowDown:
+          adjust = !adjust;
+        /*fall through*/
+
+        case d_Adjust_RowUp:
+          if (adjust)
+          { if (rows > 1 && top > -999999999)
+            { dbox_setnumeric (d, d_Adjust_Rows, rows - 1);
+              dbox_setnumeric (d, d_Adjust_Top, top - 1);
+            }
+          }
+          else if (rows < 999999999 && top < 999999999)
+          { dbox_setnumeric (d, d_Adjust_Rows, rows + 1);
+            dbox_setnumeric (d, d_Adjust_Top, top + 1);
+          }
+        break;
+
+        case d_Adjust_ColDown:
+          adjust = !adjust;
+        /*fall through*/
+
+        case d_Adjust_ColUp:
+          if (adjust)
+          { if (columns > 1 && right > -999999999)
+            { dbox_setnumeric (d, d_Adjust_Cols, columns - 1);
+              dbox_setnumeric (d, d_Adjust_Right, right - 1);
+            }
+          }
+          else if (columns < 999999999 && right < 999999999)
+          { dbox_setnumeric (d, d_Adjust_Cols, columns + 1);
+            dbox_setnumeric (d, d_Adjust_Right, right + 1);
+          }
+        break;
+
+        case d_Adjust_TopDown:
+          adjust = !adjust;
+        /*fall through*/
+
+        case d_Adjust_TopUp:
+          if (adjust)
+          { if (rows > 1 && top > -999999999)
+            { dbox_setnumeric (d, d_Adjust_Top, top - 1);
+              new_height = top + bottom + old_height - 1;
+              if (new_height <= 999999999 && new_height == rows - 1 && new_height > 0)
+                dbox_setnumeric (d, d_Adjust_Rows, new_height);
+            }
+          }
+          else if (rows < 999999999 && top < 999999999)
+          { dbox_setnumeric (d, d_Adjust_Top, top + 1);
+            new_height = top + bottom + old_height + 1;
+            if (new_height <= 999999999 && new_height == rows + 1 && new_height > 0)
+              dbox_setnumeric (d, d_Adjust_Rows, new_height);
+          }
+        break;
+
+        case d_Adjust_LeftRight:
+          adjust = !adjust;
+        /*fall through*/
+
+        case d_Adjust_LeftLeft:
+          if (adjust)
+          { if (columns > 1 && left > -999999999)
+            { dbox_setnumeric (d, d_Adjust_Left, left - 1);
+              new_width = left + right + old_width - 1;
+              if (new_width <= 999999999 && new_width == columns - 1 && new_width > 0)
+                dbox_setnumeric (d, d_Adjust_Cols, new_width);
+            }
+          }
+          else if (columns < 999999999 && left < 999999999)
+          { dbox_setnumeric (d, d_Adjust_Left, left + 1);
+            new_width = left + right + old_width + 1;
+            if (new_width <= 999999999 && new_width == columns + 1 && new_width > 0)
+              dbox_setnumeric (d, d_Adjust_Cols, new_width);
+          }
+        break;
+
+        case d_Adjust_RightLeft:
+          adjust = !adjust;
+        /*fall through*/
+
+        case d_Adjust_RightRight:
+          if (adjust)
+          { if (columns > 1 && right > -999999999)
+            { dbox_setnumeric (d, d_Adjust_Right, right - 1);
+              new_width = left + right + old_width - 1;
+              if (new_width <= 999999999 && new_width == columns - 1 && new_width > 0)
+                dbox_setnumeric (d, d_Adjust_Cols, new_width);
+            }
+          }
+          else if (columns < 999999999 && right < 999999999)
+          { dbox_setnumeric (d, d_Adjust_Right, right + 1);
+            new_width = left + right + old_width + 1;
+            if (new_width <= 999999999 && new_width == columns + 1 && new_width > 0)
+              dbox_setnumeric (d, d_Adjust_Cols, new_width);
+          }
+        break;
+
+        case d_Adjust_BottomUp:
+          adjust = !adjust;
+        /*fall through*/
+
+        case d_Adjust_BottomDown:
+          if (adjust)
+          { if (rows > 1 && bottom > -999999999)
+            { dbox_setnumeric (d, d_Adjust_Bottom, bottom - 1);
+              new_height = top + bottom + old_height - 1;
+              if (new_height <= 999999999 && new_height == rows - 1 && new_height > 0)
+                dbox_setnumeric (d, d_Adjust_Rows, new_height);
+            }
+          }
+          else if (rows < 999999999 && bottom < 999999999)
+          {
+            dbox_setnumeric (d, d_Adjust_Bottom, bottom + 1);
+            new_height = top + bottom + old_height + 1;
+            if (new_height <= 999999999 && new_height == rows + 1 && new_height > 0)
+              dbox_setnumeric (d, d_Adjust_Rows, new_height);
+          }
+        break;
+
+        case dbox_CLOSE:
+          open = FALSE;
+        break;
+      }
+    }
+    dbox_dispose (&d);
+  }
+  return modified;
+}
+
+static void print_setcorner (dbox d)
+
+{ char realbuf [100];
+
+  ftracef0 ("print_setcorner\n");
+  main_set_printer_data (); /*Update menus_print_where if pagesize changed*/
+  sprintf (realbuf, "%.2f", menus_print_where.dx/print_scalefactor);
+  dbox_setfield (d, d_Print_XCorner, realbuf);
+  sprintf (realbuf, "%.2f", menus_print_where.dy/print_scalefactor);
+  dbox_setfield (d, d_Print_YCorner, realbuf);
+}
+
+static void print_readcorner (dbox d)
+
+{ double t, max;
+  char realbuf [100];
+  int n;
+
+  ftracef0 ("print_readcorner\n");
+  max = 0x7FFFFFFF / print_scalefactor;
+
+  dbox_getfield (d, d_Print_XCorner, realbuf, 100);
+  ftracef2 ("readcorner x '%s', %g\n", realbuf, print_scalefactor);
+  if (sscanf (realbuf, "%lf%n", &t, &n) == 1 &&
+      n == strlen (realbuf))
+  { if (t>max) t = max;
+    if (t<-max) t = -max;
+    menus_print_where.dx = (int) (t*print_scalefactor);
+  }
+
+  dbox_getfield (d, d_Print_YCorner, realbuf, 100);
+  ftracef2 ("readcorner x '%s', %g\n", realbuf, print_scalefactor);
+  if (sscanf (realbuf, "%lf%n", &t, &n) == 1 &&
+      n == strlen (realbuf))
+  { if (t>max) t = max;
+    if (t<-max) t = -max;
+    menus_print_where.dy = (int) (t*print_scalefactor);
+  }
+
+  ftracef2 ("read corner %d %d\n",
+      menus_print_where.dx, menus_print_where.dy);
+}
+
+
+/**********************************************
+ * Print Sprite DBox stuff                    *
+ **********************************************/
+
+/*FIX G-RO-7139 JRC 17 Oct '91 menus_do_print() split into two parts:
+  queue_print() displays the dialogue box (if necessary) and then queues the
+  file for later printing by calling xfersend_print(). menus_do_print() actually
+  prints the file using options saved at the end of the file.*/
+
+/*FIX G-RO-7139 JRC 17 Oct '91 New function queue_print() queues a file for
+  later printing.*/
+
+static int Do_Print(char *filename, void *handle)
+
+{ filename = filename; /*for Norcroft*/
+  return menus_do_print (handle)? xfersend_printPrinted: xfersend_printFailed;
+}
+
+static BOOL queue_print (dbox d, main_sprite *sprite)
+
+{ psprite_info info;
+
+  ftracef1 ("queue_print, sprite 1 called \"%.12s\"\n",
+      psprite_address (sprite)->name);
+
+  if (d != NULL)
+  { print_copies           = dbox_getnumeric (d, d_Print_Copies);
+    print_landscape        = dbox_getnumeric (d, d_Print_Landscape);
+    print_scale.scale_xmul = dbox_getnumeric (d, d_Print_XMul);
+    print_scale.scale_xdiv = dbox_getnumeric (d, d_Print_XDiv);
+    print_scale.scale_ymul = dbox_getnumeric (d, d_Print_YMul);
+    print_scale.scale_ydiv = dbox_getnumeric (d, d_Print_YDiv);
+    print_readcorner (d);
+  }
+
+  ftracef2 ("landscape: %s; unit: %s\n", WHETHER (print_landscape),
+      print_scalefactor == PRINT_INCHES_TO_72000? "inches": "cm");
+
+  psprite_read_full_info (sprite, &info);
+
+  if (!xfersend_print (FileType_Sprite, info.name, info.size,
+      /*saver*/ &save_sprite, /*sender - no point yet*/ NULL,
+      /*printer*/ &Do_Print, /*handle*/ sprite))
+    return FALSE;
+
+  return TRUE;
+}
+
+/*FIX G-RO-7139 JRC 17 Oct '91 New function menus_do_print() prints a given
+  file - called when the printer manager sends Message_PrintTypeOdd.*/
+
+BOOL menus_do_print (main_sprite *sprite)
+
+{ BOOL more, done_begin = FALSE, done_select_job = FALSE,
+    done_translate = FALSE;
+  print_box pbox;
+  print_transmatstr transform;
+  os_error *err;
+  int id, job = 0, oldjob;
+  print_pagesizestr psize;
+  psprite_info info;
+  print_infostr infostr;
+  print_box ssize;
+  main_ttab *old_ttab = sprite->transtab;
+  char *txt = NULL;
+  os_regset reg_set;
+
+  ftracef1 ("menus_do_print, sprite 1 called \"%.12s\"\n",
+      psprite_address (sprite)->name);
+
+  if (old_ttab->table != 0)
+    ftracef3 ("initially, table is '%.4s', 0x%X, '%.4s'\n",
+        (char *) &((int *) old_ttab->table) [0],
+        ((int *) old_ttab->table) [1],
+        (char *) &((int *) old_ttab->table) [2]);
+
+  if ((err = print_info (&infostr)) != NULL)
+  { txt = msgs_lookup ("PntE9");
+    goto finish;
+  }
+
+  if ((err = print_pagesize (&psize)) != NULL)
+  { txt = err->errmess;
+    goto finish;
+  }
+
+  if (print_landscape)
+  { transform.xx = 0;
+    transform.xy = 0x10000;
+    transform.yx = -0x10000;
+    transform.yy = 0; /* -90deg rotation, no scaling */
+  }
+  else
+  { transform.xx = 0x10000;
+    transform.xy = 0;
+    transform.yx = 0;
+    transform.yy = 0x10000; /* no rotation, no scaling */
+  }
+  ftracef2 ("landscape: %s; unit: %s\n", WHETHER (print_landscape),
+      print_scalefactor == PRINT_INCHES_TO_72000? "inches": "cm");
+
+  visdelay_begin ();
+  done_begin = TRUE;
+
+  /*Open file*/
+  reg_set.r [0] = 0x8C;
+  reg_set.r [1] = (int) "printer:";
+  if ((err = os_find (&reg_set)) != NULL)
+  { txt = err->errmess;
+    goto finish;
+  }
+  job = reg_set.r [0];
+
+  if (job == 0)
+  { /*In case the FileSwitch bug returns a 0 handle.*/
+    ftracef0 ("File 'printer:' not opened sucessfully\n");
+    txt = msgs_lookup ("PntWA");
+    goto finish;
+  }
+
+  if (print_scale.scale_xmul == 0) print_scale.scale_xmul = 1;
+  if (print_scale.scale_ymul == 0) print_scale.scale_ymul = 1;
+  if (print_scale.scale_xdiv == 0) print_scale.scale_xdiv = 1;
+  if (print_scale.scale_ydiv == 0) print_scale.scale_ydiv = 1;
+
+  psprite_read_full_info (sprite, &info);
+  ssize.x0 = 0;
+  ssize.x1 = info.width*sprite->mode.scale_xmul*print_scale.scale_xmul/
+      print_scale.scale_xdiv;
+  ssize.y0 = 0;
+  ssize.y1 = info.height*sprite->mode.scale_ymul*print_scale.scale_ymul/
+      print_scale.scale_ydiv; /* sprite size in OS units*/
+
+  if ((err = print_selectjob (job, NULL, &oldjob)) != NULL)
+  { txt = err->errmess;
+    goto finish;
+  }
+  done_select_job = TRUE;
+
+  if ((infostr.features & 1 << 29) != 0)
+  { ftracef0 ("printer driver supports PDriver_DeclareFont\n");
+    /*No fonts in use. This is a sprite editor!*/
+    if ((err = os_swix3 (PDriver_DeclareFont, 0, NULL, 0)) != NULL)
+    { txt = err->errmess;
+      goto finish;
+    }
+  }
+
+  if (print_landscape) menus_print_where.dx += ssize.y1*72000/180;
+
+  ftracef2 ("menus_print_where.dx = %d, menus_print_where.dy = %d\n",
+      menus_print_where.dx, menus_print_where.dy);
+  if ((err = print_giverectangle (1, &ssize, &transform, &menus_print_where,
+      -1)) != NULL)
+  { txt = err->errmess;
+    goto finish;
+  }
+
+  if (print_landscape) menus_print_where.dx -= ssize.y1*72000/180;
+
+  ftracef0 ("drawing page\n");
+  if ((err = print_drawpage (print_copies, 0, NULL, &pbox, &more, &id)) !=
+      NULL)
+  { txt = err->errmess;
+    goto finish;
+  }
+
+  /*Now generate translation table. Can't use psprite_ttab_for_sprite(),
+    because it might not call ColourTrans.*/
+  /*J R C 10th Jan 1994 It does now! So use it!!*/
+  /*J R C 28th Jan 1994 Now it doesn't again, we use the part of it that
+    does.*/
+  if ((sprite->transtab = psprite_ttab_new (sprite, -1, (int *) -1, 0, 0))
+      == NULL)
+  { txt = msgs_lookup ("PntEG");
+    goto finish;
+  }
+  done_translate = TRUE;
+
+  while (more)
+  { int ID;
+
+    if ((err = psprite_plot_scaled (0, 0, sprite, &print_scale, 0)) != NULL)
+    { txt = err->errmess;
+      goto finish;
+    }
+
+    if ((err = print_getrectangle (&pbox, &more, &ID)) != NULL)
+    { txt = err->errmess;
+      goto finish;
+    }
+  }
+
+finish:
+  if (done_translate)
+  { ftracef0 ("calling psprite_ttab_delete\n");
+    psprite_ttab_delete (sprite->transtab);
+  }
+  sprite->transtab = old_ttab;
+
+  if (done_select_job)
+  { os_error *err1;
+
+    ftracef1 ("calling %s\n", txt == NULL? "print_endjob": "print_abortjob");
+    err1 = txt == NULL? print_endjob (job): print_abortjob (job);
+    if (txt == NULL && err1 != NULL) txt = err1->errmess;
+
+    ftracef0 ("calling print_selectjob\n");
+    err1 = print_selectjob (oldjob, NULL, &oldjob);
+    if (txt == NULL && err1 != NULL) txt = err1->errmess;
+  }
+
+  if (job != 0)
+  { /*close the printer stream*/
+    os_error *err1;
+
+    reg_set.r [0] = 0;
+    reg_set.r [1] = job;
+    ftracef0 ("calling os_find\n");
+    err1 = os_find (&reg_set);
+    if (txt == NULL && err1 != NULL) txt = err1->errmess;
+  }
+
+  if (done_begin)
+  { ftracef0 ("calling visdelay_end\n");
+    visdelay_end ();
+  }
+
+  /* Now it's safe to generate the error at last! (if we've had one) */
+  if (txt != NULL)
+  { ftracef1 ("menus_do_print got error \"%s\"\n", txt);
+    werr (FALSE, txt);
+  }
+  else
+    ftracef0 ("menus_do_print got no error\n");
+
+  return txt == NULL;
+}
+
+static BOOL print_box_events (dbox d, void *event, void *h)
+
+{ wimp_mousestr m;
+
+  ftracef0 ("print_box_events\n");
+  h = h;
+  switch (((wimp_eventstr *) event)->e)
+  { case wimp_EBUT:
+      wimp_get_point_info (&m);
+      if (m.i == d_Print_Landscape || m.i == d_Print_Portrait ||
+          m.i == d_Print_Inches    || m.i == d_Print_Cm)
+      { int other =
+            m.i == d_Print_Landscape? d_Print_Portrait:
+            m.i == d_Print_Portrait?  d_Print_Landscape:
+            m.i == d_Print_Inches?    d_Print_Cm:    d_Print_Inches;
+        dbox_setnumeric (d, m.i,   1);
+        dbox_setnumeric (d, other, 0);
+
+        if (m.i == d_Print_Inches || m.i == d_Print_Cm)
+        { print_readcorner (d);
+          print_scalefactor =
+              m.i == d_Print_Inches? PRINT_INCHES_TO_72000: PRINT_CM_TO_72000;
+          print_setcorner (d);
+        }
+        else
+          print_landscape = m.i == d_Print_Landscape;
+
+        return TRUE;
+      }
+    break;
+
+    case wimp_ESEND:
+    case wimp_ESENDWANTACK:
+      if (((wimp_eventstr *) event)->data.msg.hdr.action ==
+          wimp_MHELPREQUEST)
+      { ftracef0 ("Help request for print window\n");
+        main_help_message ("PntHB", (wimp_eventstr *) event);
+        return TRUE;
+      }
+    break;
+  }
+
+  return FALSE;
+}
+
+void menus_print_sprite (main_sprite *sprite, BOOL ask)
+
+{ print_infostr infostr;
+  os_error  *noprinter;
+
+  ftracef0 ("menus_print_sprite\n");
+
+  noprinter = print_info (&infostr);
+  if (ask)
+  { dbox d;
+
+    if ((d = dbox_new ("Printing")) != 0)
+    { BOOL open;
+
+      dbox_setfield (d, d_Print_Printer,
+          noprinter? msgs_lookup ("PntW9"): infostr.description);
+      dbox_setnumeric (d, d_Print_Copies,    print_copies);
+      dbox_setnumeric (d, d_Print_Portrait, !print_landscape);
+      dbox_setnumeric (d, d_Print_Landscape, print_landscape);
+      dbox_setnumeric (d, d_Print_XMul,      print_scale.scale_xmul);
+      dbox_setnumeric (d, d_Print_XDiv,      print_scale.scale_xdiv);
+      dbox_setnumeric (d, d_Print_YMul,      print_scale.scale_ymul);
+      dbox_setnumeric (d, d_Print_YDiv,      print_scale.scale_ydiv);
+      dbox_setnumeric (d, d_Print_Inches,
+                      print_scalefactor == PRINT_INCHES_TO_72000);
+      dbox_setnumeric (d, d_Print_Cm,
+                      print_scalefactor == PRINT_CM_TO_72000);
+      print_setcorner (d);
+
+      dbox_raw_eventhandler (d, &print_box_events, (void *) sprite);
+      dbox_show (d);
+      open = TRUE;
+
+      while (open)
+      { wimp_i i = dbox_fillin (d);
+
+        switch (i)
+        { case d_Print_Print:
+            /*FIX G-RO-7139 JRC 17 Oct '91 Call queue_print() instead of
+               menus_do_print().*/
+            (void) queue_print (d, sprite);
+            open = dbox_persist ();
+          break;
+
+          case dbox_CLOSE:
+            open = FALSE;
+          break;
+        }
+      }
+      dbox_dispose (&d);
+    }
+  }
+  else
+    /*FIX G-RO-7139 JRC 17 Oct '91 Call queue_print() instead of
+      menus_do_print().*/
+    (void) queue_print (NULL, sprite);
+}
+
+void menus_hack_palette (main_sprite *sprite)
+
+{ sprite_header *s = psprite_address (sprite);
+
+  ftracef1 ("menus_hack_palette for \"%.12s\"\n", s->name);
+  if (bbc_modevar (s->mode, bbc_Log2BPP) != 3)
+              /* dont hack 256 colour ones */
+  { int *palstart = &s->mode + 1,
+      *palend = (int *) ((char *) s + s->image);
+
+    for (; palstart < palend; palstart++)
+    { int t = *palstart & 0xF0F0F000;
+
+      ftracef2 ("was 0x%.8X now 0x%.8X\n",
+          *palstart, t | ((t >> 4) & 0xF0F0F00));
+      *palstart = t | ((t >> 4) & 0xF0F0F00);
+    }
+  }
+}
+
+/***************************************************************************
+ *                                                                         *
+ *  Sprite file window menu handler.                                       *
+ *                                                                         *
+ ***************************************************************************/
+
+static BOOL sprite_file_info_events (dbox d, void *event, void *handle )
+
+{ wimp_eventstr *e;
+
+  ftracef0 ("sprite_file_info_events\n");
+  handle = handle;
+  d      =      d;
+  e = (wimp_eventstr *) event;
+  if (e->e == wimp_ESEND || e->e == wimp_ESENDWANTACK)
+  { if (e->data.msg.hdr.action == wimp_MHELPREQUEST)
+    { ftracef0 ("Help request for sprite file info window\n");;
+      main_help_message ("PntH9", e);
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+void menus_file_handler (void *handle, char *hit)
+
+{ main_window *window = (main_window *) handle;
+
+  ftracef0 ("menus_file_handler\n");
+  switch (hit [0])
+  { case m_Misc:
+      switch (hit [1])
+      { case m_Misc_Info:
+          if (hit [2]) show_info_box ();
+        break;
+
+        case m_Misc_File:
+          if (hit [2])
+          { dbox d;
+            sprite_area *sarea = window->data->file.spritearea;
+            char sizestring[32];
+
+            ftracef0 ("Misc about file\n");
+            if ((d = dbox_new ("fileInfo"))!=0)
+            { dbox_setfield (d, d_File_Name,
+                  window->data->file.filename == NULL?
+                  msgs_lookup ("PntF4"): window->data->file.filename);
+              dbox_setnumeric (d, d_File_Number, sarea->number);
+              os_swix3 (OS_ConvertFileSize, sarea->size, &sizestring, 32);
+              dbox_setfield (d, d_File_Size, sizestring);
+              dbox_setfield (d, d_File_Mod, msgs_lookup (window->data->file.modified ? "PntG3": "PntG4"));
+              dbox_show (d);
+              dbox_raw_eventhandler (d, sprite_file_info_events, NULL);
+            }
+          }
+        break;
+
+        case m_Misc_SBName:
+        case m_Misc_SBSize:
+        { /* Sort by name or size */
+          sprite_area   *unsorted = window->data->file.spritearea;
+          int            count = unsorted->number;
+
+          if (count < 2) break; /* Not worth sorting */
+
+          sprite_tosort  tosort[count];
+          sprite_tosort *tosortptr[count];
+
+          /* variable length array allocation may have caused flex blocks to move - re-fetch sprite area pointer */
+          tosort[0].orgsprite = NULL; /* Paranoia - try and ensure compiler doesn't postpone array allocation */
+          tosortptr[0] = NULL;
+          unsorted = window->data->file.spritearea;
+
+          sprite_area   *sorted;
+          sprite_header *header;
+          main_file     *file = &window->data->file;
+          main_sprite   *sprite;
+          int            loop, next;
+          BOOL           byname = (hit[1] == m_Misc_SBName);
+          os_regset      regs;
+
+
+          ftracef1 ("sort - sorting %d sprites\n", count);
+          count = 0;
+          for (sprite = file->sprites; sprite != NULL; sprite = sprite->link)
+          { if (byname)
+            { /* Sprite names can be the full 12 letters long so take a copy */
+              memcpy ((char *)tosort[count].type.orgname,
+                     ((char *)unsorted) + sprite->offset + offsetof (sprite_header, name),
+                     NAME_LIMIT);
+              tosort[count].type.orgname[NAME_LIMIT] = '\0'; /* Ensure a string terminator */
+            }
+            else
+            { /* Infer the size */
+              header = (sprite_header *)((int)unsorted + sprite->offset);
+              tosort[count].type.orgsize = header->next;
+            }
+            tosort[count].orgsprite = sprite; /* Remember its corresponding structure */
+            tosortptr[count] = &tosort[count];
+            count++;
+          }
+
+          regs.r[0] = count;
+          regs.r[1] = (int)&tosortptr;
+          regs.r[2] = byname ? 4 : 2;
+          if (regs.r[1] & 0xE0000000)
+          { /* Too high - give it to HeapSort32 to jiggle the pointers */
+            regs.r[7] = 0;
+            if (wimpt_complain (os_swix (OS_HeapSort32, &regs)) != NULL)
+              break;
+          }
+          else
+          { /* Give it to HeapSort to jiggle the pointers */
+            if (wimpt_complain (os_swix (OS_HeapSort, &regs)) != NULL)
+              break;
+          }
+
+          for (loop = 0; (loop < (count-1)) && (tosortptr[loop] < tosortptr[loop+1]); loop++)
+          { /* Nothing */
+          }
+          if (loop==(count-1)) break; /* They were already in order */
+
+          visdelay_begin ();
+
+          /* Allocate a new blank area to copy into */
+          if (!flex_alloc ((flex_ptr)&sorted, unsorted->size))
+          { werr (FALSE, msgs_lookup ("PntEG"));
+            break;
+          }
+          ftracef1 ("sort flex'd %08X\n", (char *)sorted);
+          unsorted = window->data->file.spritearea; /* Might have shifted */
+          sorted->size   = unsorted->size;
+          sorted->number = count;
+          sorted->sproff = next = 16;
+
+          for (loop = 0; loop < count; loop++)
+          { int size;
+            /* For each sprite in the sorted pointers, locate the unsorted one, copy it */
+            header = (sprite_header *)((int)unsorted + tosortptr[loop]->orgsprite->offset);
+            size = header->next;
+            ftracef2 ("sort selected %08X size %d\n", (int)header, size);
+            memcpy ((char *)sorted + next, (char *)header, size);
+            next = next + size;
+
+            /* Append its structure to the list, when the file is marked as changed later
+               a call to psprite_recalculate_offsets fixes up the spriteno and offset
+               fields */
+            if (loop == 0)
+              file->sprites = tosortptr[loop]->orgsprite; /* Head */
+            else
+              sprite->link = tosortptr[loop]->orgsprite;
+            sprite = tosortptr[loop]->orgsprite;
+          }
+
+          /* End the sprite area nicely */
+          sprite->link = NULL;
+          sorted->freeoff = next;
+          flex_free ((flex_ptr)&window->data->file.spritearea);
+
+          /* Reanchor the flex block assuming the format is
+                                        int anchor
+                                        int size
+                            flex_ptr -> char store[] */
+          *((int *)sorted - 2) = (int)&window->data->file.spritearea;
+          window->data->file.spritearea = sorted;
+          ftracef2 ("sort budg'd from %08X to %08X\n", (int)unsorted, (int)sorted);
+
+          menus_file_has_changed (window);
+          visdelay_end ();
+        }
+        break;
+      }
+    break;
+
+    case m_Save:
+      ftracef0 ("File save\n");
+      if (hit [1] != 0)
+        /*at the dialogue box proper*/
+        menus_save_file (window, TRUE);
+      else
+        /*Click on the menu entry*/
+        menus_save_file (window, FALSE);
+    break;
+
+    case m_Create:
+      psprite_create_show (window, FALSE, "");
+    break;
+
+    case m_Sprite:
+        switch (hit [1])
+        {
+          case m_Sprite_SelectAll:
+            main_select_all(window);
+            break;
+
+          case m_Sprite_ClearAll:
+            main_clear_all(window);
+            break;
+
+          case m_Sprite_CopyClipboard:
+            paint_clipboard_set_data_from_selection (window);
+            break;
+
+          case m_Sprite_CutClipboard:
+            if (!paint_clipboard_set_data_from_selection (window)) break;
+            /* drop through to delete selection if it was copied OK to clipboard */
+
+          case m_Sprite_Delete:
+          { main_sprite *sprite;
+            main_sprite *next;
+            int count;
+            int total=window->selection.count;
+
+            if (window->selection.count==0) break;
+            visdelay_begin();
+            for (count=1, sprite=window->data->file.sprites; sprite != NULL;
+                          sprite = next, count++)
+            { visdelay_percent(count*100/total);
+              next = sprite->link;
+              if (sprite->flags & MSF_SELECTED)
+              { sprite_area *sarea = sprite->file->spritearea;
+                main_file *spritefile = sprite->file;
+
+                sprite_id sid;
+                char name [NAME_LIMIT + 1];
+
+                sid.tag = sprite_id_name; /*doesn't flex*/
+                sid.s.name = COPY_N (name, psprite_address (sprite)->name,
+                    NAME_LIMIT);
+
+                ftracef0 ("Edit delete\n");
+
+                /*Check if it was in use as a brush*/
+                toolwindow_brush_check_deletion (sprite);
+
+                /*The next two lines used to be reversed, but it could give a
+                  fatal error. So do it this way*/
+                wimpt_complain (sprite_delete (sarea, &sid));
+
+                menus_ensure_size(&spritefile->spritearea, 0);
+
+                psprite_delete (window, sprite);
+                ftracef0("do menus_file_has_changed\n");
+                menus_file_has_changed (window);
+              }
+            }
+            visdelay_end();
+          }
+          break;
+
+        case m_Sprite_PasteClipboard:
+          paint_clipboard_paste (window);
+          break;
+
+        case m_Sprite_Copy:
+        case m_Sprite_Rename:
+          if (hit [2])
+          { sprite_area **sarea = &window->data->file.spritearea;
+            sprite_id sid;
+            char name [NAME_LIMIT + 1];
+
+            if (strlen (spritenamebuffer) == 0)
+            { werr (FALSE, msgs_lookup ("PntE7"));
+              break;
+            }
+
+            if (hit[1] == m_Sprite_Copy)
+              /*Copy*/
+              if (menus_sprite_exists (*sarea, spritenamebuffer))
+                break;
+
+            sid.tag = sprite_id_name; /*doesn't flex*/
+            sid.s.name = COPY_N (name, psprite_address (hit_sprite)->name,
+                NAME_LIMIT);
+
+            if (hit [1] == m_Sprite_Copy)
+            { /*Copy*/
+              char *msg = NULL;
+              os_error *error;
+
+              if (!menus_ensure_size (sarea, psprite_address (hit_sprite)->next))
+              { msg = msgs_lookup ("PntEG");
+                goto copied;
+              }
+
+              /*psprite_drop_translation (&hit_sprite->transtab);
+                  Don't beleive this. J R C 20th Jul 1994*/
+              if ((error = sprite_copy (hit_sprite->file->spritearea,
+                  &sid, spritenamebuffer)) != NULL)
+              { msg = error->errmess;
+                goto copied;
+              }
+
+              menus_sprite_new (window, /*hack palette?*/ FALSE);
+              /* force summary window to be updated */
+              window->data->file.lastwidth = 0;
+              main_set_extent (window);
+
+            copied:
+              if (msg != NULL) werr (FALSE, msg);
+            }
+            else
+            { /*Rename*/
+              if (wimpt_complain (sprite_rename
+                  (hit_sprite->file->spritearea, &sid, spritenamebuffer)) !=
+                  NULL)
+                break;
+              menus_file_has_changed (window);
+              sprwindow_set_window_titles (hit_sprite);
+              colours_set_window_titles (hit_sprite);
+
+              /*Check if we just renamed a brush sprite as well*/
+              toolwindow_brush_check_rename (hit_sprite, spritenamebuffer);
+            }
+          }
+        break;
+
+        case m_Sprite_Save:
+          ftracef1 ("File sprite save %x\n", hit_sprite);
+          if (hit [2])
+            menus_save_selection (window);
+        break;
+
+        case m_Sprite_ExportPNG:
+          if (hit [2]) export_start (hit_sprite, FileType_PNG);
+        break;
+
+        case m_Sprite_ExportJPEG:
+          if (hit [2]) export_start (hit_sprite, FileType_JPEG);
+        break;
+
+        case m_Sprite_Info:
+          ftracef1 ("hit_sprite @ %x\n", hit_sprite);
+          if (hit [2])
+            display_sprite_info (hit_sprite);
+        break;
+
+        case m_Sprite_Print:
+          /*FIX G-RO-9923 JRC 15 Oct '91 Print on choosing Print.*/
+          menus_print_sprite (hit_sprite, /*ask?*/ hit [2] != 0);
+        break;
+      }
+    break;
+
+    case m_Display:
+      switch (hit [1])
+      { case m_Display_Name:
+          ftracef0 ("Display format icons\n");
+          window->data->file.fullinfo = 0;
+          main_current_options.display.full_info = FALSE;
+
+          /*force the redraw to change*/
+          window->data->file.lastwidth = 0;
+          main_force_redraw (window->handle);
+        break;
+
+        case m_Display_Full:
+        { wimp_winfo curr;
+
+          ftracef0 ("Display format info\n");
+          window->data->file.fullinfo = 1;
+          main_current_options.display.full_info = TRUE;
+
+          /*Change window width to allow one full item, if it is less.*/
+          curr.w = window->handle;
+          wimpt_noerr (paintlib_get_wind_info (&curr));
+
+          ftracef2 ("current width is %d; need %d\n",
+              curr.info.box.x1 - curr.info.box.x0,
+              main_FILER_FullInfoWidth);
+          if (curr.info.box.x1 - curr.info.box.x0 <
+              main_FILER_FullInfoWidth)
+          { curr.info.box.x1 = curr.info.box.x0 + main_FILER_FullInfoWidth;
+            wimpt_noerr (wimp_open_wind ((wimp_openstr *) &curr));
+
+            /*force the redraw to change*/
+            window->data->file.lastwidth = 0;
+            main_force_redraw (window->handle);
+          }
+        }
+        break;
+
+        case m_Display_UseDT:
+          ftracef0 ("Toggle palette flag\n");
+          { main_sprite *sprite;
+            main_file *file = &window->data->file;
+            file->use_current_palette = !file->use_current_palette;
+
+            psprite_set_colour_info (file);
+
+            if (tools_brushsprite_ptr != NULL &&
+                tools_brushsprite_ptr->file == file)
+            { psprite_free_brush_blocks ();
+              psprite_set_brush_colour_translations ();
+            }
+            else
+              psprite_set_brush_translations (file);
+
+            for (sprite = file->sprites; sprite != NULL;
+                sprite = sprite->link)
+            { sprwindow_redisplay (sprite, NULL);
+              colours_redraw (sprite);
+              main_sprite_window *windows;
+              if ((windows = sprite->windows) != NULL)
+                colourpanel_redraw (windows->window);
+            }
+
+            main_current_options.display.use_desktop_colours =
+                file->use_current_palette;
+          }
+        break;
+
+        default:
+          spencer (ftracef (__FILE__, __LINE__, "Display menu %d\n", hit [1]))
+        break;
+      }
+      iconsize_has_changed (window);
+    break;
+  }
+}
+
+/***************************************************************************
+ *                                                                         *
+ *  Icon menu handler.                                                     *
+ *                                                                         *
+ ***************************************************************************/
+
+int menus_files_modified (void)
+
+{ int modified = 0;
+  main_window *w;
+
+  ftracef0 ("menus_files_modified\n");
+  for (w = main_windows; w != 0; w = w->link)
+    if (w->tag == main_window_is_file &&
+        w->data->file.modified) modified++;
+      return modified;
+}
+
+int menus_quit_okayed (int modified)
+
+{ char mess [256];
+
+  ftracef0 ("menus_quit_okayed\n");
+  sprintf (mess, modified == 1? msgs_lookup ("PntF5"):
+      msgs_lookup ("PntF6"), modified);
+  return dboxquery_quit (mess) == dboxquery_quit_DISCARD;
+}
+
+void menus_icon_proc (void *handle, char *hit)
+
+{ ftracef0 ("menus_icon_proc\n");
+  handle = handle;
+
+  switch (hit [0])
+  { case i_Info:
+      if (hit [1]) show_info_box ();
+    break;
+
+    case i_GetScreen:
+      ftracef0 ("Grabbing snapshot\n");;
+      main_snapshot_show ();
+    break;
+
+    case i_Choices:
+      ftracef0 ("Show choices\n");
+      paint_choice_display ();
+    break;
+
+    case i_Quit:
+      if (menus_files_modified () == 0 ||
+          menus_quit_okayed (menus_files_modified ()))
+      { while (main_windows->link != NULL)
+          main_window_delete (main_windows);
+        ftracef1 ("Icon exit %d\n", win_activeno ());
+        while (win_activeno () > 0)
+          win_activedec ();
+        m_SUMMARY ();
+      }
+    break;
+  }
+}
+
+static void hack_entry (menu menyoo, int entryno, char *name)
+
+{ int TextWidth = main_FILER_TextWidth;
+  wimp_menuhdr *header = (wimp_menuhdr *) menu_syshandle (menyoo);
+  wimp_menuitem *entry = (wimp_menuitem *) (header + 1) + entryno - 1;
+
+  ftracef1 ("hack_entry: name '%s'\n", name);
+
+ if (strlen (name) > 10)
+     TextWidth = TextWidth - 4;
+
+ header->width = (strlen (name)+1) * (TextWidth);
+ if (header->width < (TextWidth)*10)
+     header->width = (TextWidth) * 10;
+
+ entry->data.indirecttext.buffer = name;
+ entry->data.indirecttext.bufflen = 1;
+ entry->data.indirecttext.validstring = NULL;
+ entry->iconflags = (wimp_iconflags) (entry->iconflags | wimp_INDIRECT);
+}
+
+static BOOL hack_edit_pal_entry (menu menyoo, int entryno, main_sprite *sprite)
+
+{ BOOL editable, masked;
+  char number[4] = '\0';
+
+  /* Modify the 'Edit colour' menu entry */
+  masked = psprite_hasmask (sprite) && sprite->gcol.colour == 0 && sprite->gcol.alpha == 0;
+  editable = !masked && !sprite->gcol.ecf && psprite_haspal (sprite);
+  if (editable) 
+  { /* Can be specific which colour number will be edited */
+    sprintf (number, "%u", sprite->gcol.colour);
+  }
+  sprintf (Editnumber, msgs_lookup ("PntMR"), number);
+  hack_entry (menyoo, entryno, Editnumber);
+
+  return editable;
+}
+
+/*********************************************
+ *                                           *
+ *  Return updated spritefile menu structure *
+ *                                           *
+ *********************************************/
+
+menu menus_file_maker (void *handle)
+
+{ main_window *window =(main_window *) handle;
+  main_file *file = &window->data->file;
+  BOOL got_zlib, got_compresspng, got_compressjpeg;
+  int len;
+  char term [2];
+
+  altrename_delete();
+
+  ftracef0 ("spritefile_menu_maker\n");
+  if (!event_is_menu_being_recreated ())
+  {
+    hit_sprite = main_pick_menu_button_sprite ((main_window *) handle);
+
+    ftracef1 ("hit_sprite set to %x\n", hit_sprite);
+  }
+  else
+  { main_sprite *sprite;
+
+    for (sprite = file->sprites; sprite != NULL && sprite != hit_sprite;
+        sprite = sprite->link);
+    hit_sprite = sprite;   /* set to same or zero if sprite gone */
+  }
+
+  if (window->selection.count!=1)
+  {
+    strcpy (Spritename, msgs_lookup ("PntG6"));
+  }
+  else
+  {
+    strcpy (Spritename, msgs_lookup ("PntG1"));
+    len = strlen (Spritename);
+    term [0] = Spritename [len - 1], term [1] = '\0';
+    Spritename [len - 1] = '\0';
+
+    if (hit_sprite != NULL)
+    { char *nameptr = psprite_address (hit_sprite)->name;
+      int i;
+
+      for (i = 0; i < 12 && nameptr [i] > ' '; i++)
+        spritenamebuffer [i] = nameptr [i];
+      spritenamebuffer [i] = '\0';
+    }
+    else
+      strcpy (spritenamebuffer, "");
+
+    strcat (Spritename, spritenamebuffer);
+    strcat (Spritename, term);
+  }
+
+  hack_entry (spritefile_main_menu, m_Sprite, Spritename);
+
+  /* When there are no sprites in the file, forbid its saving & selecting */
+  menu_setflags (spritefile_main_menu, m_Save, 0,
+                 (file->spritearea->number == 0));
+  menu_setflags (filedisplay_menu, m_Display_Name, !file->fullinfo, 0);
+  menu_setflags (filedisplay_menu, m_Display_Full, file->fullinfo, 0);
+  menu_setflags (filedisplay_menu, m_Display_UseDT,
+                 file->use_current_palette, 0);
+
+  got_zlib         = _swix (OS_SWINumberFromString, _IN(1) ,"ZLib_Compress") == NULL;
+  got_compresspng  = _swix (OS_SWINumberFromString, _IN(1) ,"CompressPNG_Start") == NULL;
+  got_compressjpeg = _swix (OS_SWINumberFromString, _IN(1) ,"CompressJPEG_Start") == NULL;
+  menu_setflags (sprite_selection_menu, m_Sprite_SelectAll, 0, file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_ClearAll, 0, window->selection.count==0 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_CutClipboard, 0, window->selection.count==0 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_CopyClipboard, 0, window->selection.count==0 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_Copy, 0, window->selection.count!=1 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_PasteClipboard, 0, !paint_clipboard_check_paste());
+  menu_setflags (sprite_selection_menu, m_Sprite_Rename, 0, window->selection.count!=1 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_Delete, 0, window->selection.count==0 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_Save, 0, window->selection.count==0 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_ExportPNG, 0,
+                 window->selection.count != 1 || !got_zlib || !got_compresspng);
+  menu_setflags (sprite_selection_menu, m_Sprite_ExportJPEG, 0,
+                 window->selection.count != 1 || !got_compressjpeg);
+  menu_setflags (sprite_selection_menu, m_Sprite_Info, 0, window->selection.count!=1 || file->spritearea->number==0);
+  menu_setflags (sprite_selection_menu, m_Sprite_Print, 0, window->selection.count!=1 || file->spritearea->number==0);
+
+
+  help_register_handler (&help_simplehandler, (void *) "FILER");
+
+  return spritefile_main_menu;
+}
+
+/*********************************************
+ *                                           *
+ *  Return updated sprite menu structure     *
+ *                                           *
+ *********************************************/
+
+menu menus_sprite_maker (void *handle)
+
+{ main_window *window = (main_window *) handle;
+  main_sprite_window *sprw = &window->data->sprite;
+  BOOL gcol_editable, read_only = sprw->read_only;
+  main_sprite *sprite = sprw->sprite;
+  BOOL got_zlib, got_compresspng, got_compressjpeg;
+  int i, no_colours = colours_count (sprite);
+
+  ftracef0 ("menus_sprite_maker\n");
+
+  if (!event_is_menu_being_recreated ())
+  { wimp_mousestr mouse;
+
+    wimpt_noerr (wimp_get_point_info (&mouse));
+    tools_mouse_to_pixel (window, &mouse, &Column, &Row);
+    ftracef4 ("row %d, column %d, width %d, height %d\n", Row, Column,
+        psprite_address (sprite)->width + 1,
+        psprite_address (sprite)->height + 1);
+  }
+
+  menu_setflags (sprite_paint_menu, s_Paint_ECF,
+      /*tick?*/ FALSE, /*grey?*/ read_only || no_colours > 256);
+      /*only allow ECF's to be defined for shallow sprites - a colour picker
+          allows no way of selecting them for deep sprites. J R C 9th Feb
+          1995*/
+  menu_setflags (sprite_paint_menu, s_Paint_Sel_Col,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  gcol_editable = hack_edit_pal_entry (sprite_paint_menu, s_Paint_Edit_Pal, sprite);
+  menu_setflags (sprite_paint_menu, s_Paint_Edit_Pal,
+      /*tick?*/ FALSE, /*grey?*/ !gcol_editable);
+
+  menu_setflags (sprite_edit_menu, s_Edit_FlipV,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_FlipH,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_Rotate,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_Scale_X,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_Scale_Y,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_Shear,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_InsCol,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_InsRow,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_DelCol,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_DelRow,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_Size,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_DPI,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_Mask,
+      /*tick?*/ FALSE, /*grey?*/ read_only);
+  menu_setflags (sprite_edit_menu, s_Edit_Palette,
+      /*tick?*/ FALSE, /*grey?*/ no_colours > 256);
+
+  /* Tick the palette menu */
+  palette_type ptype = psprite_palette_type (sprite);
+  for (i=0; i<5; i++)
+    menu_setflags (sprite_palette_menu, i + 1,
+        /*tick?*/ ptype == i, /*grey?*/ (i >= 3 && no_colours != 256));
+
+  /* Tick the transparency menu */
+  transparency_type ttype = psprite_transparency_type (sprite);
+  BOOL acposs = psprite_havealphachannels () && no_colours >= 4096 && no_colours != 65536;
+  BOOL amposs = psprite_havealphamasks ();
+  for (i=0; i<4; i++)
+    menu_setflags (sprite_mask_menu, i + 1,
+        /*tick?*/ ttype == i, /*grey?*/ (i == 2 && !amposs) || (i == 3 && !acposs));
+
+  menu_setflags (sprite_main_menu, s_Grid,
+      /*tick?*/ sprw->gridcol != 255, FALSE);
+
+  for (i=0; i<16; i++)
+    menu_setflags (sprite_colour_menu, i + 1,
+        /*tick?*/ sprw->gridcol == i, /*grey?*/ FALSE);
+
+  got_zlib         = _swix (OS_SWINumberFromString, _IN(1) ,"ZLib_Compress") == NULL;
+  got_compresspng  = _swix (OS_SWINumberFromString, _IN(1) ,"CompressPNG_Start") == NULL;
+  got_compressjpeg = _swix (OS_SWINumberFromString, _IN(1) ,"CompressJPEG_Start") == NULL;
+  menu_setflags (sprite_save_menu, s_Save_Palette,
+      /*tick?*/ FALSE, /*grey?*/ !psprite_haspal (sprite));
+  menu_setflags (sprite_save_menu, s_Save_PNG,
+      /*tick?*/ FALSE, /*grey?*/ !got_compresspng || !got_zlib);
+  menu_setflags (sprite_save_menu, s_Save_JPEG,
+      /*tick?*/ FALSE, /*grey?*/ !got_compressjpeg);
+  menu_setflags (sprite_paint_menu, s_Paint_Show_Col,
+      /*tick?*/ FALSE,
+      /*grey?*/ read_only);
+
+  help_register_handler (&help_simplehandler, (void *) "EDIT");
+
+  return sprite_main_menu;
+}
+
+/*********************************************
+ *                                           *
+ *  Return updated colours menu structure    *
+ *                                           *
+ *********************************************/
+
+menu menus_colours_maker (void *handle)
+
+{ main_sprite *sprite = (main_sprite *) handle;
+  BOOL gcol_editable;
+
+  gcol_editable = hack_edit_pal_entry (colours_main_menu, s_Colours_Edit_Pal, sprite);
+  menu_setflags (colours_main_menu, s_Colours_Edit_Pal,
+      /*tick?*/ FALSE,
+      /*grey?*/ !gcol_editable);
+
+  menu_setflags (colours_main_menu, s_Colours_Small,
+      /*tick?*/ sprite->coloursize == colours_SIZE/2,
+      /*grey?*/ FALSE);
+
+  help_register_handler (&help_simplehandler, (void *) "COLM");
+
+  return colours_main_menu;
+}
+
+/***************************************************************************
+ *                                                                         *
+ *  Colours window menu handler.                                           *
+ *                                                                         *
+ ***************************************************************************/
+
+void menus_colours_handler (void *handle, char *hit)
+
+{ main_sprite *sprite = (main_sprite *) handle;
+
+  ftracef0 ("menus_colours_handler\n");
+
+  switch (hit [0])
+  { case s_Colours_Small:
+      ftracef0 ("Toggle colour size\n");
+      sprite->coloursize =
+          sprite->coloursize == colours_SIZE? colours_SIZE/2: colours_SIZE;
+
+      main_current_options.colours.small_colours =
+          sprite->coloursize != colours_SIZE;
+
+      colours_set_extent (sprite);
+    break;
+
+    case s_Colours_Edit_Pal:
+      if (hit [1])
+      { sprite_header *spr = psprite_address (sprite);
+        int colour = (&spr->mode + 1) [sprite->gcol.colour*2];
+        wimp_emask emask;
+
+        ftracef0 ("Edit colour\n");
+        /* Enable nulls, so slider drags work */
+        event_setmask ((wimp_emask) (((emask = event_getmask ()) & ~wimp_EMNULL)));
+
+        dboxtcol (&colour, /*allow transparent?*/ FALSE,
+            msgs_lookup ("PntW8"), &Apply_Colour, (void *) sprite);
+
+        event_setmask (emask);
+      }
+    break;
+  }
+}
+
+/******************************************
+ * Initialise the static menu structures  *
+ ******************************************/
+
+BOOL make_menustring_from_msgs (const char *bodytag, char *buf, size_t bufsz)
+
+{ char  *msg;
+  size_t i = 0, len = 0;
+
+  if ((strlen (bodytag) > 9) || bufsz == 0)
+    return TRUE; /* Buffer overflow */
+
+  buf[0] = '\0';
+  while (i < 100)
+  { char tag[12];
+    sprintf (tag, "%s%zu", bodytag, i);
+    msg = msgs_lookup (tag);
+    if (!msg || strcmp (msg, tag) == 0)
+      break;
+    /* Allow a | separator mid way through the menu */
+    if (msg[0] == '|' && len > 0)
+    { buf[len - 1] = '\0'; /* Overwrite the comma */
+      len--;
+    }
+    len += strlen (msg) + 1;
+    if (len >= bufsz)
+      return TRUE; /* Buffer overflow */
+    strcat (buf, msg);
+    strcat (buf, ",");
+    i++;
+  }
+  /* Remove the trailing comma */
+  if (len > 0)
+    buf[len - 1] = '\0';
+
+  return FALSE;
+}
+
+static menu make_menu2 (char *titletag, char *bodytag)
+
+{ ftracef0 ("make_menu2\n");
+  ftracef2 ("titletag is \"%s\", bodytag is \"%s\"\n", titletag, bodytag);
+  return menu_new (msgs_lookup (titletag), msgs_lookup (bodytag));
+}
+
+static menu make_menu1 (char *titletag, char *body)
+
+{ ftracef0 ("make_menu1\n");
+  ftracef2 ("titletag is \"%s\", body is \"%s\"\n", titletag, body);
+  return menu_new (msgs_lookup (titletag), body);
+}
+
+void menus_init (void)
+
+{ menu temp2, temp3, temp4, temp5;
+  char definition[128];
+
+  ftracef0 ("init_menus_init\n");
+
+  spritefile_main_menu = make_menu2 ("Pnt00", "PntM3");
+
+  sprite_selection_menu = make_menu2 ("PntM4", "PntM5");
+  temp2 = make_menu1 ("PntM6", "123456789012");
+  menu_make_writeable (temp2, 1, spritenamebuffer, 13, "A~ ");
+  menu_submenu (sprite_selection_menu, m_Sprite_Copy, temp2);
+  temp2 = make_menu1 ("PntM7", "123456789012");
+  menu_make_writeable (temp2, 1, spritenamebuffer, 13, "A~ ");
+  menu_submenu (sprite_selection_menu, m_Sprite_Rename, temp2);
+  menu_submenu (spritefile_main_menu, m_Sprite, sprite_selection_menu);
+
+  colours_main_menu = make_menu2 ("PntMP", "PntMQ");
+
+  filedisplay_menu = make_menu2 ("PntM8", "PntM9");
+  menu_submenu (spritefile_main_menu, m_Display, filedisplay_menu);
+
+  spritefile_misc_menu = make_menu2 ("PntMM", "PntMN");
+  menu_submenu (spritefile_main_menu, m_Misc, spritefile_misc_menu);
+
+  ftracef0 ("Creating sprite_menu\n");
+
+  sprite_main_menu = make_menu2 ("Pnt00", "PntMA");
+  sprite_misc_menu = make_menu2 ("PntMK", "PntML");
+  sprite_save_menu = make_menu2 ("PntMB", "PntMC");
+
+  menu_submenu (sprite_main_menu, s_Misc, sprite_misc_menu);
+
+  menu_submenu (sprite_main_menu, s_Save, sprite_save_menu);
+
+  sprite_paint_menu = make_menu2 ("Pnt00", "PntMD");
+
+  menu_submenu (sprite_main_menu, s_Paint, sprite_paint_menu);
+
+  sprite_edit_menu = make_menu2 ("PntME", "PntMF");
+  sprite_rotate_menu = make_menu1 ("PntMG", "?");
+  menu_make_writeable (sprite_rotate_menu, 1, rotatebuffer, 12, "A0-9\\-");
+  menu_submenu (sprite_edit_menu, s_Edit_Rotate, sprite_rotate_menu);
+
+  temp3 = make_menu1 ("PntMJ", "?");
+  menu_make_writeable (temp3, 1, scalebuffer, 12, "A0-9.eE");
+  menu_submenu (sprite_edit_menu, s_Edit_Scale_X, temp3);
+
+  temp4 = make_menu1 ("PntMJ", "?");
+  menu_make_writeable (temp4, 1, scalebuffer, 12, "A0-9.eE");
+  menu_submenu (sprite_edit_menu, s_Edit_Scale_Y, temp4);
+
+  temp5 = make_menu1 ("PntMJ", "?");
+  menu_make_writeable (temp5, 1, shearbuffer, 12, "A0-9\\-.eE");
+  menu_submenu (sprite_edit_menu, s_Edit_Shear, temp5);
+
+  if (!make_menustring_from_msgs ("NEWPAL", definition, sizeof (definition)))
+  { sprite_palette_menu = make_menu1 ("PntG5", definition);
+    menu_submenu (sprite_edit_menu, s_Edit_Palette, sprite_palette_menu);
+  }
+
+  if (!make_menustring_from_msgs ("NEWTRA", definition, sizeof (definition)))
+  { sprite_mask_menu = make_menu1 ("PntG2", definition);
+    menu_submenu (sprite_edit_menu, s_Edit_Mask, sprite_mask_menu);
+  }
+
+  menu_submenu (sprite_main_menu, s_Edit, sprite_edit_menu);
+
+  sprite_colour_menu = colourmenu_make (msgs_lookup ("PntMH"), 0);
+  menu_submenu (sprite_main_menu, s_Grid, sprite_colour_menu);
+}

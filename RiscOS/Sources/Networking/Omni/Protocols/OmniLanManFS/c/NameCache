@@ -1,0 +1,217 @@
+/* Copyright 1999 Element 14 Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* NameCache.c - SMB1 long-filename cache for directory-search results.
+ *
+ * A circular byte buffer holding (dirname, X2 entry) records from server-side directory searches.
+ * When a subsequent operation asks for attributes of the same file, NameCache_Locate returns the
+ * cached X2 entry directly, saving a wire round-trip.  The cache is flushed when FSEntry_File and
+ * FSEntry_Func return and when an FSEntry_Open fails, so entries do not outlive those operations.
+ *
+ * Each record is word-aligned and laid out as:  rec_hdr (with embedded dirname[]), then the 23-
+ * byte X2 wire header + variable-length leafname, padded to a word.  rec_hdr.offset_next steps to
+ * the next record (may be negative when the chain wraps); offset_data == -1 marks a slot whose
+ * entry has been invalidated.  NameCache.last == -1 means "empty cache".
+ */
+
+/* Standard includes */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stddef.h>
+#include <ctype.h>
+#include "kernel.h"
+
+/* Our includes */
+#include "stdtypes.h"
+#include "NameCache.h"
+
+static struct {
+  uint8_t *data;
+  int head;
+  int tail;
+  int last;
+  int hits;
+} NameCache;
+
+typedef struct {
+  int offset_next;
+  int offset_data;
+  char dirbase[1];
+} rec_hdr;
+
+static const size_t cachesize = 4096;
+
+/* atexit callback - free the cache buffer at module finalisation. */
+static void NameCache_Exit(void) {
+  free(NameCache.data);
+  NameCache.data = NULL;
+}
+
+void NameCache_Flush(ncf_reason why) {
+  if (why == ncf_REINIT) {
+    NameCache.hits = 0;
+  }
+  if (NameCache.data) {
+    NameCache.head = 0;
+    NameCache.tail = 0;
+    NameCache.last = -1;
+    ((rec_hdr *)NameCache.data)->offset_next = -1;
+  }
+}
+
+void NameCache_Init(void) {
+  NameCache.data = calloc(1, cachesize);
+  if (NameCache.data != 0) {
+    atexit(NameCache_Exit);
+  }
+  NameCache_Flush(ncf_REINIT);
+}
+
+uint8_t *NameCache_Locate(const char *filename) {
+  rec_hdr *hdr;
+  int offset = NameCache.tail;
+  const size_t namelen = strlen(filename);
+  if (NameCache.data == NULL || NameCache.last == -1) {
+    return NULL;
+  }
+
+  /* Walk the chain via offset_next deltas; offset_data == -1 is a tombstone we step over. */
+  for (;; offset += hdr->offset_next) {
+    hdr = (rec_hdr *)(NameCache.data + offset);
+    if (hdr->offset_data == -1) {
+      /* A tombstone at the head means we've run off the end of the live records. */
+      if (offset == NameCache.head) {
+        break;
+      }
+    } else {
+      uint8_t *res = NameCache.data + offset + hdr->offset_data;
+      const size_t baselen = strlen(hdr->dirbase);
+
+      /* baselen counts the path including trailing '\'; check it's a real directory boundary before comparing
+       * leaf vs leaf and parent vs parent.  Cheaper to leaf-test first because the leaf comparison rejects most
+       * candidates immediately.  A name shorter than the directory's path cannot lie inside it, and indexing it by that
+       * length would read past its end.
+       */
+      if (baselen > 0u && namelen >= baselen && filename[baselen - 1] == '\\') {
+        if (!strcmp((char *)res + 23, filename + baselen)) {
+          if (!strncmp(hdr->dirbase, filename, baselen)) {
+            vdebug("NameCache: returning match for \"%s\"\n", filename);
+            ++NameCache.hits;
+            return res;
+          }
+        }
+      }
+    }
+  }
+
+  return NULL;
+}
+
+/* Skip past tombstoned records at the queue tail, resetting to empty if every record is gone.
+ *
+ * Called by NameCache_Add after it has made room and before it links the new record in, to keep the
+ * tail pointer pointing at a live entry.  When the cache becomes wholly empty, also resets head/tail
+ * to 0 so the next add doesn't end up scanning across a dead window.
+ */
+static void NameCache_Trim(void) {
+  /* Walk past tombstoned records at the tail, leaving the tail pointer on the first live entry. */
+  while (NameCache.tail != NameCache.head) {
+    rec_hdr *tailp = (rec_hdr *)(NameCache.data + NameCache.tail);
+
+    if (tailp->offset_data != -1) {
+      break;
+    }
+    NameCache.tail += tailp->offset_next;
+  }
+
+  /* If every record was a tombstone, reset head/tail to 0 so the next add starts at the front of the buffer. */
+  if (NameCache.tail == NameCache.head) {
+    vdebug("NameCache: reset (empty)\n");
+    NameCache.last = -1;
+    NameCache.tail = NameCache.head = 0;
+    ((rec_hdr *)(NameCache.data))->offset_data = -1;
+  }
+}
+
+void NameCache_Add(const char *dirname, uint8_t *b) {
+  /* Calculate size of record data, directory name, and management overhead. */
+  static const size_t overhead = offsetof(rec_hdr, dirbase);
+  const size_t filename_len = b[22];
+  const size_t dirname_len = strlen(dirname) + 1;
+  const size_t rec_size = ((23 + filename_len + 1 + 3) & ~3) + (2 * overhead) + ((dirname_len + 3 & ~3));
+  rec_hdr *new_rec;
+
+  if (NameCache.data == NULL || rec_size >= cachesize) {
+    return;
+  }
+
+  /* Make room: three cases - wrap-around at end of buffer, currently-empty/unwrapped, or already-wrapped buffer. */
+  if ((NameCache.head + rec_size) > cachesize) {
+    /* Re-use first record as we will require a wrap-around */
+    rec_hdr *tailp;
+    NameCache.tail = 0;
+    while (NameCache.tail < rec_size) {
+      tailp = (rec_hdr *)(NameCache.data + NameCache.tail);
+      if (NameCache.tail == NameCache.head) {
+        /* NameCache_Trim() will sort this out */
+        break;
+      }
+      NameCache.tail += tailp->offset_next;
+    }
+    vdebug("NameCache: tail now %#x ; head now %#x\n", NameCache.tail, NameCache.head);
+    if (NameCache.head != NameCache.tail) {
+      /* If they are equal, NameCache_Trim() will reset the queue */
+      NameCache.head = 0;
+    }
+  } else if ((NameCache.tail < NameCache.head) || NameCache.last == -1) {
+    /* OK - we haven't got a loop active */
+  } else {
+    while ((NameCache.tail - NameCache.head) < rec_size) {
+      /* Buffer is already wrapped, but we can afford to wrap it */
+      rec_hdr *tailp = (rec_hdr *)(NameCache.data + NameCache.tail);
+      vdebug("NameCache: discarding entry at %#x\n", NameCache.tail);
+      NameCache.tail += tailp->offset_next;
+      if (NameCache.tail <= NameCache.head) {
+        /* Have wrapped around */
+        break;
+      }
+    }
+  }
+
+  NameCache_Trim();
+
+  /* Link the previous "last" record forward to where the new one will live. */
+  if (NameCache.last != -1) {
+    rec_hdr *lastp = (rec_hdr *)(NameCache.data + NameCache.last);
+    lastp->offset_next = NameCache.head - NameCache.last;
+  }
+
+  /* Reserve the slot at head, leave a tombstone at the new head so Locate's walk terminates. */
+  vdebug("NameCache: adding \"%s\" in \"%s\"\n", (char *)b + 23, dirname);
+  NameCache.last = NameCache.head;
+  NameCache.head = NameCache.head + rec_size - overhead;
+  new_rec = (rec_hdr *)(NameCache.data + NameCache.head);
+  new_rec->offset_data = -1;
+  new_rec->offset_next = 0;
+
+  /* Populate the new record: dirbase, then the X2 wire bytes, then a NUL the leaf strcmp relies on. */
+  new_rec = (rec_hdr *)(NameCache.data + NameCache.last);
+  new_rec->offset_data = overhead + ((dirname_len + 3) & ~3);
+  new_rec->offset_next = NameCache.head - NameCache.last;
+  memcpy(new_rec->dirbase, dirname, dirname_len);
+  memcpy(NameCache.data + NameCache.last + new_rec->offset_data, b, 23 + filename_len);
+  NameCache.data[NameCache.last + new_rec->offset_data + 23 + filename_len] = '\0';
+}

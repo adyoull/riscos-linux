@@ -1,0 +1,188 @@
+; Copyright 2000 Pace Micro Technology plc
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+; Kernel utility library
+
+; void *memset(void *s, int c, size_t n) -------------------------------------------------
+
+        EXPORT  memset
+        ROUT
+memset
+        TEQ     a3, #0                                  ; return immediately if zero bytes
+        MOVEQ   pc, lr
+
+        ADD     a1, a1, a3
+        TST     a1, #3                                  ; check for unaligned end
+        BNE     %FT80
+05
+        AND     a2, a2, #&FF
+        ORR     a2, a2, a2, LSL #8
+        ORR     a2, a2, a2, LSL #16
+        SUBS    a3, a3, #32                             ; if at least 32, do 32 at a time
+        BLO     %FT50
+
+ [ LongDesc
+        ; Use STRD to make sure this is safe to use for clearing page tables
+        Push    "v1-v2"
+        MOV     v1, a2
+        MOV     v2, a2
+10      STRD    v1, [a1, #-8]!
+        STRD    v1, [a1, #-8]!
+        STRD    v1, [a1, #-8]!
+        STRD    v1, [a1, #-8]!
+        SUBS    a3, a3, #32
+        BHS     %BT10
+        Pull    "v1-v2"
+ |
+        Push    "v1-v5"
+        MOV     a4, a2
+        MOV     v1, a2
+        MOV     v2, a2
+        MOV     v3, a2
+        MOV     v4, a2
+        MOV     v5, a2
+        MOV     ip, a2
+10      STMDB   a1!, {a2,a4,v1,v2,v3,v4,v5,ip}
+        SUBS    a3, a3, #32
+        BHS     %BT10
+        Pull    "v1-v5"
+ ]
+
+50      ADDS    a3, a3, #32-4                           ; if at least 4, do 4 at a time
+        BMI     %FT70
+60      STR     a2, [a1, #-4]!
+        SUBS    a3, a3, #4
+        BPL     %BT60
+
+70      ADDS    a3, a3, #4
+        MOVEQ   pc, lr
+
+80      STRB    a2, [a1, #-1]!                          ; byte at a time until finished or
+        SUBS    a3, a3, #1                              ; aligned (if at end, will finish)
+        MOVEQ   pc, lr
+        TST     a1, #3
+        BNE     %BT80
+        B       %BT05
+
+; unsigned __rt_udiv(unsigned divisor, unsigned dividend) --------------------------------
+        EXPORT  |__rt_udiv|
+        ROUT
+|__rt_udiv|
+; Unsigned divide of a2 by a1: returns quotient in a1, remainder in a2
+; Destroys a3 and ip only
+
+        MOV     a3, #0
+        RSBS    ip, a1, a2, LSR #3
+        BCC     u_sh2
+        RSBS    ip, a1, a2, LSR #8
+        BCC     u_sh7
+        MOV     a1, a1, LSL #8
+        ORR     a3, a3, #&FF000000
+        RSBS    ip, a1, a2, LSR #4
+        BCC     u_sh3
+        RSBS    ip, a1, a2, LSR #8
+        BCC     u_sh7
+        MOV     a1, a1, LSL #8
+        ORR     a3, a3, #&00FF0000
+        RSBS    ip, a1, a2, LSR #8
+        MOVCS   a1, a1, LSL #8
+        ORRCS   a3, a3, #&0000FF00
+        RSBS    ip, a1, a2, LSR #4
+        BCC     u_sh3
+        RSBS    ip, a1, #0
+        BCS     dividebyzero
+u_loop  MOVCS   a1, a1, LSR #8
+u_sh7   RSBS    ip, a1, a2, LSR #7
+        SUBCS   a2, a2, a1, LSL #7
+        ADC     a3, a3, a3
+u_sh6   RSBS    ip, a1, a2, LSR #6
+        SUBCS   a2, a2, a1, LSL #6
+        ADC     a3, a3, a3
+u_sh5   RSBS    ip, a1, a2, LSR #5
+        SUBCS   a2, a2, a1, LSL #5
+        ADC     a3, a3, a3
+u_sh4   RSBS    ip, a1, a2, LSR #4
+        SUBCS   a2, a2, a1, LSL #4
+        ADC     a3, a3, a3
+u_sh3   RSBS    ip, a1, a2, LSR #3
+        SUBCS   a2, a2, a1, LSL #3
+        ADC     a3, a3, a3
+u_sh2   RSBS    ip, a1, a2, LSR #2
+        SUBCS   a2, a2, a1, LSL #2
+        ADC     a3, a3, a3
+u_sh1   RSBS    ip, a1, a2, LSR #1
+        SUBCS   a2, a2, a1, LSL #1
+        ADC     a3, a3, a3
+u_sh0   RSBS    ip, a1, a2
+        SUBCS   a2, a2, a1
+        ADCS    a3, a3, a3
+        BCS     u_loop
+        MOV     a1, a3
+        MOV     pc, lr
+
+dividebyzero
+        B       dividebyzero
+
+; void *kalloc (size_t size, _kernel_oserror **e)
+; It's malloc, but it stores any received error in 'e'.
+; 'e' is only written to if there's an error, so you can make several calls
+; using just one _kernel_oserror *.
+        EXPORT  kalloc
+kalloc  ROUT
+        Entry   "r4"
+        MOV     r4, r1
+        ; System heap should be sufficient
+        MOV     r3, r0
+        BL      ClaimSysHeapNode
+        STRVS   r0, [r4]
+        MOVVS   r0, #0
+        MOVVC   r0, r2
+        EXIT
+
+        EXPORT  free
+free    ROUT
+        MOVS    r2, r0
+        BNE     FreeSysHeapNode
+        MOV     pc, lr
+
+; void *memcpy(void *dest,void *src,size_t len)
+        EXPORT  memcpy
+memcpy  ROUT
+10
+        SUBS    a3, a3, #1
+        LDRGEB  ip, [a2, a3]
+        STRGEB  ip, [a1, a3]
+        BGT     %BT10
+        MOV     pc, lr
+
+; int _kernel_irqs_disabled(void)
+        EXPORT  |_kernel_irqs_disabled|
+|_kernel_irqs_disabled|
+        MRS     a1, CPSR
+        AND     a1, a1, #I32_bit
+        MOV     pc,lr
+
+; void _kernel_irqs_off(void)
+        EXPORT  |_kernel_irqs_off|
+|_kernel_irqs_off|
+        SEI     ,a1
+        MOV     pc,lr
+
+; void _kernel_irqs_on(void)
+        EXPORT  |_kernel_irqs_on|
+|_kernel_irqs_on|
+        CLI     ,a1
+        MOV     pc,lr
+
+        END

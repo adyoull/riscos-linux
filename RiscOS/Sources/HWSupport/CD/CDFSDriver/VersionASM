@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "2.43"
+Module_Version          SETA    243
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "06 Jan 2025"
+Module_ApplicationDate  SETS    "06-Jan-25"
+Module_ComponentName    SETS    "CDFSDriver"
+Module_FullVersion      SETS    "2.43"
+Module_HelpVersion      SETS    "2.43 (06 Jan 2025)"
+                        END

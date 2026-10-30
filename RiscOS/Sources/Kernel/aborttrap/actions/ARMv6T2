@@ -1,0 +1,79 @@
+# Copyright (c) 2021, RISC OS Open Ltd
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met: 
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+#       may be used to endorse or promote products derived from this software
+#       without specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+# 
+
+# A8.6.77 LDRHT
+LDRHT_A1(Rt,Rn,imm4H,imm4L,U)
+{
+	return aborttrap_LDRHT_imm(ctx,Rt,Rn,(imm4H<<4)|imm4L,true,U);
+}
+
+LDRHT_A2(Rt,Rn,Rm,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDRHT_reg(ctx,Rt,Rn,Rm,true,U);
+}
+
+# A8.6.81 LDRSBT
+LDRSBT_A1(Rt,Rn,imm4H,imm4L,U)
+{
+	return aborttrap_LDRSBT_imm(ctx,Rt,Rn,(imm4H<<4)|imm4L,true,U);
+}
+
+LDRSBT_A2(Rt,Rn,Rm,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDRSBT_reg(ctx,Rt,Rn,Rm,true,U);
+}
+
+# A8.6.85 LDRSHT
+LDRSHT_A1(Rt,Rn,imm4H,imm4L,U)
+{
+	return aborttrap_LDRSHT_imm(ctx,Rt,Rn,(imm4H<<4)|imm4L,true,U);
+}
+
+LDRSHT_A2(Rt,Rn,Rm,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDRSHT_reg(ctx,Rt,Rn,Rm,true,U);
+}
+
+# A8.6.209 STRHT
+STRHT_A1(Rt,Rn,imm4H,imm4L,U)
+{
+	return aborttrap_STRHT_imm(ctx,Rt,Rn,(imm4H<<4)|imm4L,true,U);
+}
+
+STRHT_A2(Rt,Rn,Rm,U,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_STRHT_reg(ctx,Rt,Rn,Rm,true,U);
+}
+

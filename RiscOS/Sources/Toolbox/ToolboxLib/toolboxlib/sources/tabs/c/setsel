@@ -1,0 +1,62 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : setsel.c
+ * Purpose     : Veneer for method Tabs_SetSelected
+ * Description : Sets which tab index is currently selected equivalent to having clicked on it
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "tabs.h"
+
+
+
+
+/*
+ * Name        : tabs_set_selected
+ * Description : Sets which tab index is currently selected equivalent to having clicked on it
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ * Out         : int *previous_index
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_set_selected ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            int tab_index,
+                                            int *previous_index
+                                          )
+{
+_kernel_swi_regs r;
+_kernel_oserror *e;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = Tabs_SetSelected;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) tab_index;
+  if((e = _kernel_swi(Toolbox_ObjectMiscOp,&r,&r)) == NULL)
+  {
+    if(previous_index != NULL) *previous_index = (int) r.r[0];
+  }
+
+  return(e);
+}
+

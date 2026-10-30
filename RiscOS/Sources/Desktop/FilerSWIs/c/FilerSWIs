@@ -1,0 +1,180 @@
+/* Copyright 1996 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <assert.h>
+#include "swis.h"
+#include "wimp.h"
+
+#include "FilerSWIsInt.h"
+#include "FilerSWIsHdr.h"
+
+#define send_user_message(msg, recipient) _swix(Wimp_SendMessage, _INR(0,2), wimp_ESEND, msg, recipient)
+#define FILE_BUFFER_MAX (MESSAGE_BLOCK_SIZE - sizeof(wimp_msghdr) - 1 /* Terminator */)
+static char file_buffer[FILE_BUFFER_MAX];
+static int file_buffer_length = 0;
+
+/* Get the length of a control-character-terminated string, excluding the terminator itself */
+static size_t xstrlen(const char *s)
+{
+    size_t i = 0;
+
+    while ((s[i] != DELETE) && (s[i] >= SPACE))
+    {
+        i++;
+    }
+    return i;
+}
+
+static _kernel_oserror *flush_file_buffer(uint32_t recipient_task)
+{
+    wimp_msgstr msg;
+
+    /* Flush the accumulated filenames */
+    memcpy((void *)msg.data.chars, file_buffer, file_buffer_length);
+    msg.data.chars[file_buffer_length] = '\0';
+
+    msg.hdr.size = U32_ROUND_UP(sizeof(wimp_msghdr) + file_buffer_length + 1 /* Terminator */);
+    msg.hdr.your_ref = 0;
+    msg.hdr.action = wimp_MFILER_ADD_SELECTION;
+
+    _kernel_oserror *err = send_user_message(&msg, recipient_task);
+
+    if (err == NULL)
+    {
+        file_buffer_length = 0; /* Clear the buffer */
+    }
+
+    return err;
+}
+
+/*
+ * SWI: FilerAction_SendSelectedDirectory
+ *
+ * Sends message specifying the selected directory.
+ *
+ * R0 = task handle to which to send the message
+ * R1 = pointer to null terminated directory name
+ */
+static _kernel_oserror *FilerSWI_SendSelectedDirectory(uint32_t recipient_task, const char *dir_name)
+{
+    /* According to PRM 3-233, SendSelectedDirectory clears the current selection of files */
+    file_buffer_length = 0;
+
+    const size_t dir_name_length = xstrlen(dir_name);
+
+    /* Copy dirname into message structure */
+    wimp_msgstr msg;
+    memcpy(msg.data.chars, dir_name, dir_name_length);
+    msg.data.chars[dir_name_length] = '\0';
+
+    msg.hdr.size = U32_ROUND_UP(sizeof(wimp_msghdr) + dir_name_length + 1 /* Terminator */); /* Round up size to the next word */
+    msg.hdr.your_ref = 0;
+    msg.hdr.action = wimp_MFILER_SELECTION_DIRECTORY;
+
+    return send_user_message(&msg, recipient_task);
+}
+
+/*
+ * SWI: FilerAction_SendSelectedFile
+ *
+ * Sends message specifying the selected files within a directory.
+ *
+ * R0 = task handle to which to send the message
+ * R1 = pointer to null terminated selection name
+ */
+static _kernel_oserror *FilerSWI_SendSelectedFile(uint32_t recipient_task, const char *file_name)
+{
+    const size_t file_name_length = xstrlen(file_name);
+
+    if ((file_name_length + file_buffer_length +
+        (file_buffer_length > 0) /* Space, if not the first file name in buffer */) > FILE_BUFFER_MAX)
+    {
+        /* Overflowed the buffer, flush it */
+        _kernel_oserror *err = flush_file_buffer(recipient_task);
+        if (err != NULL)
+        {
+            return err;
+        }
+    }
+
+    /* The buffer is now guaranteed to hold the new selection */
+    if (file_buffer_length > 0)
+    {
+        file_buffer[file_buffer_length] = ' ';
+        file_buffer_length++;
+    }
+
+    memcpy(file_buffer + file_buffer_length, file_name, file_name_length);
+    file_buffer_length += file_name_length;
+    /* NOTE: No terminator is stored in file_buffer; it is appended directly to the FILER_ADD_SELECTION message in flush_file_buffer() */
+    return NULL;
+}
+
+/*
+ * SWI: FilerAction_SendStartOperation
+ *
+ * Sends message containing information to start operation.
+ *
+ * R0 = task handle to which to send the message
+ * R1 = operation
+ * R2 = option bits
+ * R3 = pointer to operation specific data
+ * R4 = length of operation specific data
+ */
+static _kernel_oserror *FilerSWI_SendStartOperation(uint32_t recipient_task, uint32_t operation, uint32_t options, const void *ptr, uint32_t length)
+{
+    if (file_buffer_length > 0)
+    {
+        /* Flush any buffered selection */
+        _kernel_oserror *err = flush_file_buffer(recipient_task);
+        if (err != NULL)
+        {
+            return err;
+        }
+    }
+
+    /* Store the action, options, and auxilliary data */
+    wimp_msgstr msg;
+    msg.data.words[FILER_ACTION_OPERATION_INDEX] = operation;
+    msg.data.words[FILER_ACTION_OPTIONS_INDEX] = options;
+
+    memcpy((void *)(msg.data.chars + FILER_ACTION_HEADER_SIZE), ptr, length);
+
+    msg.hdr.size = U32_ROUND_UP(sizeof(wimp_msghdr) + length + FILER_ACTION_HEADER_SIZE);
+    msg.hdr.your_ref = 0;
+    msg.hdr.action = wimp_MFILER_ACTION;
+
+    return send_user_message(&msg, recipient_task);
+}
+
+_kernel_oserror *FilerSWI(int swi_offset, _kernel_swi_regs *r, void *pw)
+{
+    switch (swi_offset)
+    {
+        case FilerAction_SendSelectedDirectory - FilerAction_00:
+            return FilerSWI_SendSelectedDirectory(r->r[0], (const char *)r->r[1]);
+
+        case FilerAction_SendSelectedFile      - FilerAction_00:
+            return FilerSWI_SendSelectedFile(r->r[0], (const char *)r->r[1]);
+
+        case FilerAction_SendStartOperation    - FilerAction_00:
+            return FilerSWI_SendStartOperation(r->r[0], r->r[1], r->r[2], (const void *)r->r[3], r->r[4]);
+    }
+    UNUSED(pw);
+    return error_BAD_SWI;
+}

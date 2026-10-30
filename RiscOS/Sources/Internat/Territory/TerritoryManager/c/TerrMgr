@@ -1,0 +1,653 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+#include "swis.h"
+
+#include "Global/NewErrors.h"
+#include "Global/Services.h"
+#include "Global/FSNumbers.h"
+#include "Global/CMOS.h"
+#include "Global/ModHand.h"
+#include "Global/VduExt.h"
+#include "Global/Variables.h"
+#include "Global/OsWords.h"
+#include "Global/OsBytes.h"
+#include "Global/Countries.h"
+#include "Interface/HighFSI.h"
+#include "Interface/Territory.h"
+#include "DebugLib/DebugLib.h"
+#include "AsmUtils/osvarlen.h"
+
+#include "MsgCode.h"
+#include "TerrMgrInt.h"
+#include "Daylight.h"
+#include "Time.h"
+#include "TerritoryMgrHdr.h"
+
+int32_t     last_tzone_centis;    /* To check for changes */
+uint8_t     last_dst_bits;        /* To check for changes */
+tanumber_t  configured_territory; /* Configured territory */
+void       *private_word;         /* Copy of pw */
+char        message_custom[20];   /* Cache of unknown timezone text */
+struct territorylist territories; /* Head of list */
+
+/*!
+ * \brief  A new territory was selected
+ * \return Nothing
+ */
+void territory_selected(void)
+{
+	/* Reassess the situation */
+	daylight_switch_check();
+
+	/* Announce the selection */
+	_swix(OS_ServiceCall, _IN(1), Service_TerritoryStarted);
+}
+
+_kernel_oserror *tmloaded_callback_handler(_kernel_swi_regs *r, void *pw)
+{
+	_swix(OS_ServiceCall, _IN(1), Service_TerritoryManagerLoaded);
+	dprintf(("", "Service call issued: TerritoryManager loaded\n"));
+
+	UNUSED(r);
+	UNUSED(pw);
+
+	return NULL;
+}
+
+_kernel_oserror *territory_init(const char *cmd_tail, int podule_base, void *pw)
+{
+	static const char *const defaultpath = "Resources:$.Resources.TerrMgr.";
+	uint32_t config;
+
+	/* Initialise Territory path if not already done */
+	if (osvarlen("TerritoryManager$Path", VarType_Expanded) == -1)
+	{
+		_swix(OS_SetVarVal, _INR(0,4), "TerritoryManager$Path",
+		      defaultpath, strlen(defaultpath), 0, VarType_String);
+	}
+
+	/* Clear the territories list */
+	SLIST_INIT(&territories);
+
+	/* Set up tracing */
+	debug_initialise(Module_Title, "Ram::0.$.TerrMgr", "");
+	debug_set_device(FILE_OUTPUT);
+
+	/* Read configured territory from CMOS */
+	config = TerritoryNum_Default; /* In case of error */
+	_swix(OS_Byte, _INR(0,1) | _OUT(2), OsByte_ReadCMOS, TerritoryCMOS, &config);
+	static_assert((TerritoryNum_Default ^ 1) == TerritoryNum_UK, "UK should be 1");
+	configured_territory = (tanumber_t)config ^ 1; /* Stored value has b0 toggled */
+	dprintf(("", "Configured territory is %d\n", configured_territory));
+
+	/* Important flags */
+	last_tzone_centis = -1;
+	last_dst_bits = -1; /* Ensures a service call */
+	private_word = pw;
+
+	/* Read the static string 'Custom' for Territory_ReadCurrentTimeZone */
+	if (messages_lookup("Custom", message_custom, sizeof(message_custom)) == NULL)
+	{
+		strcpy(message_custom, "Custom"); /* Fallback to English */
+	}
+
+	/* Set a callback to issue the TerritoryManagerLoaded service call */
+	_swix(OS_AddCallBack, _INR(0,1), tmloaded_callback, pw);
+
+	UNUSED(podule_base);
+	UNUSED(cmd_tail);
+
+	return NULL;
+}
+
+_kernel_oserror *territory_final(int fatal, int podule, void *pw)
+{
+	territory_t *t;
+
+	/* Cancel any pending DST switch */
+	_swix(OS_RemoveTickerEvent, _INR(0,1), daylight_switchover, pw);
+
+	/* Close the message file if open */
+	messages_destroy();
+
+	/* Free all module blocks */
+	while (!SLIST_EMPTY(&territories))
+	{
+		t = SLIST_FIRST(&territories);
+		SLIST_REMOVE_HEAD(&territories, list);
+		free(t);
+	}
+
+	UNUSED(fatal);
+	UNUSED(podule);
+
+	return NULL; /* Don't refuse to die */
+}
+
+/*!
+ * \brief  Load the territory module and any found messages modules
+ * \param  tfile Where to look for the territory module
+ * \param  mbase Directory to seek for messages modules
+ * \return Error block pointer
+ */
+static _kernel_oserror *load_the_files(const char *tfile, const char *mbase)
+{
+	_kernel_oserror *err;
+	territory_t *t;
+	int32_t continuation;
+	size_t  len, count;
+	char    mfile[100];
+
+	/* First load the territory module */
+	dprintf(("", "Load territory from file %s\n", tfile));
+	err = _swix(OS_Module, _INR(0,1), ModHandReason_Load, tfile);
+	if (err != NULL) return err;
+
+	/* Now load any messages modules */
+	continuation = 0;
+	len = sprintf(mfile, "%s.", mbase);
+	do
+	{
+		err = _swix(OS_GBPB, _INR(0,6) | _OUTR(3,4), OSGBPB_ReadDirEntries,
+		            mbase, &mfile[len], 1, continuation, sizeof(mfile), 0,
+		            &count, &continuation);
+		if (err != NULL) return err;
+		if (count == 1)
+		{
+			dprintf(("", "Loading messages module %s\n", mfile));
+			err = _swix(OS_Module, _INR(0,1), ModHandReason_Load, mfile);
+			if (err != NULL) return err;
+		}
+	} while (continuation != -1);
+
+	/* Modules loaded, now check that configured territory exists */
+	SLIST_FOREACH(t, &territories, list)
+	{
+		if (t->number == configured_territory)
+		{
+			return NULL; /* Success! */
+		}
+	}
+	dprintf(("", "Configured territory still isn't loaded!\n"));
+
+	return AN_ERROR;
+}
+
+#ifndef EMBEDDED_UI
+
+/*!
+ * \brief  Display a language agnostic media insertion prompt
+ * \return Error block pointer
+ */
+static _kernel_oserror *show_prompt(void)
+{
+	_kernel_oserror *err;
+	const squashheader_t *header;
+	size_t   squashwksp;
+	uint32_t squashedsize, type;
+	uint8_t *wksp, *input, *output = NULL;
+	int32_t  drwwidth, drwheight, scrwidth, scrheight, scalex, scaley;
+	struct
+	{
+		uint32_t xeig, yeig;
+		uint32_t width, height;
+		int32_t  end;
+	} vdustate = { VduExt_XEigFactor, VduExt_YEigFactor,
+	               VduExt_XWindLimit, VduExt_YWindLimit,
+	               -1
+	             };
+	struct
+	{
+		int32_t bl_x, bl_y, tr_x, tr_y;
+	} bbox;
+	struct
+	{
+		int32_t a, b, c, d, e, f;
+	} matrix;
+
+	/* Find size of file and workspace needs */
+	err = _swix(OS_File, _INR(0,1) | _IN(4) | _OUT(0) | _OUT(4), OSFile_ReadPath,
+	            "Prompt", "TerritoryManager:", &type, &squashedsize);
+	if (err == NULL)
+	{
+		if (type != object_file) return AN_ERROR;
+		err = _swix(Squash_Decompress, _INR(0,1) | _OUT(0), 8, -1, &squashwksp);
+	}
+	if (err != NULL) return err;
+
+	/* Allocate and load the squashed file */
+	err = AN_ERROR;
+	input = malloc(squashwksp + squashedsize);
+	if (input != NULL)
+	{
+		wksp = input;
+		header = (const squashheader_t *)(input + squashwksp);
+		err = _swix(OS_File, _INR(0,4), OSFile_LoadPath,
+		            "Prompt", header, 0, "TerritoryManager:");
+	}
+	if (err != NULL) goto failed;
+
+	/* Allocate and decompress the Draw file */
+	err = AN_ERROR;
+	if (header->id == SQUASH_ID)
+	{
+		output = malloc(header->length);
+		if (output != NULL)
+		{
+			err = _swix(Squash_Decompress, _INR(0,5), 4, wksp,
+			            header + 1, squashedsize - sizeof(squashheader_t),
+			            output, header->length);
+		}
+	}
+	if (err != NULL) goto failed;
+
+	dprintf(("", "Expanded squashed Prompt from %u to %u\n", squashedsize, header->length));
+
+	/* Get screen parameters and draw bounding box */
+	err = _swix(OS_ReadVduVariables, _INR(0,1), &vdustate, &vdustate);
+	if (err == NULL)
+	{
+		err = _swix(DrawFile_BBox, _INR(0,4), 0, output, header->length, 0, &bbox);
+	}
+	if (err != NULL) goto failed;
+
+	/* Clear screen */
+	_swix(OS_WriteI + 4  /* Split cursor */, 0);
+	_swix(OS_WriteI + 26 /* Default window */, 0);
+	_swix(OS_WriteI + 20 /* Default colours */, 0);
+	_swix(OS_SetColour, _INR(0,1), (1<<4) | (1<<6), 0); /* Black text background */
+	_swix(OS_WriteI + 12 /* CLS */, 0);
+
+	/* Work out scale to 7/8 fill the screen. The source image has been designed
+	 * for a 4:3 aspect, so on a widescreen it'll get scaled to fill the entire
+	 * height but be left justified, which is safe.
+	 */
+	drwwidth  = bbox.tr_x - bbox.bl_x;
+	drwheight = bbox.tr_y - bbox.bl_y; /* Draw units */
+	scrwidth  = (vdustate.width + 1) << vdustate.xeig;
+	scrheight = (vdustate.height + 1) << vdustate.yeig; /* OS units */
+	dprintf(("", "Screen %ux%u DrawFile is %ux%u OSU\n", scrwidth, scrheight,
+	                                                     drwwidth >> 8, drwheight >> 8));
+	scalex = ((7 * 256 * 32 * scrwidth) / drwwidth);
+	scaley = ((7 * 256 * 32 * scrheight) / drwheight); /* 256x scaled */
+	if (scalex > scaley) scalex = scaley;
+	dprintf(("", "Lowest common scaling factor %d/256th's\n", scalex));
+
+	/* Vertically centre and plot */
+	matrix.a = scalex << 8; /* 16.16 */
+	matrix.b = matrix.c = 0;
+	matrix.d = scalex << 8; /* 16.16 */
+	matrix.e = 0;
+	matrix.f = ((scrheight << 8) - ((drwheight >> 8) * scalex)) / 2; /* Draw units */
+	err = _swix(DrawFile_Render, _INR(0,4), 0, output, header->length, &matrix, 0);
+failed:
+	free(input);
+	free(output);
+	return err;
+}
+
+#endif
+
+/*!
+ * \brief  Check the configured territory is loaded or prompt for it to be
+ * \return Nothing
+ */
+static void load_the_territory(void)
+{
+	_kernel_oserror *err;
+	const char *tfile, *mbase;
+	territory_t *t;
+	uint32_t     fsnumber;
+
+	dprintf(("", "Post init service call received\n"));
+
+	SLIST_FOREACH(t, &territories, list)
+	{
+		if (t->number == configured_territory)
+		{
+			return; /* Skip loading, it's already present */
+		}
+	}
+
+	dprintf(("", "Configured territory %d not already loaded\n", configured_territory));
+
+	fsnumber = fsnumber_none; /* In case of error */
+	_swix(OS_Args, _INR(0,1) | _OUT(0), OSArgs_ReadPTR, 0, &fsnumber);
+	fsnumber &= 0xFF; /* FileSwitch 1.70-2.74 return duff internal value 'Nowt' here */
+	if (fsnumber == fsnumber_none)
+	{
+		/* If no selected filing system, go back to English! */
+		configured_territory = TerritoryNum_UK;
+		return;
+	}
+	dprintf(("", "Number of selected FS %u\n", fsnumber));
+
+	if (fsnumber == fsnumber_net)
+	{
+		/* Special treament for NetFS */
+		dprintf(("", "Logging on to Econet\n"));
+		err = _swix(OS_CLI, _IN(0), "Logon Territory");
+		tfile = "&.!Territory.Territory";
+		mbase = "&.!Territory.Messages";
+	}
+	else
+	{
+		err = NULL;
+		tfile = "$.!Territory.Territory";
+		mbase = "$.!Territory.Messages";
+	}
+	while (1)
+	{
+		if (err != NULL)
+		{
+#ifndef EMBEDDED_UI
+			uint32_t oldpointer, key, flags;
+
+			if (show_prompt() != NULL)
+			{
+				break; /* Failed to show */
+			}
+			dprintf(("", "Waiting for user confirmation\n"));
+			_swix(OS_Byte, _INR(0,1) | _OUT(1), OsByte_SelectPointer, 1,
+			                                    &oldpointer);
+			_swix(OS_Confirm, _OUT(0) | _OUT(_FLAGS), &key, &flags);
+			_swix(OS_Byte, _INR(0,1), OsByte_SelectPointer, oldpointer);
+			if (flags & _C)
+			{
+				dprintf(("", "Escape\n"));
+				_swix(OS_Byte, _IN(0), OsByte_AcknowledgeEscape);
+				break;
+			}
+			if ((flags & _Z) || (key == 13))
+			{
+				dprintf(("", "User confirms media inserted\n"));
+				tfile = ":0.$.!Territory.Territory";
+				mbase = ":0.$.!Territory.Messages";
+			}
+			else
+			{
+				dprintf(("", "User declined to insert media\n"));
+				break;
+			}
+#else
+			/* On NC/STB - no way should we be bringing up a media prompt.
+			 * Instead, let's take the territory at the head of the
+			 * chain (the most recently registered).
+			 */
+			t = SLIST_FIRST(&territories);
+			configured_territory = t->number;
+			return;
+#endif
+		}
+		err = load_the_files(tfile, mbase);
+		if (err == NULL) return; /* Success! */
+	}
+
+	/* Give up, clear the screen and fall back to UK */
+	_swix(OS_WriteI + 4  /* Split cursor */, 0);
+	_swix(OS_WriteI + 26 /* Default window */, 0);
+	_swix(OS_WriteI + 12 /* CLS */, 0);
+	configured_territory = TerritoryNum_UK;
+}
+
+/*!
+ * \brief  Convert input text to a territory
+ * \param  string Name or number to parse
+ * \param  territory Territory number after conversion
+ * \return Error block pointer
+ */
+static _kernel_oserror *parse_name_or_number(const char *string, uint32_t *territory)
+{
+	_kernel_oserror *err;
+	uint32_t selected;
+	const char *tail;
+
+	/* Ask around if the name is recognised */
+	err = _swix(Territory_NameToNumber, _INR(0,1) | _OUT(0),
+	            -1, string, &selected);
+	if (err != NULL) return err;
+	if (selected == 0)
+	{
+		/* Allow numeric selection */
+		err = _swix(OS_ReadUnsigned, _INR(0,1) | _OUTR(1,2),
+		            0xC000000A, /* Base 10, check terminator, <= 255 */
+		            string, &tail, &selected);
+		if (err != NULL) return err;
+
+		/* Check that nothing else follows */
+		while (*tail == ' ') tail++; /* Skip trailing spaces */
+		if (*tail > ' ') return configure_TOO_MANY_PARAMS;
+	}
+	*territory = selected;
+
+	return NULL;
+}
+
+void territory_services(int service_number, _kernel_swi_regs *r, void *pw)
+{
+	switch (service_number)
+	{
+		case Service_UKConfig:
+			/* Unknown option, is it configuring the time zone? */
+			if (time_configtimezone((const char *)r->r[0]))
+			{
+				r->r[0] = -1; /* No error */
+				r->r[1] = Service_Serviced;
+			}
+			break;
+
+		case Service_PostInit:
+			load_the_territory();
+
+			/* By this stage the configured territory is in memory */
+			territory_selected();
+			break;
+
+		case Service_UKWord:
+			if (r->r[2] == OsWord_WriteRealTimeClock)
+			{
+				const uint8_t *block = (const uint8_t *)r->r[3];
+				_kernel_oserror *err;
+
+				if (block[0] == OWWriteRTC_5ByteInt)
+				{
+					/* Kernel didn't deal with OS_Word 15,5 so we will */
+					err = time_setthehardway(block);
+					if (err == NULL) r->r[1] = Service_Serviced;
+				}
+			}
+			break;
+
+		case Service_RTCSynchronised:
+			/* Do an AutoDST check */
+			daylight_switch_check();
+			break;
+	}
+	UNUSED(pw);
+}
+
+_kernel_oserror *territory_commands(const char *arg_string, int argc, int cmd_no, void *pw)
+{
+	_kernel_oserror *err;
+	territory_t *t;
+	char    name[32];
+	uint8_t andmask, eormask;
+
+	switch (cmd_no)
+	{
+		case CMD_Territory:
+			if (argc == 0)
+			{
+				/* Print current territory to screen */
+				if (_swix(Territory_NumberToName, _INR(0,2),
+				          configured_territory, name, sizeof(name)) != NULL)
+				{
+					/* No name given, show numeric */
+					sprintf(name, "%u", configured_territory);
+				}
+				printf("%s\n", name);
+			}
+			else
+			{
+				uint32_t selected;
+
+				err = parse_name_or_number(arg_string, &selected);
+				if (err != NULL) return err;
+
+				/* Set the territory */
+				return _swix(Territory_Select, _IN(0), selected);
+			}
+			break;
+
+		case CMD_Territories:
+			/* Print numbers and names of loaded territories */
+			SLIST_FOREACH(t, &territories, list)
+			{
+				if (_swix(Territory_NumberToName, _INR(0,2),
+				          t->number, name, sizeof(name)) != NULL)
+				{
+					/* No name given, use default */
+					messages_lookup("Unused", name, sizeof(name));
+				}
+				printf("%u %s\n", t->number, name);
+			}
+			break;
+
+		case CMDCFG_Territory:
+			if (arg_string == arg_STATUS)
+			{
+				uint32_t config;
+
+				err = _swix(OS_Byte, _INR(0,1) | _OUT(2), OsByte_ReadCMOS,
+				            TerritoryCMOS, &config);
+				if (err != NULL) return err;
+				printf("Territory  %u\n", config ^ 1);
+			}
+			else if (arg_string == arg_CONFIGURE_SYNTAX)
+			{
+				messages_writenl("CTSynt");
+			}
+			else
+			{
+				uint32_t selected;
+
+				err = parse_name_or_number(arg_string, &selected);
+				if (err != NULL) return err;
+
+				/* Write the CMOS RAM! */
+				return _swix(OS_Byte, _INR(0,2), OsByte_WriteCMOS,
+				             TerritoryCMOS, selected ^ 1);
+			}
+			break;
+
+		case CMD_NoDST:
+			/* Manual 'off' implicitly clears the auto flag */
+			andmask = 0, eormask = 0;
+			goto set_dst_bits;
+
+		case CMD_AutoDST:
+			/* Leave the DST bit alone and set the auto bit */
+			andmask = DSTCMOSBit, eormask = AutoDSTCMOSBit;
+			goto set_dst_bits;
+
+		case CMD_DST:
+			if (arg_string == arg_STATUS)
+			{
+				uint32_t saving;
+
+				saving = daylight_modify_cmos(DSTCMOSBit | AutoDSTCMOSBit, 0);
+				printf("%sDST\n", (saving & AutoDSTCMOSBit) ? "Auto" :
+				                  (saving & DSTCMOSBit) ? "" : "No");
+			}
+			else if (arg_string == arg_CONFIGURE_SYNTAX)
+			{
+				messages_writenl("CDSTSyn");
+			}
+			else
+			{
+				/* Manual 'on' implicitly clears the auto flag */
+				andmask = 0, eormask = DSTCMOSBit;
+			}
+set_dst_bits:
+			/* Shared handling of daylight saving update */
+			if ((arg_string != arg_STATUS) && (arg_string != arg_CONFIGURE_SYNTAX))
+			{
+				daylight_modify_cmos(andmask, eormask);
+				daylight_switch_check();
+			}
+			break;
+
+		case CMD_TimeZone:
+			if (arg_string == arg_STATUS)
+			{
+				int32_t offset;
+
+				err = _swix(OS_Byte, _INR(0,1) | _OUT(2), OsByte_ReadCMOS,
+				            TimeZoneCMOS, &offset);
+				if (err != NULL) return err;
+
+				/* Sign extend, units are quarter hours */
+				offset = 15 * ((offset << 24) >> 24);
+				printf("TimeZone   %+d:%02u\n", offset / 60, abs(offset % 60));
+			}
+			else if (arg_string == arg_CONFIGURE_SYNTAX)
+			{
+				messages_writenl("TZSynt");
+			}
+			else
+			{
+				bool negative = arg_string[0] == '-';
+				const char *tail;
+				int32_t offset, hours, mins = 0;
+
+				if (negative || (arg_string[0] == '+')) arg_string++;
+
+				/* Read hours 0-13 */
+				err = _swix(OS_ReadUnsigned, _INR(0,2) | _OUTR(1,2),
+				            0x2000000A, /* Base 10, <= R2 */
+				            arg_string, 13, &tail, &hours);
+				if (err != NULL) return err;
+
+				if (*tail == ':')
+				{
+					/* Read minutes 0-59 */
+					err = _swix(OS_ReadUnsigned, _INR(0,2) | _OUT(2),
+					            0x2000000A, /* Base 10, <= R2 */
+					            tail + 1, 59, &mins);
+					if (err != NULL) return err;
+				}
+
+				/* Combine to signed quarter hours */
+				offset = (hours << 2) | (mins / 15);
+				if (negative) offset = -offset;
+
+				/* Write out and reassess daylight saving */
+				_swix(OS_Byte, _INR(0,2), OsByte_WriteCMOS,
+				      TimeZoneCMOS, offset);
+				daylight_switch_check();
+			}
+			break;
+	}
+
+	UNUSED(pw);
+
+	return NULL;
+}

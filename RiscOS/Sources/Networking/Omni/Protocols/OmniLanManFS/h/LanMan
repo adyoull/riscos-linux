@@ -1,0 +1,211 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Module-wide definitions for the LanMan filing system: constants, info-word
+ * flags, FileSwitch number, and the re-entrancy interlock used by every
+ * top-level FSEntry / star-command handler.
+ */
+
+/* Constants ------------- */
+
+#define FilingSystemName "LanMan"
+#define Our_FS_Number    102
+#define Our_Error_Base   ((0x10000) | (Our_FS_Number << 8))
+#define MAX_DRIVES       8 /* Maximum number of connections */
+#define NAME_LIMIT       16
+#define USERNAME_LIMIT   64  /* Longest userID */
+#define PASSWORD_LIMIT   64  /* Longest password */
+#define DOS_NAME_LEN     256 /* Path plus leaf limit */
+
+/* CallEvery period for background work, in the form OS_CallEvery takes it: the period in centiseconds less one.
+ *
+ * SMB2_PollNotifications takes in any change notifications waiting on the sockets, so on an otherwise idle mount the period
+ * bounds how soon the Filer is told of a change on the server.  SMB_AntiIdle offers every dead server a recovery probe, which
+ * it rate-limits itself, and checks one share per tick, so a share due a keep-alive gets it within one pass of the share
+ * table.  A tick with nothing to send costs a non-blocking poll of each live server's socket, walks of the server and share
+ * tables, and a clock read.
+ */
+#define LM_CALLEVERY_TICKS   (100 - 1) /* 1Hz */
+
+/* Background ticks between clearings of the file types remembered from MimeMap, so an edited MimeMap file is seen within that many
+ * periods of LM_CALLEVERY_TICKS.
+ */
+#define LM_MIME_CACHE_TTL (5)
+
+#define INFO_SPECIALFIELD    0x80000000
+#define INFO_INTERACTIVE     0x40000000
+#define INFO_NULLFILENAMES   0x20000000
+#define INFO_OPENNONEXISTENT 0x10000000
+#define INFO_ARGS_FLUSH      0x08000000
+#define INFO_FILE_TIME       0x04000000
+#define INFO_FUNC_TEMPFS     0x02000000
+
+#define INFO_MULTIFS_EXTNS  0x00800000 /* Func 23 and 24 supported */
+#define INFO_NO_EXPAND_PATH 0x00400000
+#define INFO_NO_STORE_PATHS 0x00200000
+#define INFO_AVOID_FILE255  0x00100000
+#define INFO_AVOID_FILE0    0x00080000
+#define INFO_USE_FUNC9      0x00040000
+#define INFO_EXTRA_INFO     0x00020000
+
+#define INFO2_SUPPORTS_IOCTL 0x00000008
+
+#define Information_Word  (Our_FS_Number | INFO_FILE_TIME | INFO_EXTRA_INFO | INFO_MULTIFS_EXTNS)
+#define Information2_Word (INFO2_SUPPORTS_IOCTL)
+
+#define NBNSIPCMOS0 0x50
+#define NBNSIPCMOS1 0xe4
+#define NBNSIPCMOS2 0xe5
+#define NBNSIPCMOS3 0xe6
+
+/* c.LanMan exports -------------
+ *
+ * Most of these are referenced from the cmhg-generated veneer header.
+ */
+
+extern int LM_pw; // Module workspace pointer (R12-style), supplied by RISC OS at init.
+
+/* Attempt the deferred boot-time mount.
+ *
+ * Called from the filing-system boot entry (FSEntry_Func) in any state, and from
+ * LM_init_phase_2 to replay a deferred boot.  If LanManFS has not reached
+ * LMInitState_FullyInited the request is recorded (LMInitState_Boot) and
+ * retried when the transport finally comes up.  Reads the configured server
+ * name from Inet$ServerName or CMOS, preferring a domain controller RPC finds
+ * for it, and falls back through Inet$ServerName2, Inet$ServerName3, ... for
+ * as long as the mount fails before a share is created.  Mounts the share as
+ * "BOOT" with the fixed "ARMBOOT" / "" credentials.
+ */
+extern void LM_Boot(void);
+
+/* Read one byte from non-volatile CMOS storage.
+ *
+ * Parameters:
+ *   addr  CMOS address (0-255)
+ *
+ * Returns: the byte at `addr`, in the low 8 bits.
+ */
+extern int RdCMOS(int addr);
+
+/* Look up a MessageTrans token in the module's local message file.
+ *
+ * Parameters:
+ *   token  message token name (NUL-terminated), e.g. "Free", "BootBad", "NMMode0"
+ *
+ * Returns: pointer to the looked-up message string, or "" on failure.  The
+ * returned pointer is into a per-module static buffer and is overwritten by
+ * the next call.
+ */
+extern const char *MsgLookup(const char *token);
+
+/* Remember the last externally-produced OS error so MsgError can return it later.
+ *
+ * Lets a low-level path that already has an OS error block return an err_t
+ * through the normal error-passing chain without losing the block.  The
+ * translation maps `err` to the sentinel EUSELASTSETOSERR, which a later
+ * MsgError(EUSELASTSETOSERR) translates back to the captured error block.
+ *
+ * Parameters:
+ *   err  the OS error to remember, or NULL to clear
+ *
+ * Returns: OK if `err` is NULL, EUSELASTSETOSERR otherwise.
+ */
+extern err_t MsgSetOSError(_kernel_oserror *err);
+
+/* Translate an internal LanManFS error number into a RISC OS error block.
+ *
+ * EUSELASTSETOSERR returns the block saved by MsgSetOSError (EHOWDTHATHAPPEN
+ * if none is saved).  Everything else is looked up via MessageTrans_ErrorLookup
+ * as token "E%02u", numbered from Our_Error_Base; EDIRNOTEMPTY and ENOACCESS
+ * take the number for ErrorNumber_DirNotEmpty instead, because Filer_Action
+ * requires that number for "directory not empty".
+ *
+ * Parameters:
+ *   which  internal error number, or OK for no error
+ *
+ * Returns: NULL when `which` is OK, otherwise a pointer to the error block.
+ */
+extern _kernel_oserror *MsgError(int which);
+
+/* S.Interface exports --------------- */
+
+extern void Free_ServiceRoutine(void);
+
+#define UNUSED(x) (void)(x)
+
+/* Module-wide re-entrancy interlock.
+ *
+ * LanManFS holds several pieces of static state (smb2_txbuf / smb2_rxbuf protocol buffers, c.CoreFn's path scratch buffer
+ * and directory-read state, the open-file table, the name cache) that would silently corrupt under re-entrant entry.
+ * RISC OS can re-enter the module through transient callbacks fired during blocking SWIs, through the UpCall handlers it invokes,
+ * and through error and event dispatch, none of which the module controls.
+ *
+ * The model: every top-level handler (FSEntry_*, star command) marks its entry with FSEnter() and clean exit via FSExit().
+ * FSEnter() refuses re-entry by returning ELANMANFSINUSE as a _kernel_oserror *; nested internal functions don't check the
+ * flag and run unguarded inside the enclosing handler's ownership window.
+ *
+ * Convention: every handler uses the goto-exit pattern to guarantee FSExit() is called on every return path:
+ *
+ *     _kernel_oserror *handler(...) {
+ *       _kernel_oserror *ret = NULL;
+ *       FSEnter();
+ *       ...
+ *       if (err) { ret = MsgError(err); goto exit; }
+ *       ...
+ *     exit:
+ *       FSExit();
+ *       return ret;
+ *     }
+ *
+ * FSEnter's early return happens before setting the flag, so it doesn't need a matching FSExit.
+ */
+extern bool lanmanfs_in_use;
+extern const char *lanmanfs_owner; // function name of the current FSEnter holder; for diagnosing a flag left set
+
+/* FSEnter records the holder's function name (via __func__) so a subsequent FSEnter that bounces with
+ * ELANMANFSINUSE can tell the operator which handler is stuck.  An abort or longjmp inside an FSEntry handler
+ * leaves the flag set without ever calling FSExit, and the stuck owner is then named in the bounce's debug print.
+ *
+ * Change notifications already waiting on the sockets are taken in first, at most once a centisecond, so the handler's cache
+ * lookups see what other clients have changed.  A call that bounces does not take them in, since it cannot use the cache anyway.
+ *
+ * Two things the SMB2 layer keeps for the benefit of the call in hand must not leak into the next one.  What the
+ * last name lookup found is discarded on every entry.  A directory listing left open part-way is closed too,
+ * except by FSEnterKeepingListing, for the handlers a continuing directory read passes through (the read itself, and
+ * the catalogue read FileSwitch makes ahead of it), which make that choice.  A file using these macros includes h/SMB2,
+ * which declares the functions they call.
+ */
+#define FSEnterKeepingListing()                                                        \
+  do {                                                                                 \
+    if (lanmanfs_in_use) {                                                             \
+      debug("FSEnter: already held by '%s'\n", lanmanfs_owner ? lanmanfs_owner : "?"); \
+      return MsgError(ELANMANFSINUSE);                                                 \
+    }                                                                                  \
+    SMB2_PollNotifications();                                                          \
+    SMB2_ForgetLookup();                                                               \
+    lanmanfs_in_use = true;                                                            \
+    lanmanfs_owner = __func__;                                                         \
+  } while (0)
+
+#define FSEnter()            \
+  do {                       \
+    FSEnterKeepingListing(); \
+    SMB2_EndListing();       \
+  } while (0)
+
+#define FSExit()             \
+  do {                       \
+    lanmanfs_in_use = false; \
+    lanmanfs_owner = NULL;   \
+  } while (0)

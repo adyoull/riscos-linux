@@ -1,0 +1,10 @@
+Further options for grid (object type 17)
+-----------------------------------------
+
+Header - bounding box reserved, set to all zero.
+Data
+Size
+8 double  - grid y-spacing (floating point)
+4 int32   - grid y-subdivision
+4 int32   - grid y-units (0 = inches, 1 = centimetres)
+4 uint32  - grid colour  (Wimp colour 0 - 15)

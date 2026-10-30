@@ -1,0 +1,320 @@
+/*
+ * Copyright (c) 2015, Timothy Baldwin
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "header.h"
+#include "swis.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdint.h>
+
+#include "Global/HALEntries.h"
+#include "Global/OSMem.h"
+#include "Global/OSWords.h"
+#include "Global/OSBytes.h"
+#include "Global/RISCOS.h"
+#include "Global/Upcall.h"
+#include "../HAL/exports.h"
+
+_kernel_oserror *init(const char *cmd_tail, int podule_base, void *pw) {
+
+  // Copy Linux environment variables to RISC OS system variables.
+  for(char **i = __HAL_get_env(); *i; ++i) {
+    char *const limit = pd1.name + sizeof(pd1.name) - 1;
+    char *s = *i, *d = pd1.name;
+    if (memcmp(s, "RISC_OS_", 8) == 0 && s[8] != '_') {
+      s += 8;
+      while(*s && *s != '=' && d < limit) {
+        char c = *s++;
+        if (c == '_' || c == '$') c= c ^ ('_' ^ '$');
+        *d++ = c;
+      }
+    } else {
+      *d++ = 'i';
+      *d++ = 'x';
+      *d++ = '$';
+      while(*s && *s != '=' && d < limit) *d++ = *s++;
+    }
+    *d = 0;
+    if (*s == '=') ++s;
+    _swix(OS_SetVarVal, _INR(0, 4), pd1.name, s, strlen(s), 0, 4);
+  }
+
+  pd1.fd = -1;
+  pd2.fd = -1;
+  pd1.dir_fd = -1;
+  pd2.dir_fd = -1;
+
+  _kernel_oserror *e = 0;
+
+  e = _swix(OS_FSControl, _INR(0, 3), 12, __module_header, (uintptr_t)fsinfo - (uintptr_t)__module_header, pw);
+  return e;
+}
+
+_kernel_oserror *final(int fatal, int podule, void *pw) {
+  (void)pw;
+  _kernel_oserror *e = 0;
+  e = _swix(OS_FSControl, _INR(0, 1), 16, "IXFS");
+  return e;
+}
+
+_kernel_oserror *convert_error(int r) {
+  static _kernel_oserror unknown_error = {0, "Unknown Error"};
+  r = -r;
+  _kernel_oserror *e = 0;
+  if (r > 0 && r < 4096) e = error_table[r];
+  if (!e) {
+    e = &unknown_error;
+    eprintf("Untranslated Linux Error: %i\n", r);
+    sprintf(unknown_error.errmess, "Untranslated Linux Error %i", r);
+  }
+  return e;
+}
+
+_kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
+  (void)pw;
+  switch (swi_no) {
+    case IXSupport_LinuxSyscall - IXSupport_00:
+#ifdef __GNUC__
+      asm volatile ("LDMIA %0, {r0-r7}\n BL __PVirt_LinuxSyscall\n STR r0, [%0]" : : "r"(r) : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "lr", "memory");
+#else
+      __asm {
+        MOV     r0, r->r[0]
+        MOV     r1, r->r[1]
+        MOV     r2, r->r[2]
+        MOV     r3, r->r[3]
+        MOV     r4, r->r[4]
+        MOV     r5, r->r[5]
+        MOV     r6, r->r[6]
+        MOV     r7, r->r[7]
+        BL      __PVirt_LinuxSyscall, {r0-r7}, {r0}, {}
+        MOV     r->r[0], r0
+      }
+#endif
+      return 0;
+    case IXSupport_ConvertError - IXSupport_00:
+      return convert_error(r->r[0]);
+  }
+  return error_BAD_SWI;
+}
+
+static _kernel_oserror *do_IXRun(const char *arg_string, int argc) {
+
+  // TODO list:
+  // Handle non-zero return codes.
+  // Provide translation from RISC OS to Linux paths.
+  // Do something sensible with environment variables.
+  // Better handling of terminal / VDU codes.
+  // Better handling of Escape / SIGTERM?
+  // Deal with file descriptor leaks.
+  // Provide access to RISC OS filing systems.
+
+  char *cmd[argc + 1];
+  char *env[] = {0};
+  int pipe[2];
+  int e;
+  _kernel_oserror *error = 0;
+
+
+  // Allocate memory for
+  struct data {
+    volatile int pollword;
+    char buffer[1024];
+  } *data = malloc(sizeof(struct data));
+
+  if (!data) return _kernel_last_oserror();
+
+  // Open pseudo-terminal master
+  e = ix_open("/dev/ptmx", ix_O_RDWR | ix_O_CLOEXEC | ix_O_NONBLOCK, 0);
+  if (e < 0) goto free_error;
+  int ptmx = e;
+
+  e = __PVirt_Poll_ctl(ptmx, ix_EPOLL_CTL_ADD, ix_EPOLLET | ix_EPOLLIN | ix_EPOLLOUT | ix_EPOLLHUP, &data->pollword);
+  if (e) goto close_error;
+
+  // Open a pipe communicate with child process
+  e = ix_pipe2(pipe, ix_O_CLOEXEC);
+  if (e) {
+    __PVirt_Poll_remove(ptmx);
+close_error:
+    ix_close(ptmx);
+free_error:
+    free(data);
+    return convert_error(e);
+  }
+
+  // Do the fork, possibly on another thread to avoid seccomp
+  int pid = __PVirt_fork(pipe);
+
+  if (pid == 0) {
+    // In child, create new session
+    ix_setsid();
+
+    // Parse command line, overwriting copy of input.
+    char *out = (char *)arg_string;
+    char **arg = cmd;
+    char c = *arg_string;
+    while(c >= ' ') {
+      while(c == ' ') c = *++arg_string; // Skip spaces
+      *arg++ = out;
+      while(c > ' ') {
+        if (c== '"' || c == '\'') {
+          char q = *++arg_string;
+          while(q != c && q  >= ' ') {
+            *out++ = q;
+            q = *++arg_string;
+          }
+          c = *++arg_string;
+        } else {
+          *out++ = c;
+          c = *++arg_string;
+        }
+      }
+      *out++ = 0;
+    }
+    *arg = 0;
+
+    // Unlock pseudo-terminal
+    int zero = 0;
+    e = ix_ioctl(ptmx, ix_TIOCSPTLCK, &zero);
+    if (e) goto error;
+
+    // Get pseudo-terminal number
+    int pts_no;
+    e = ix_ioctl(ptmx, ix_TIOCGPTN, &pts_no);
+    if (e) goto error;
+
+    // Open slave end
+    char ptsname[20];
+    sprintf(ptsname, "/dev/pts/%i", pts_no);
+    int pts = ix_open(ptsname, ix_O_RDWR | ix_O_CLOEXEC, 0);
+    if (pts < 0) {
+      e = pts;
+      goto error;
+    }
+
+    // Duplicate file descriptor to stdin, stdout, and stderr
+    e = ix_dup2(pts, 0);
+    if (e < 0) goto error;
+    e = ix_dup2(pts, 1);
+    if (e < 0) goto error;
+    e = ix_dup2(pts, 2);
+    if (e < 0) goto error;
+
+    // Execute command
+    e = ix_execve(cmd[0], cmd, 0);
+error:
+    ix_write(pipe[1], &e, sizeof(e));
+    ix_exit(1);
+    *(int *)0 = 0;
+
+  } else if (pid != 0) {
+
+    // Close write end of pipe
+    ix_close(pipe[1]);
+
+    ix_read(pipe[0], &e, sizeof(e));
+
+    // Close read end of pipe
+    ix_close(pipe[0]);
+
+    int c;
+    int in = -1;
+    if (e) {
+      error = convert_error(e);
+    } else while (true) {
+      data->pollword = 0;
+
+      // Copy from pseudo-terminal master to RISC OS output stream.
+      c = ix_read(ptmx, data->buffer, sizeof(data->buffer));
+      if (c > 0) {
+        data->pollword = 1;
+        error = _swix(OS_WriteN, _INR(0, 1), data->buffer, c);
+        if (error) break;
+      } else {
+        if (c != -ix_EAGAIN)
+          break;
+      }
+
+      // Copy character RISC OS output stream from to pseudo-terminal
+      // using "in" as a 1 byte buffer.
+      _kernel_irqs_off();
+      if (in < 0) {
+        int flag;
+        error = _swix(OS_Byte, _INR(0, 2) | _OUTR(1, 2), OsByte_INKEY, 0, 0, &in, &flag);
+        if (error) break;
+        switch(flag) {
+          case 255:
+            in = -1;
+            break;
+          case 27:
+            in = 3; // Escape becomes CTRL C
+            ix_MESSAGE(2,"Escape in IXRun\n");
+            _kernel_osbyte(OsByte_AcknowledgeEscape, 0, 0);
+          default:
+            data->pollword = 1;
+        }
+      }
+      if (in >= 0) {
+        c = ix_write(ptmx, &in, 1);
+        if (c == 1) in = -1;
+      }
+
+      if (!data->pollword) {
+        int r;
+        error = _swix(OS_UpCall, _INR(0, 1) | _OUT(0), UpCall_Sleep, &data->pollword, &r);
+        if (error) break;
+        if (r && !data->pollword) __PVirt_WFI();
+      }
+      _kernel_irqs_on();
+    }
+    __PVirt_Poll_remove(ptmx);
+    ix_close(ptmx);
+    _kernel_irqs_on();
+    int wstatus;
+    ix_waitpid(pid, &wstatus, 0);
+  } else {
+    // Fork failed
+    ix_close(pipe[0]);
+    ix_close(pipe[1]);
+    __PVirt_Poll_remove(ptmx);
+    ix_close(ptmx);
+    error = convert_error(pid);
+  }
+  free(data);
+  return error;
+}
+
+_kernel_oserror *command_handler(const char *arg_string, int argc, int cmd_no, void *pw) {
+  (void)arg_string;
+  (void)argc;
+  (void)pw;
+  switch(cmd_no) {
+    case CMD_IXFS:
+      return _swix(OS_FSControl, _INR(0, 1), 14, 70);
+    case CMD_IXFSBoot:
+      break;
+    case CMD_IXDup2: {
+      int a, b;
+      sscanf(arg_string, "%i %i", &a, &b);
+      ix_dup2(a, b);
+      break;
+    }
+    case CMD_IXRun:
+      return do_IXRun(arg_string, argc);
+  }
+  return 0;
+}

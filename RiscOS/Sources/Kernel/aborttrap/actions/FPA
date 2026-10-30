@@ -1,0 +1,83 @@
+# Copyright (c) 2021, RISC OS Open Ltd
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met: 
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+#       may be used to endorse or promote products derived from this software
+#       without specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+# 
+
+LDF_STF(P,UD,T1,Wb,LS,Rn,T0,offset)
+{
+	/* Packed decimal formats are always handled by FPEmulator, so
+	   we only need to worry about the much easier single, double &
+	   extended formats. For ultra simplicity, we'll just map everything
+	   to a MemMap request and then re-execute the instruction. */
+	int len = (T0<<2)+(T1<<3)+4;
+	if (len == 16) /* P/EP */
+		return aborttrap_ERROR(Unexpected);
+
+	uint32_t base;
+	if (!aborttrap_reg_read_current(ctx,Rn,&base))
+		return aborttrap_ERROR(BadReg);
+	uint32_t offset32 = (UD?offset<<2:-offset<<2);
+	/* Undo any base register update */
+	bool restore_base = Wb && !(g_ProcessorFlags & CPUFlag_BaseRestored);
+	if (restore_base)
+		base -= offset32;
+	/* Calculate target address */
+	uint32_t addr = (P?base+offset32:base);
+	_kernel_oserror *e = aborttrap_MemMap(ctx,addr,len,3,LS?AbortTrap_MemMap_UserR:AbortTrap_MemMap_UserW);
+	if (!e && restore_base)
+	{
+		/* Write back the restored base register */
+		aborttrap_reg_write_current(ctx,Rn,base);
+	}
+	return e;
+}
+
+LFM_SFM(P,UD,N1:N0,Wb,LS,Rn,offset)
+{
+	/* Like LDF/STF, take the easy route and convert it to a MemMap
+	   request */
+	int len = N1_N0;
+	if (!len)
+		len = 4;
+	len *= 12;
+
+	uint32_t base;
+	if (!aborttrap_reg_read_current(ctx,Rn,&base))
+		return aborttrap_ERROR(BadReg);
+	uint32_t offset32 = (UD?offset<<2:-offset<<2);
+	/* Undo any base register update */
+	bool restore_base = Wb && !(g_ProcessorFlags & CPUFlag_BaseRestored);
+	if (restore_base)
+		base -= offset32;
+	/* Calculate target address */
+	uint32_t addr = (P?base+offset32:base);
+	_kernel_oserror *e = aborttrap_MemMap(ctx,addr,len,3,LS?AbortTrap_MemMap_UserR:AbortTrap_MemMap_UserW);
+	if (!e && restore_base)
+	{
+		/* Write back the restored base register */
+		aborttrap_reg_write_current(ctx,Rn,base);
+	}
+	return e;
+}

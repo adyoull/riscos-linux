@@ -1,0 +1,123 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* h.SMB2Xport - Direct TCP transport for SMB2/3 (port 445)
+ *
+ * Provides a socket-based transport layer for SMB2/3 using direct TCP on port 445, bypassing the NetBIOS session service used by
+ * SMB1 on port 139. Each message is framed with a 4-byte header per MS-SMB2 section 2.1.
+ *
+ */
+
+#ifndef SMB2XPORT_H
+#define SMB2XPORT_H
+
+/* IANA microsoft-ds port: SMB hosted directly over TCP, with no NetBIOS session service in between. */
+#define SMB2X_PORT 445
+
+/* Length of the stream-protocol header prefixed to every message: a zero type byte plus a 24-bit big-endian payload length
+ * (MS-SMB2 section 2.1).
+ */
+#define SMB2X_FRAME_HEADER_SIZE 4
+
+/*
+ * Open a TCP connection to hostname on the SMB direct-TCP port (445).
+ *
+ * A dotted-quad literal is used verbatim; any other name is resolved through DNS. Each resolved address is tried in turn until one connects
+ * within the default connect timeout (CONNECT_TIMEOUT_CS), so a multi-homed host fails over between its addresses.
+ *
+ * Parameters:
+ *   hostname  server name or dotted-quad IP address
+ *   sock_out  receives the connected socket descriptor on success
+ *
+ * Returns: OK with a socket in sock_out, or ECANTFINDNAME, ECREATESOCKET or ECONNECTSOCKET on failure.
+ */
+err_t SMB2X_Connect(const char *hostname, int *sock_out);
+
+/*
+ * Open a TCP connection to a numeric IPv4 address on port 445 using the default connect timeout (CONNECT_TIMEOUT_CS).
+ *
+ * Parameters:
+ *   ip_addr   IPv4 address in network byte order
+ *   sock_out  receives the connected socket descriptor on success
+ *
+ * Returns: OK with a socket in sock_out, else ECREATESOCKET or ECONNECTSOCKET.
+ */
+err_t SMB2X_ConnectAddr(unsigned long ip_addr, int *sock_out);
+
+/*
+ * Open a TCP connection to a numeric IPv4 address on port 445, giving up after timeout_cs centiseconds.
+ *
+ * Parameters:
+ *   ip_addr     IPv4 address in network byte order
+ *   timeout_cs  connect timeout in centiseconds
+ *   sock_out    receives the connected socket descriptor on success
+ *
+ * Returns: OK with a socket in sock_out, else ECREATESOCKET or ECONNECTSOCKET.
+ */
+err_t SMB2X_ConnectAddrTimed(unsigned long ip_addr, int timeout_cs, int *sock_out);
+
+/*
+ * Send one SMB2 message over the direct-TCP transport, prefixed with its four-byte session header.
+ *
+ * The header is a zero type byte followed by the 24-bit big-endian payload length. Header and body are written in one gathered write,
+ * so the header never goes out as a packet of its own.
+ *
+ * Parameters:
+ *   sock      connected socket
+ *   data      message body
+ *   len       body length in bytes
+ *   deadline  LM_Tick value past which the send is abandoned
+ *
+ * Returns: OK, ETIMEOUT if the deadline had passed, or ELINKFAILED on a write error.
+ */
+err_t SMB2X_Send(int sock, const uint8_t *data, int len, uint deadline);
+
+/*
+ * Receive one framed SMB2 message from the direct-TCP transport.
+ *
+ * Reads the four-byte session header, rejecting a non-zero type byte as a framing violation, then reads exactly the advertised length. A
+ * message longer than bufsize is refused rather than truncated.
+ *
+ * Parameters:
+ *   sock      connected socket
+ *   buf       buffer to receive the message body
+ *   bufsize   capacity of buf
+ *   deadline  LM_Tick value past which the read is abandoned
+ *   len_out   receives the body length actually read
+ *
+ * Returns: OK, ELINKFAILED on a framing violation, EDATALEN if the message exceeds bufsize, or the underlying read error.
+ */
+err_t SMB2X_Recv(int sock, uint8_t *buf, int bufsize, uint deadline, int *len_out);
+
+/*
+ * Test, without blocking, whether sock has data waiting to be read.
+ *
+ * Lets the caller poll for an unsolicited async response, such as a CHANGE_NOTIFY completion, without blocking.
+ *
+ * Parameters:
+ *   sock  connected socket
+ *
+ * Returns: true if a read would not block, false otherwise.
+ */
+bool SMB2X_DataReady(int sock);
+
+/*
+ * Close the direct-TCP (port 445) socket underlying an SMB2 connection.
+ *
+ * Parameters:
+ *   sock  socket descriptor returned by SMB2X_Connect
+ */
+void SMB2X_Close(int sock);
+
+#endif

@@ -1,0 +1,515 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+*
+*  SMB.H - Header for SMB functions
+*
+*/
+#ifndef SMB_H
+#define SMB_H
+
+#include <stddef.h>
+
+#define DIRENTRY_SIZE 22
+
+typedef struct ActiveShare *hSHARE;
+
+typedef err_t (*ENUM_DIR_FN)(uint8_t *entry, int format, bool *taken, void *private, hSHARE hS);
+
+struct disk_size_response {
+  uint blksize;
+  uint freeblks;
+  uint totalblks;
+};
+
+#define MODE_RD   0x20 /* Read, deny write to others */
+#define MODE_WR   0x11 /* Write, deny read/write to others */
+#define MODE_RDWR 0x12 /* Read/Write, deny read/write to others */
+
+/* Note.
+ *
+ * As per the June 19 1990 document (doc vsn 1.11, prot vsn 3.0), the maximum value for this needs to be 4 + (maximum route name
+ * length + 2)/2 for the TRANSACT2_FSCTL call (6.0.1.1.10, page 41).  However, TRANSACT2_IOCTL needs this to be 4 too, so it is
+ * left at four for the moment.  You will get a debug output message if you try to add too many setup words.
+ */
+#define MAX_SETUPWORDS (4)
+
+struct TransactParms {
+  int parms_in_len;
+  uint8_t *parms_in;
+  int data_in_len;
+  uint8_t *data_in;
+
+  int parms_out_maxlen;
+  uint8_t *parms_out_buf;
+  int parms_out_len;
+
+  int data_out_maxlen;
+  uint8_t *data_out_buf;
+  int data_out_len;
+  /* WARNING:  These fields MUST lie at the end because LanManFS provides
+   *           a SWI call which takes a pointer to one of these structures.
+   *           The user structure is now copied to a local variable, the
+   *           size of which is given by the #define just below.
+   */
+  int setup_in_len;
+  uint16_t setup_in[MAX_SETUPWORDS];
+  int setup_out_len;
+  int setup_out_maxlen;
+  uint16_t setup_out[MAX_SETUPWORDS];
+};
+
+#define sizeof_TransactParms_external (offsetof(struct TransactParms, setup_in_len))
+
+/* Directory functions.  Every path is a DOS path whose "X:" prefix names the share by its drive letter. */
+
+/* Create a directory.
+ *
+ * On an SMB2 mount a directory that already exists counts as success, so created reports whether the
+ * directory is new and therefore empty.
+ *
+ * Parameters:
+ *   path     DOS path of the directory
+ *   created  receives true only if this call made the directory
+ *
+ * Returns: OK, or the error from the server or the share lookup.
+ */
+extern err_t SMB_MkDir(char *path, bool *created);
+
+/* Delete an empty directory.
+ *
+ * Parameters:
+ *   path  DOS path of the directory
+ *
+ * Returns: OK, or the error from the server or the share lookup.
+ */
+extern err_t SMB_RmDir(char *path);
+
+/* Delete a file.
+ *
+ * On an SMB1 mount, hidden and system files are deleted only when LM_Vars.namemode includes NM_HIDDEN.  On an SMB2 mount
+ * any file is deleted, so a caller wanting the same protection checks the file's attributes first, as CoreFn's DeleteObject does.
+ *
+ * Parameters:
+ *   path         DOS path of the file
+ *   link_itself  true to delete a symbolic link at the end of the path, false to delete the file it points to; an SMB1
+ *                server follows links itself, so this matters only on an SMB2 mount
+ *
+ * Returns: OK, or the error from the server or the share lookup.
+ */
+extern err_t SMB_Delete(char *path, bool link_itself);
+
+/* Rename a file or directory within one share.
+ *
+ * Renaming an object to its own name sends nothing and succeeds.  A hidden or system object is renamed only when
+ * LM_Vars.namemode includes NM_HIDDEN, and is otherwise reported as not found.
+ *
+ * Parameters:
+ *   oldpath  DOS path of the existing object
+ *   newpath  DOS path it is to have, on the same drive letter
+ *
+ * Returns: OK, EBADRENAME if the paths name different shares, or the error from the server or the share lookup.
+ */
+extern err_t SMB_Rename(char *oldpath, char *newpath);
+
+/* Read the attribute byte, length and modification time of a file or directory. */
+extern err_t SMB_GetAttribs(char *filename, DOS_ATTRIBS *pAttr);
+
+/* Read a symbolic link's own attribute byte, length and modification time, as SMB_GetAttribs does for its target.
+ *
+ * A link whose target is missing, absolute or outside the share can be read this way, so that it can be deleted or
+ * renamed.  On an SMB2 mount, a path that does not end in a link gives the same result as SMB_GetAttribs.
+ *
+ * Parameters:
+ *   filename  DOS path of the link
+ *   pAttr     receives the attribute byte, length and modification time
+ *
+ * Returns: OK, EFILENOTFOUND if nothing matches (always on an SMB1 mount, whose server follows links itself and offers
+ * no way to read one), or the error from the server or the share lookup.
+ */
+extern err_t SMB_GetLinkAttribs(char *filename, DOS_ATTRIBS *pAttr);
+
+/* Set a file's attributes and modification time. */
+extern err_t SMB_SetAttribs(char *filename, DOS_ATTRIBS *pAttr);
+
+/* Read the entries of a directory, passing each one to a callback. */
+extern err_t SMB_ReadDirEntries(char *path, int max_count, ENUM_DIR_FN dirfn, void *private, void *context);
+
+/* Read the size and free space of a share. */
+extern err_t SMB_GetFreeSpace(char lettr, struct disk_size_response *pDSR);
+
+/* File functions */
+
+/* Create a file, opening it for writing. */
+extern err_t SMB_Create(char *filename, DOS_ATTRIBS *pInAttr, int *pOutFH);
+
+/* Open a file, returning its handle, attributes and the access mode granted. */
+extern err_t SMB_Open(int mode, char *filename, DOS_ATTRIBS *pOutAttr, int *pOutFH, int *pOutMode);
+
+/* Return the length of an open file. */
+extern err_t SMB_GetLength(int fh, uint *pOutLen);
+
+/* Read data from an open file, using raw reads for large transfers if the server supports them. */
+extern err_t SMB_Read(int fh, uint offset, uint len, uint8_t *where, uint *pOutLen);
+
+/* Write data to an open file, using raw writes for large transfers if the server supports them. */
+extern err_t SMB_Write(int fh, uint offset, uint len, uint8_t *where, uint *pOutLen);
+
+/* Set the length of an open file, discarding its tail or extending it. */
+extern err_t SMB_Truncate(int fh, uint length);
+
+/* Flush an open file's buffered data to the server. */
+extern err_t SMB_Flush(int fh);
+
+/* Close an open file, setting its modification time. */
+extern err_t SMB_Close(int fh, DOS_ATTRIBS *pAttr);
+
+/* Printer functions */
+
+/* Open a print job on a printer share, returning its handle. */
+extern err_t SMB_OpenPrinter(char drvlettr, char *printid, int *ph_out);
+
+/* Send data to a print job. */
+extern err_t SMB_WritePrinter(int PH, uint8_t *data, int datalen);
+
+/* Close a print job, letting the server print it. */
+extern err_t SMB_ClosePrinter(int PH);
+
+/* Transaction (RPC) functions */
+
+/* Run a transaction on a named pipe of a connected share, such as IPC$ for the RAP calls. */
+extern err_t SMB_Transact(char drvlettr, char *trans_name, struct TransactParms *pT);
+
+/* Connect/disconnect functions */
+
+/*
+ * Connect a share, connecting to its server and logging on first if need be.
+ *
+ * A new server is logged on to with the names given, or with the *LMLogon names when both are blank.  On a server already connected,
+ * CREATE_NEW_USER with a user name logs on again as that user, unless the server is logged on with that user name and password already;
+ * logging on again disconnects the server and the server's other shares with it, which lose their open files.  In a build with the
+ * cache, a disk share gets a cache of its own, its root dated now; one on an SMB1 mount or a server that is not Windows runs with the
+ * aggressive-refresh quirk, which clamps its lifetimes, since change notification cannot be relied on there to report what other
+ * clients do.
+ *
+ * Parameters:
+ *   service_type     SHR_* kind of share
+ *   style            CREATE_* flags
+ *   serv_name        server name
+ *   drv_name         share name
+ *   user_name        user to log on as, or NULL
+ *   passwd           password, or NULL
+ *   share_lettr_out  returns the share's drive letter, also when ECONNEXISTS is returned
+ *   mount_label      mount name for a disk share's cache, or NULL
+ *
+ * Returns: OK; ECONNEXISTS when CREATE_NEW_SHARE is given and the share is already connected; EBADPARAM for a missing name; EBADNAME
+ * for a server or share name too long to hold; ECONNLIMIT when the server or share table is full; or the error from connecting.
+ */
+extern err_t SMB_CreateShare(int service_type, int style, char *serv_name, char *drv_name, char *user_name, char *passwd,
+                             char *share_lettr_out, const char *mount_label);
+#define SHR_DISK    0
+#define SHR_PRINTER 1
+#define SHR_COMM    2
+#define SHR_IPC     3
+
+#define CREATE_NORMAL    0
+#define CREATE_NEW_SHARE 1
+#define CREATE_NEW_USER  2
+
+/* Disconnect a share, and its server too once no other share uses it. */
+extern err_t SMB_DeleteShare(char share_lettr);
+
+/* Count the shares disconnected since the module started.
+ *
+ * A mount name may name a different share once its share has gone, so a caller keeping anything keyed by a mount's path notes the count
+ * and drops what it kept when the count has moved.
+ *
+ * Returns: the number of shares disconnected so far, wrapping at the top of its range.
+ */
+extern uint32_t SMB_DisconnectCount(void);
+
+/* Return a piece of information about a connection, as selected by a GCI_* code.
+ *
+ * The string lives in the share's own state or in a static buffer, so it is valid only until the share is deleted or
+ * this function is called again.
+ *
+ * Parameters:
+ *   drvlettr  drive letter of the share
+ *   type      GCI_* code naming the information wanted
+ *
+ * Returns: the information, an empty string for an unknown code, or NULL if no share has that letter (or, for
+ *          GCI_SERVERINFO, if the connection has no NetBIOS session).
+ */
+extern const char *SMB_GetConnInfo(char drvlettr, int type);
+#define GCI_SERVER    0 /* Server name */
+#define GCI_SHARE     1
+#define GCI_LOGONTYPE 2
+/* Returns "U": every connection logs on at user level */
+#define GCI_SHARETYPE 3
+/* Returns "Disc" "Printer" "Comms" or "IPC" */
+
+#define GCI_SERVERINFO 4 /* Description of server */
+#define GCI_USER       5 /* User name */
+#define GCI_LIVENESS   6 /* "alive" or "dead": whether the connection is marked dead */
+
+#define GCIF_DISKTYPE 'D'
+#define GCIF_PRNTYPE  'P'
+#define GCIF_COMMTYPE 'C'
+#define GCIF_IPCTYPE  'I'
+
+/* Probe dead servers and ping idle connections to keep them open, from the module's background callback. */
+extern void SMB_AntiIdle(void);
+
+struct SMB2_Server;
+
+/*
+ * Mark the connection that owns an SMB2 server record as dead, for the SMB2 send and receive paths.
+ *
+ * Parameters:
+ *   srv2    SMB2 server record whose connection has failed; NULL is ignored
+ *   reason  short text for the debug log saying why the connection is judged dead
+ */
+extern void SMB_MarkServerDeadBySMB2(struct SMB2_Server *srv2, const char *reason);
+
+/*
+ * Give the cache of every mount connected through an SMB2 server record the aggressive-refresh quirk, which clamps its lifetimes, for
+ * a server found mid-session to deliver change notification unreliably.
+ *
+ * Parameters:
+ *   srv2  SMB2 server record whose mounts are affected
+ */
+extern void SMB_SetAggressiveRefreshBySMB2(const struct SMB2_Server *srv2);
+
+/* Timeouts */
+
+/* Reply timeout, in cs: how long to wait for an SMB1 response frame before giving up.
+ * A healthy SMB1 round trip takes well under a second, but a large write on a slow server can take several seconds, so the limit
+ * is long enough for those and short enough that a dead server is noticed promptly.
+ */
+#define REPLY_TIMEOUT 1000
+
+/* Timeout to put in 'Transact' params, in ms.  This is a hint sent on the wire to the server, not the local wait: it tells
+ * the server how long the client allows the command to take.  It is set generously.
+ */
+#define TRANSACT_TIMEOUT  5000
+#define TRANSACT2_TIMEOUT 10000
+
+/* Startup/shutdown */
+
+/* Mark every server and share slot free and prepare the fixed fields of the SMB1 request header.
+ *
+ * Returns: true always.
+ */
+extern bool SMB_Init(void);
+
+/* Disconnect every share, and every server once its last share has gone.
+ *
+ * Returns: OK always.
+ */
+extern err_t SMB_Shutdown(void);
+
+/* SMB_WorkBuf **** */
+
+/* This is a temporary buffer, made public on the following strict conditions:
+ *
+ * (i) Its contents may become corrupted across any SMB_xxxx calls. The main exception is the SMB_Transact call: this buffer is
+ * intended for use as the return parameter/data buffer.
+ *
+ * (ii) It must not be used by anything which may be called during an SMB call (transmit/receive processing functions, timer
+ * callbacks, the directory-entry callbacks passed to SMB_ReadDirEntries and SMBFind_EnumDir). That means anything in NBIP and
+ * NetBIOS.
+ *
+ * (iii) Any other C source file may use it freely. In general, it should be assumed corrupted across calls between modules.
+ */
+/* Need a much larger buffer */
+#define SMBWORKBUF_SIZE 16384
+#define SMBXMITMEM_SIZE SMBWORKBUF_SIZE
+extern uint8_t SMB_WorkBuf[SMBWORKBUF_SIZE];
+
+/* SMB2 protocol scratch buffer.
+ *
+ * Holds one in-flight SMB2 message; three of these live in the LanManFS module Dynamic Area: transmit, receive, and a
+ * receive buffer reserved for directory listings.
+ * READ, WRITE and QUERY_DIRECTORY size their payloads to fill the buffer and charge one credit per SMB2_CREDIT_UNIT of
+ * it (MS-SMB2 section 3.2.4.1.5), shrinking the payload when fewer credits are in hand; see SMB2_Read and SMB2_Write.
+ * SMB2_CREDIT_TARGET in h.SMB2Defs must be at least the 16 credits a full 1 MiB message charges, and preferably several
+ * times that.
+ *
+ * The size is chosen at module init by Workspace_Init based on the machine's memory:
+ *   - SMB2_WORKBUF_MAX (1 MiB) on machines with > 32 MiB of memory, for 16-credit READ/WRITE payloads and the fastest bulk
+ *     transfer.
+ *   - SMB2_WORKBUF_MIN (128 KiB) on machines with <= 32 MiB of memory, for 2-credit payloads, a modest bulk-transfer benefit
+ *     while reclaiming 2.6 MiB of DA versus the maximum profile.
+ *
+ * Call sites read SMB2_WORKBUF_SIZE, which resolves to the runtime variable.  The variable defaults to SMB2_WORKBUF_MAX
+ * so code that runs without Workspace_Init sees a usable size.
+ */
+#define SMB2_WORKBUF_MAX 1048576u
+#define SMB2_WORKBUF_MIN 131072u
+
+extern size_t smb2_workbuf_size;
+#define SMB2_WORKBUF_SIZE smb2_workbuf_size
+
+/* Credit unit: bytes per credit, fixed by the SMB2 specification.  Larger I/O charges proportionally more credits. */
+#define SMB2_CREDIT_UNIT 65536
+
+/* Report whether the share a DOS path names uses long filenames, so that Xlate can choose its name mapping.
+ *
+ * An SMB2 share always does; an SMB1 share does if the server negotiated long names.  The share is not connected.
+ *
+ * Parameters:
+ *   path  DOS path whose "X:" prefix names the share
+ *
+ * Returns: true for a long-name share; false otherwise, including when no share has that drive letter.
+ */
+extern bool SMB_IsLongNameFS(const char *path);
+
+/*
+ * Report whether the share a DOS path names is connected over SMB2, so that Xlate keeps the "<xxxx" escapes only there.
+ *
+ * The call does not connect the share, so one that is not connected reports false.
+ *
+ * Parameters:
+ *   path  DOS path whose first character is the share's drive letter
+ *
+ * Returns: true for a connected SMB2 share, otherwise false.
+ */
+extern bool SMB_IsSMB2FS(const char *path);
+
+/*
+ * Return the offset in seconds that turns the server's local time into UTC.
+ *
+ * Parameters:
+ *   hS  share whose server is asked; NULL gives 0
+ *
+ * Returns: the offset in seconds, or 0 when there is no share.
+ */
+int SMB_GetCurrentServerTimeZone(hSHARE hS);
+
+/* Return the share an open file handle belongs to, or NULL if the handle is not valid. */
+hSHARE SMB_GetShareFileHandle(uint SMB_FH);
+
+/* Return the share a DOS path names, connecting it if need be, or NULL if it cannot. */
+hSHARE SMB_GetShareFileName(const char *dos_filename);
+
+struct LMCache;
+
+/* Return the per-mount cache associated with a share.
+ *
+ * A connected disk share has a cache whichever protocol it uses, because the cache substrate is allocated at mount time
+ * regardless of protocol.  Other share types have none, and a share whose server is marked dead reports none, so that
+ * nothing is served from a cache that may be stale.
+ *
+ * Parameters:
+ *   hS  share handle; may be NULL
+ *
+ * Returns: the share's LMCache, or NULL if hS is NULL, the share has no cache or its server is marked dead.
+ */
+struct LMCache *SMB_GetCache(hSHARE hS);
+
+/* Return the per-mount cache for a drive letter.
+ *
+ * For callers that hold only a drive letter, such as *LMNameMode's flush.  Unlike SMB_GetCache it returns the cache even while the
+ * server is marked dead.
+ *
+ * Parameters:
+ *   drvletter  letter in 'A'..'Z'
+ *
+ * Returns: pointer to the share's LMCache, or NULL if no share is allocated for that letter.
+ */
+struct LMCache *SMB_GetCacheFromDrv(char drvletter);
+
+/* Retry resolving an inert symlink, for the FSEntry access guards.
+ *
+ * If the cache holds an inert-symlink cnode at cache_key, attempts a fresh resolution via SMB2_RetryInertSymlink.
+ * It returns one of three values:
+ *
+ * OK: no inert symlink is cached at the path, or it stopped being one while its target was resolved; the caller carries on.
+ * EOBJECTCHANGED: an inert symlink was found and resolved; the cache and the Filer viewers are refreshed (UpCall 3 fired), and the
+ * object's kind, type and size may differ from the inert form the caller saw.  A call that loads or changes the object reports this to
+ * the user as "try again"; one that only reads details carries on with the fresh cache state.
+ * ESYMLINKFAILED: an inert symlink was found and still cannot be resolved; reported to the user.
+ *
+ * Parameters:
+ *   hS         share handle
+ *   cache_key  share-relative DOS path ("\\"-separated); a leading separator is ignored
+ *
+ * Returns: OK, EOBJECTCHANGED or ESYMLINKFAILED, as listed above.
+ */
+err_t SMB_CheckInertSymlink(hSHARE hS, const char *cache_key);
+
+struct LMCacheNode;
+struct SMB2_ListingStart;
+
+/* List a directory of an SMB2 mount through SMB2_EnumerateDirectory.
+ *
+ * Unlike the path-based calls, the share is not reconnected here: the caller has already resolved it.
+ *
+ * Parameters:
+ *   hS        share holding the directory
+ *   dir_path  share-relative DOS path of the directory
+ *   from      first entry wanted, and the tag a part-read listing can be resumed under
+ *   visitor   called with each entry in turn; returning false stops the listing
+ *   user      passed to the visitor
+ *   err_out   receives the result of the listing
+ *
+ * Returns: true if the share is an SMB2 one and the listing was run; false, with *err_out untouched, for any other share.
+ */
+bool SMB_EnumerateSMB2Directory(hSHARE hS, const char *dir_path, const struct SMB2_ListingStart *from,
+                                bool (*visitor)(struct LMCacheNode *node, void *user), void *user, err_t *err_out);
+
+/* Find one leafname in a directory on an SMB2 mount, letting the server narrow the search.
+ *
+ * A front for SMB2_FindLeaf that first brings the share's connection up, as any path-based operation does; see
+ * that function for the search pattern and for what the lookup leaves behind for the request that follows it.
+ *
+ * Parameters:
+ *   dir_path    DOS path of the directory, with its "X:" drive prefix
+ *   sought      leafname being looked for, passed to equivalent with each candidate
+ *   pattern     search pattern admitting every spelling equivalent could accept
+ *   equivalent  the caller's rule for whether a server leafname answers to the sought one
+ *   leaf_out    receives the server's spelling of the entry found; DOS_NAME_LEN bytes
+ *   err_out     receives the search result when the return value is true: OK, EFILENOTFOUND, or a failure
+ *
+ * Returns: true if the drive is a connected SMB2 mount and the search was attempted; false (with *err_out
+ * untouched) if it is not, leaving the caller to search by other means.
+ */
+bool SMB_FindLeafSMB2(const char *dir_path, const char *sought, const char *pattern,
+                      bool (*equivalent)(const char *server_leaf, const char *sought_leaf), char *leaf_out, err_t *err_out);
+
+/* Return the DOS path of an open SMB file handle, for diagnostic use only.
+ *
+ * The FSEntry tracker in c.CoreFn uses it to put a path on traces of handlers that receive a FileSwitch handle rather than a
+ * path.  Walks the SMB2 file-handle table to find the dos_path stored at open time.  An SMB1 handle, for which
+ * no path is kept, and an unknown or freed slot return NULL.  The pointer is into the file-table entry and is valid only until the
+ * handle is closed, so callers copy or print it at once.
+ *
+ * Parameters:
+ *   FH  the SMB file handle (combined SMB1/SMB2 form as used by FileTbl)
+ *
+ * Returns: pointer to the path string, or NULL if it cannot be resolved.
+ */
+extern const char *SMB_GetPathFromFH(int FH);
+
+/* Return the share handle for a given drive letter.
+ *
+ * Parameters:
+ *   drvletter  letter in 'A'..'Z'
+ *
+ * Returns: share handle, or NULL if no share is allocated for that letter.
+ */
+hSHARE SMB_GetShareFromDrv(char drvletter);
+
+#endif

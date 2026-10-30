@@ -1,0 +1,124 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include "Global/Services.h"
+#include "VersionNum"
+
+title-string:           Module_ComponentName
+
+help-string:            Territory_Mgr Module_MajorVersion_CMHG Module_MinorVersion_CMHG
+
+date-string:            Module_Date_CMHG
+
+international-help-file:"Resources:$.Resources.TerrMgr.Messages"
+
+initialisation-code:    territory_init
+
+finalisation-code:      territory_final
+
+service-call-handler:   territory_services Service_UKWord,
+                                           Service_UKConfig,
+                                           Service_PostInit,
+                                           Service_RTCSynchronised
+
+swi-chunk-base-number:  0x43040
+
+swi-handler-code:       territory_swis (flags-capable:)
+
+swi-decoding-table:     Territory,
+                        Number,
+                        Register,
+                        Deregister,
+                        NumberToName,
+                        Exists,
+                        AlphabetNumberToName,
+                        SelectAlphabet,
+                        SetTime,
+                        ReadCurrentTimeZone,
+                        ConvertTimeToUTCOrdinals,
+                        ReadTimeZones,
+                        ConvertDateAndTime,
+                        ConvertStandardDateAndTime,
+                        ConvertStandardDate,
+                        ConvertStandardTime,
+                        ConvertTimeToOrdinals,
+                        ConvertTimeStringToOrdinals, /* 43050 */
+                        ConvertOrdinalsToTime,
+                        Alphabet,
+                        AlphabetIdentifier,
+                        SelectKeyboardHandler,
+                        WriteDirection,
+                        CharacterPropertyTable,
+                        LowerCaseTable,
+                        UpperCaseTable,
+                        ControlTable,
+                        PlainTable,
+                        ValueTable,
+                        RepresentationTable,
+                        Collate,
+                        ReadSymbols,
+                        ReadCalendarInformation,
+                        NameToNumber,                /* 43060 */
+                        TransformString,
+                        IME,
+                        DaylightRules,
+                        64, 65, 66, 67,
+                        68, 69, 6A, 6B,
+                        6C, 6D, 6E, 6F,
+                        70,                          /* 43070 */
+                        71, 72, 73, 74,
+                        ConvertTextToString,
+                        Select,
+                        DaylightSaving,
+                        ConvertTimeFormats
+
+generic-veneers:        daylight_switchover,
+                        tmloaded_callback
+
+command-keyword-table:  territory_commands
+                        /* Plain commands */
+                        Territory(min-args:0, max-args:1,
+                                  international:,
+                                  help-text:      "HTRMTTY",
+                                  invalid-syntax: "STRMTTY"),
+                        Territories(min-args:0, max-args:0,
+                                    international:,
+                                    help-text:      "HTRMTTS",
+                                    invalid-syntax: "STRMTTS"),
+                        /* Configure keywords */
+                        Territory(min-args:1, max-args:1,
+                                  configure:,
+                                  international:,
+                                  help-text:      "HTRMCTY",
+                                  invalid-syntax: "STRMCTY"),
+                        DST(min-args:0, max-args:0,
+                            configure:,
+                            international:,
+                            help-text:      "HTRMCDS",
+                            invalid-syntax: "STRMCDS"),
+                        NoDST(min-args:0, max-args:0,
+                              configure:,
+                              international:,
+                              help-text:      "HTRMCDS",
+                              invalid-syntax: "STRMCDS"),
+                        AutoDST(min-args:0, max-args:0,
+                                configure:,
+                                international:,
+                                help-text:      "HTRMCDS",
+                                invalid-syntax: "STRMCDS"),
+                        TimeZone(min-args:1, max-args:1,
+                                 configure:,
+                                 international:,
+                                 help-text:      "HTRMCTZ",
+                                 invalid-syntax: "STRMCTZ")

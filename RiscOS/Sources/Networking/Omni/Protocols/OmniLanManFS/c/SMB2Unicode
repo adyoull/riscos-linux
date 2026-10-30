@@ -1,0 +1,333 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* c.SMB2Unicode - Latin-1 / UTF-16LE conversion for SMB2
+ *
+ * Converts between the RISC OS Latin-1 alphabet (alphabet 101) and the UTF-16LE encoding used on the SMB2 wire.
+ *
+ * RISC OS Latin-1 differs from Unicode in the 0x80-0x9F range: those positions hold printable characters (Euro sign, curly quotes,
+ * ligatures, Welsh characters, etc.) rather than the Unicode C1 control characters.  A lookup table handles this mapping in both
+ * directions.
+ *
+ * On init, the table is loaded dynamically via Service_International 8.  If that fails (older RISC OS), a static
+ * compile-time table is used, derived from the RISC OS 5 International module.
+ *
+ * Code points that can't be mapped to Latin-1, the C1 controls among them, are encoded reversibly as "<xxxx" (opening angle bracket + 4
+ * lowercase hex digits, no closing bracket).  This avoids FileSwitch system variable expansion (which requires "<...>") and is fully
+ * reversible.  Surrogate pairs are encoded as two separate "<xxxx" sequences.  A file name may also have '&', '@', '^', '%', '<' and
+ * '>' encoded this way, since a RISC OS path gives them meanings of their own, and a '$' that four hex digits follow.
+ *
+ */
+
+#include <ctype.h>
+
+#include "Global/Services.h"
+#include "Global/Countries.h"
+#include "Global/OsBytes.h"
+#include "Interface/Internatio.h"
+#include "kernel.h"
+#include "swis.h"
+
+#include "stdtypes.h"
+#include "SMB2.h"
+
+/* Geometry of the reversible "<xxxx" escape: an opening angle bracket plus four hex digits, and deliberately nothing after them. */
+#define HEX_ESCAPE_LEN        5
+#define HEX_ESCAPE_HEX_DIGITS 4
+
+/* UTF-16 surrogate bands: units in these ranges are halves of a pair, not code points in their own right. */
+#define UTF16_HIGH_SURROGATE_MIN 0xD800
+#define UTF16_HIGH_SURROGATE_MAX 0xDBFF
+#define UTF16_LOW_SURROGATE_MIN  0xDC00
+#define UTF16_LOW_SURROGATE_MAX  0xDFFF
+
+/* The C1 control band, whose bytes alphabet 101 gives to other characters (0x80 is the Euro sign). */
+#define UNICODE_C1_MIN 0x0080
+#define UNICODE_C1_MAX 0x009F
+
+/*
+ * Latin-1 byte to UCS code point, one entry per byte value.  The compile-time contents are the RISC OS 5 International module's
+ * alphabet 101, whose 0x80-0x9F block holds printable characters (Euro, curly quotes, ligatures, Welsh circumflexes) rather than the
+ * ISO 8859-1 C1 controls; everywhere else the mapping is identity.  smb2_unicode_init rewrites the whole table from the live alphabet
+ * when Service_International 8 is available, so this initialiser is only the fallback for older systems.  0xFFFD marks bytes the
+ * alphabet leaves unmapped.
+ */
+static uint16_t latin1_to_ucs[256] = {
+    0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F,
+    0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017, 0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F,
+    0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027, 0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F,
+    0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B, 0x003C, 0x003D, 0x003E, 0x003F,
+    0x0040, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B, 0x004C, 0x004D, 0x004E, 0x004F,
+    0x0050, 0x0051, 0x0052, 0x0053, 0x0054, 0x0055, 0x0056, 0x0057, 0x0058, 0x0059, 0x005A, 0x005B, 0x005C, 0x005D, 0x005E, 0x005F,
+    0x0060, 0x0061, 0x0062, 0x0063, 0x0064, 0x0065, 0x0066, 0x0067, 0x0068, 0x0069, 0x006A, 0x006B, 0x006C, 0x006D, 0x006E, 0x006F,
+    0x0070, 0x0071, 0x0072, 0x0073, 0x0074, 0x0075, 0x0076, 0x0077, 0x0078, 0x0079, 0x007A, 0x007B, 0x007C, 0x007D, 0x007E, 0x007F,
+    0x20AC, 0x0174, 0x0175, 0xFFFD, 0xFFFD, 0x0176, 0x0177, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0x2026, 0x2122, 0x2030, 0x2022,
+    0x2018, 0x2019, 0x2039, 0x203A, 0x201C, 0x201D, 0x201E, 0x2013, 0x2014, 0x2212, 0x0152, 0x0153, 0x2020, 0x2021, 0xFB01, 0xFB02,
+    0x00A0, 0x00A1, 0x00A2, 0x00A3, 0x00A4, 0x00A5, 0x00A6, 0x00A7, 0x00A8, 0x00A9, 0x00AA, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x00AF,
+    0x00B0, 0x00B1, 0x00B2, 0x00B3, 0x00B4, 0x00B5, 0x00B6, 0x00B7, 0x00B8, 0x00B9, 0x00BA, 0x00BB, 0x00BC, 0x00BD, 0x00BE, 0x00BF,
+    0x00C0, 0x00C1, 0x00C2, 0x00C3, 0x00C4, 0x00C5, 0x00C6, 0x00C7, 0x00C8, 0x00C9, 0x00CA, 0x00CB, 0x00CC, 0x00CD, 0x00CE, 0x00CF,
+    0x00D0, 0x00D1, 0x00D2, 0x00D3, 0x00D4, 0x00D5, 0x00D6, 0x00D7, 0x00D8, 0x00D9, 0x00DA, 0x00DB, 0x00DC, 0x00DD, 0x00DE, 0x00DF,
+    0x00E0, 0x00E1, 0x00E2, 0x00E3, 0x00E4, 0x00E5, 0x00E6, 0x00E7, 0x00E8, 0x00E9, 0x00EA, 0x00EB, 0x00EC, 0x00ED, 0x00EE, 0x00EF,
+    0x00F0, 0x00F1, 0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0x00F7, 0x00F8, 0x00F9, 0x00FA, 0x00FB, 0x00FC, 0x00FD, 0x00FE, 0x00FF};
+
+/* One row of the reverse (UCS to Latin-1) map. */
+typedef struct {
+  uint16_t ucs;
+  uint8_t latin1;
+} ucs_inverse_entry;
+
+/*
+ * Reverse map covering only the alphabet's non-identity region: every code point at or below U+00FF maps one-for-one, so only the
+ * 0x80-0x9F residents appear here.  Sorted ascending by code point for the binary search in ucs_to_latin1_lookup.  Unlike
+ * latin1_to_ucs this table is not refreshed from the live alphabet at init, so it always reflects the RISC OS 5 alphabet 101 layout.
+ */
+static const ucs_inverse_entry ucs_to_latin1[] = {
+    {0x0152, 0x9A},
+    {0x0153, 0x9B},
+    {0x0174, 0x81},
+    {0x0175, 0x82},
+    {0x0176, 0x85},
+    {0x0177, 0x86},
+    {0x2013, 0x97},
+    {0x2014, 0x98},
+    {0x2018, 0x90},
+    {0x2019, 0x91},
+    {0x201C, 0x94},
+    {0x201D, 0x95},
+    {0x201E, 0x96},
+    {0x2020, 0x9C},
+    {0x2021, 0x9D},
+    {0x2022, 0x8F},
+    {0x2026, 0x8C},
+    {0x2030, 0x8E},
+    {0x2039, 0x92},
+    {0x203A, 0x93},
+    {0x20AC, 0x80},
+    {0x2122, 0x8D},
+    {0x2212, 0x99},
+    {0xFB01, 0x9E},
+    {0xFB02, 0x9F}
+};
+
+#define UCS_INVERSE_COUNT (sizeof(ucs_to_latin1) / sizeof(ucs_to_latin1[0]))
+
+/*
+ * Binary search the sorted UCS-4 to Latin-1 table for a code point's RISC OS Latin-1 byte.
+ *
+ * Parameters:
+ *   cp  UCS-4 code point to map
+ *
+ * Returns: the RISC OS Latin-1 byte (0-255), or -1 if the code point has no Latin-1 representation.
+ */
+static int ucs_to_latin1_lookup(unsigned int cp) {
+  int lo = 0;
+  int hi = (int)UCS_INVERSE_COUNT - 1;
+
+  /* The table is sorted ascending by UCS value, so a standard bisection applies. */
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+
+    if (ucs_to_latin1[mid].ucs == cp) {
+      return ucs_to_latin1[mid].latin1;
+    } else if (ucs_to_latin1[mid].ucs < cp) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  /* No Latin-1 form exists; the caller falls back to the '<xxxx' escape. */
+  return -1;
+}
+
+static const char hex_digits[] = "0123456789abcdef"; // lowercase on encode; hex_value accepts either case on decode
+
+/*
+ * Write a code point as the reversible five-character escape '<' followed by four lowercase hex digits.
+ *
+ * The escape deliberately omits a closing '>': '<foo>' would trigger FileSwitch system-variable expansion, whereas '<foo' passes through
+ * untouched. Only the low 16 bits of the code point are emitted.
+ *
+ * Parameters:
+ *   dst  buffer receiving HEX_ESCAPE_LEN bytes; left unterminated
+ *   cp   code point to escape
+ */
+static void encode_hex(char *dst, unsigned int cp) {
+  dst[0] = '<';
+  dst[1] = hex_digits[(cp >> 12) & 0xF];
+  dst[2] = hex_digits[(cp >> 8) & 0xF];
+  dst[3] = hex_digits[(cp >> 4) & 0xF];
+  dst[4] = hex_digits[cp & 0xF];
+}
+
+/*
+ * Test whether a code point is one of the characters a RISC OS path gives a meaning of its own: '&' (user root directory), '@'
+ * (current directory), '^' (parent), and '%', '<' and '>'.  SMB1 shows the first three as '+', '=' and ',', which come back from
+ * RISC OS as themselves, so a name from an SMB2 server carries them as escapes instead.  '%' shows as '>', and a '>' after a '<'
+ * earlier in the path would close it into a "<...>" that FileSwitch expands as a system variable.  '$' (root) is left to
+ * dollar_reads_as_escape.
+ */
+static bool reserved_by_riscos(unsigned int cp) {
+  return cp == '&' || cp == '@' || cp == '^' || cp == '%' || cp == '<' || cp == '>';
+}
+
+/*
+ * Decode one hexadecimal digit of either case to its 0-15 value, or -1 if it is not a hex digit.
+ */
+static int hex_value(char c) {
+  /* Both letter cases are accepted so escapes round-trip whatever case the wire used. */
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+
+  if (c >= 'A' && c <= 'F') {
+    return c - 'A' + 10;
+  }
+
+  return -1;
+}
+
+/*
+ * Test whether the '$' at unit i of a UTF-16LE name would be read back as the start of an escape.  c/Xlate shows a server's '$' as
+ * '<', so one that four hex digits follow must itself be escaped; any other '$' is shown as '<' and goes back as '$'.
+ */
+static bool dollar_reads_as_escape(const uint8_t *src, int i, int chars) {
+  int k;
+
+  if (i + HEX_ESCAPE_HEX_DIGITS >= chars) {
+    return false;
+  }
+
+  for (k = i + 1; k <= i + HEX_ESCAPE_HEX_DIGITS; k++) {
+    if (src[k * 2 + 1] != 0 || hex_value((char)src[k * 2]) < 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void smb2_unicode_init(void) {
+  size_t i;
+  int alphabet = ISOAlphabet_Latin1, r1_out;
+  uint32_t *table;
+
+  /* Ask the International module for the current alphabet's UCS-4 table; give up quietly if the call errors. */
+  _swix(OS_Byte, _INR(0,1) | _OUT(1), OsByte_Alphabet, 127, &alphabet);
+  if (_swix(OS_ServiceCall, _INR(1, 3) | _OUT(1) | _OUT(4), Service_International, Inter_UCSTable, alphabet, &r1_out, &table) != NULL) {
+    return;
+  }
+
+  /* Check that a handler claimed and filled in the table pointer */
+  if (r1_out != Service_Serviced) {
+    return;
+  }
+
+  for (i = 0; i < 256; i++) {
+    uint32_t ucs = table[i];
+
+    /* 0xFFFFFFFF marks an unmapped slot; substitute the Unicode replacement character U+FFFD. */
+    if (ucs == 0xFFFFFFFF) {
+      latin1_to_ucs[i] = 0xFFFD;
+    } else {
+      latin1_to_ucs[i] = (uint16_t)(ucs & 0xFFFF);
+    }
+  }
+}
+
+int smb2_latin1_to_utf16le(uint8_t *dst, int dstsize, const char *src, int srclen) {
+  int i;
+  int out = 0;
+
+  /* Stop once the next two-byte UTF-16 unit would no longer fit. */
+  for (i = 0; i < srclen && out + 2 <= dstsize; i++) {
+    uint16_t cp;
+
+    /* A '<' followed by four hex digits is a reversible escape for a code point with no Latin-1 form. */
+    if (src[i] == '<' && i + HEX_ESCAPE_HEX_DIGITS < srclen) {
+      int h0 = hex_value(src[i + 1]);
+      int h1 = hex_value(src[i + 2]);
+      int h2 = hex_value(src[i + 3]);
+      int h3 = hex_value(src[i + 4]);
+
+      /* Valid escape: emit the decoded code point little-endian and consume its four hex digits. */
+      if (h0 >= 0 && h1 >= 0 && h2 >= 0 && h3 >= 0) {
+        cp = (uint16_t)((h0 << 12) | (h1 << 8) | (h2 << 4) | h3);
+        dst[out++] = (uint8_t)(cp & 0xFF);
+        dst[out++] = (uint8_t)(cp >> 8);
+        i += HEX_ESCAPE_HEX_DIGITS;
+        continue;
+      }
+    }
+
+    /* Ordinary byte (or a bare '<' that was not a valid escape): map through the alphabet and emit little-endian. */
+    cp = latin1_to_ucs[(unsigned char)src[i]];
+    dst[out++] = (uint8_t)(cp & 0xFF);
+    dst[out++] = (uint8_t)(cp >> 8);
+  }
+
+  return out;
+}
+
+int smb2_utf16le_to_latin1(char *dst, int dstsize, const uint8_t *src, int srclen, bool escape_reserved) {
+  int i;
+  int out = 0;
+  int chars = srclen / 2;
+
+  for (i = 0; i < chars; i++) {
+    unsigned int cp = (unsigned int)src[i * 2] | ((unsigned int)src[i * 2 + 1] << 8);
+    int latin1;
+    int need;
+
+    /*
+     * Find the unit's Latin-1 byte, or -1 for the reversible escape.  A surrogate half has no scalar value on its own, and a C1 control
+     * has no byte of its own because alphabet 101 puts another character at the same value.  The rest of U+0000..U+00FF maps
+     * one-for-one, unless the caller wants the characters RISC OS reserves escaped, and anything above goes through the alphabet's
+     * reverse table.
+     */
+    if ((cp >= UTF16_HIGH_SURROGATE_MIN && cp <= UTF16_HIGH_SURROGATE_MAX) ||
+        (cp >= UTF16_LOW_SURROGATE_MIN && cp <= UTF16_LOW_SURROGATE_MAX) || (cp >= UNICODE_C1_MIN && cp <= UNICODE_C1_MAX) ||
+        (escape_reserved && (reserved_by_riscos(cp) || (cp == '$' && dollar_reads_as_escape(src, i, chars))))) {
+      latin1 = -1;
+    } else if (cp <= 0xFF) {
+      latin1 = (int)cp;
+    } else {
+      latin1 = ucs_to_latin1_lookup(cp);
+    }
+
+    /* Stop at the first character that does not fit whole with room for the terminator, so what is written is a prefix of the name. */
+    need = (latin1 >= 0) ? 1 : HEX_ESCAPE_LEN;
+    if (out + need >= dstsize) {
+      break;
+    }
+
+    if (latin1 >= 0) {
+      dst[out++] = (char)latin1;
+    } else {
+      encode_hex(dst + out, cp);
+      out += HEX_ESCAPE_LEN;
+    }
+  }
+
+  /* NUL-terminate when a byte remains; the returned length excludes it. */
+  if (out < dstsize) {
+    dst[out] = '\0';
+  }
+
+  return (i < chars) ? -1 : out;
+}

@@ -1,0 +1,89 @@
+                            SoftLoad
+                            ========
+
+On computers where RISC OS boots from a copy held in permanent
+memory (Risc PC, Iyonix, Titanium, Kinetic Risc PC, or
+A7000/A7000+) another ROM version may be temporarily loaded
+from file into RAM. This is termed 'softloading'.
+
+This can be useful to try out a ROM before it is committed to
+permanent memory, or for any other testing.
+
+How to use
+----------
+If SoftLoad exists in !Boot.Resources its !Run is executed very
+early at boot, by the BootRun obey file in !Boot.Utils.
+
+When run, if the current ROM matches the last softloaded
+ROM, SoftLoad ends, unless -all specified (see below).
+
+Then SoftLoad looks for any files in its directory with a
+filetype of &FE5 (EPROM) then:
+* If none exist, SoftLoad ends
+* If none are newer than the current ROM, SoftLoad will also
+  end unless -all is specified
+* If there are some ROM files, the current ROM version and date
+  will be shown, followed by the versions, dates and filenames
+  of the softloadable ROMs, listed in date sequence
+
+The current ROM, or the last ROM softloaded, will be marked
+by ==> and highlighted. This selection can be changed by
+using the cursor Up/Down keys.
+
+Press Escape to avoid any softload and continue with the
+current ROM.
+
+Press Return or Space to softload the selected ROM immediately,
+or after 10 seconds of inactivity it will be softloaded
+automatically.
+
+Technical Details
+-----------------
+Any errors found will be listed on the screen, but will
+allow the boot process to continue without any softload.
+
+Softload requires RISC OS v3.50 or later, otherwise it will
+just end with an error message.
+
+The ROM filenames can be any valid filename.
+
+There is a maximum of 100 ROM files.
+Any more will be listed, but not available for softload.
+
+The softload ROMs can be earlier or later than the one in
+permanent memory, so you can revert to an older version if
+you require. (See -all below)
+
+For development ROMs after 5.14 the version date displayed
+should be the same as *fx0 or RISC OS Menu -> Info.
+However, for compressed ROMs that is not available, eg Iyonix,
+so then the date will be taken from the ROM file timestamp.
+
+SoftLoad can be run from the desktop, but beware that
+all running applications, and indeed RISC OS itself, will be
+forcibly immediately terminated with no chance to save any
+data or do any tidying up.
+
+Additional translations can be added to the SoftLoad
+directory, with a filename of Message<n> where n is the
+territory number being used. The 'Messages' file will be
+used as a default, if there is no territory specific copy.
+
+If the last boot was a softloaded ROM, it will be saved in
+Choices:SoftLoad as the default to use for the next boot.
+Deleting the choices will revert the default to the initial
+ROM.
+
+For copy protection reasons, RISC OS 4.02 cannot be softloaded.
+
+Advanced Use
+------------
+There are some parameters which can be added to the Run command
+in !Boot.Resources.SoftLoad.!Run:
+
+ -test  Displays the softload command rather than executing it.
+
+ -all   Displays all softloadable ROMs, even if current ROM is
+        already softloaded.
+        ROMs older than the current ROM version are included,
+        so any version can be softloaded with care.

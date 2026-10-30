@@ -1,0 +1,33 @@
+/*
+ * Copyright (c) 2021, Timothy Baldwin
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern void __PVirt_WFI(void);
+extern char **__HAL_get_env(void);
+extern int __PVirt_fork(int pipefd[2]);
+extern void __PVirt_Poll(void);
+extern int __PVirt_Poll_ctl(int fd, int op, uint32_t events, volatile int *pollword);
+extern int __PVirt_Poll_remove(int fd);
+
+#ifdef __cplusplus
+}
+#endif

@@ -1,0 +1,85 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+*  Lan Manager client
+*
+*  Attr.H - Header for Attr.c exports
+*
+*/
+
+/* Fill in a file's RISC OS attributes, overlaying any values saved in its directory's RISCOS.EA file on the DOS-derived ones.
+ *
+ * On a long-name share the type comes from the leaf's ",ttt" suffix and no side file is involved.  On an 8.3 share the leaf
+ * is looked up in the RISCOS.EA file, whose records are kept in memory for the next call on the same directory.  A record
+ * changed there by another client is therefore seen late; most actions flush the copy, and type changes are rare.
+ *
+ * If the RISCOS.EA file is missing, unreadable or has no record for the leaf, GetDefaultType guesses a type from the
+ * extension and EATTRIBREAD is returned; the attributes are still usable.
+ *
+ * Parameters:
+ *   pathname  full DOS path; its directory picks the RISCOS.EA file
+ *   leafname  upper-case leaf to look up, or NULL to take it from `pathname`
+ *   pRA       attributes derived from the DOS ones, updated in place
+ *
+ * Returns: OK if the RISCOS.EA file held a record; EATTRIBREAD if the type had to be guessed; EBADNAME for a bad path.
+ */
+extern err_t Attr_GetInfo(char *pathname, char *leafname, RISCOS_ATTRIBS *pRA);
+
+/* Save a file's RISC OS attributes in its directory's RISCOS.EA file.
+ *
+ * Does nothing on a long-name share, where the type travels in the leaf's ",ttt" suffix.  On an 8.3 share the RISCOS.EA
+ * file is created if it does not exist; otherwise the leaf's own record is overwritten, or failing that a free record,
+ * or failing that a new record is added at the end.
+ *
+ * Parameters:
+ *   pathname  full DOS path of the file
+ *   pRA       attributes to save
+ *
+ * Returns: OK, EBADNAME for a bad path, or EATTRIBWRITE if the RISCOS.EA file could not be written.
+ */
+extern err_t Attr_SetInfo(char *pathname, RISCOS_ATTRIBS *pRA);
+
+/* Delete a file's record from its directory's RISCOS.EA file.
+ *
+ * Does nothing on a long-name share.  On an 8.3 share the record is found by reading the file, not the in-memory copy,
+ * because deleting the wrong record does more harm than a re-read, and its name is cleared.  If that leaves the block of
+ * records held in memory empty, the block is cut out of the file.
+ *
+ * Parameters:
+ *   pathname  full DOS path of the file
+ *
+ * Returns: OK, including when there is no record to delete; EBADNAME for a bad path; EATTRIBWRITE if the RISCOS.EA file
+ * could not be opened for writing.
+ */
+extern err_t Attr_DeleteInfo(char *pathname);
+
+/* Delete a directory's RISCOS.EA file if it names no file that still exists, so that the directory can be removed.
+ *
+ * Does nothing on a long-name share, which has no RISCOS.EA files of its own making.  The in-memory copy of records is
+ * discarded, because this function reuses its buffer.
+ *
+ * Parameters:
+ *   pathname  DOS path of the directory
+ */
+extern void Attr_CheckEmptyDir(char *pathname);
+
+/* Discard the in-memory copy of RISCOS.EA records when a drive letter's meaning changes, as on a dismount.
+ *
+ * There is one copy for all drives, so it is discarded whichever drive changed.
+ *
+ * Parameters:
+ *   drv_letter  the drive that changed; unused
+ */
+extern void Attr_InvalidateDrive(char drv_letter);

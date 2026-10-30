@@ -1,0 +1,303 @@
+REM Copyright (c) 2021, RISC OS Open Ltd
+REM All rights reserved.
+REM
+REM Redistribution and use in source and binary forms, with or without
+REM modification, are permitted provided that the following conditions are met:
+REM     * Redistributions of source code must retain the above copyright
+REM       notice, this list of conditions and the following disclaimer.
+REM     * Redistributions in binary form must reproduce the above copyright
+REM       notice, this list of conditions and the following disclaimer in the
+REM       documentation and/or other materials provided with the distribution.
+REM     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+REM       may be used to endorse or promote products derived from this software
+REM       without specific prior written permission.
+REM
+REM THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+REM AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+REM IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+REM ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+REM LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+REM CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+REM SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+REM INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+REM CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+REM ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+REM POSSIBILITY OF SUCH DAMAGE.
+
+REM Test abortable DAs
+REM
+REM Test code itself is just a copy of attest_ap (test different access
+REM permissions).
+
+ON ERROR ERROR EXT 0,REPORT$+" at "+STR$(ERL)
+da_size%=3*4096
+SYS "OS_Module",6,,,4096+da_size% TO ,,rma%
+
+FOR pass=0 TO 2 STEP 2
+P%=rma%
+[ OPT pass
+.da_handler%
+; R0 = DA handler reason, 5 = aborttrap
+; R1 = flags
+; R2 = buffer
+; R3 = required address
+; R4 = length
+; R5 = current end of DA (nonsense for sparse DAs)
+; R12 = param
+STMFD R13!,{R0-R6,R14}
+ADR R14,last_call%
+MRS R6,CPSR
+STMIA R14,{R0-R5,R6,R12}
+CMP R0,#4 ; Normal DA resize op?
+LDMLOFD R13!,{R0-R6,PC} ; Allow it
+CMP R0,#5 ; Abort op?
+BNE return_bad_reason
+AND R1,R1,#15
+CMP R1,#2
+BHS return_bad_reason
+
+ADR R5,buffer%
+LDR R6,da_base_ptr%
+SUB R3,R3,R6
+ADD R3,R3,R5
+TST R1,#1
+EORNE R2,R2,R3 ; R2^R3, R3
+EORNE R3,R3,R2 ; R2^R3, R2
+EORNE R2,R2,R3 ; R3, R2
+.loop%
+SUBS R4,R4,#1
+LDRB R6,[R2],#1
+STRB R6,[R3],#1
+BNE loop%
+LDMFD R13!,{R0-R6,PC}
+
+.return_bad_reason
+LDMFD R13!,{R0-R6,R14}
+MSR CPSR_f,#(1<<28)
+ADR R0,bad_reason
+MOV PC,LR
+
+.bad_reason
+EQUD 0
+EQUS "Bad reason" : EQUB 0
+ALIGN
+
+.writew_svc%
+SWI "OS_EnterOS"
+STR R1,[R0]
+SWI "OS_LeaveOS"
+MOV PC,R14
+
+.readb_svc%
+SWI "OS_EnterOS"
+LDRB R0,[R0]
+SWI "OS_LeaveOS"
+MOV PC,R14
+
+.readw_svc%
+SWI "OS_EnterOS"
+LDR R0,[R0]
+SWI "OS_LeaveOS"
+MOV PC,R14
+
+.read_sctlr%
+SWI "OS_EnterOS"
+MRC CP15,0,R0,C1,C0,0
+SWI "OS_LeaveOS"
+MOV PC,R14
+
+.ldm_usr%
+ADR R1, ldm_buf%
+LDMIA R0,{R2-R3}
+STMIA R1,{R2-R3}
+MOV PC,R14
+
+.stm_usr%
+ADR R1, ldm_buf%
+LDMIA R1,{R2-R3}
+STMIA R0,{R2-R3}
+MOV PC,R14
+
+.ldm_svc%
+SWI "OS_EnterOS"
+ADR R1, ldm_buf%
+LDMIA R0,{R2-R3}
+STMIA R1,{R2-R3}
+SWI "OS_LeaveOS"
+MOV PC,R14
+
+.stm_svc%
+SWI "OS_EnterOS"
+ADR R1, ldm_buf%
+LDMIA R1,{R2-R3}
+STMIA R0,{R2-R3}
+SWI "OS_LeaveOS"
+MOV PC,R14
+
+.last_call%
+.last_R0% EQUD 0
+.last_R1% EQUD 0
+.last_R2% EQUD 0
+.last_R3% EQUD 0
+.last_R4% EQUD 0
+.last_R5% EQUD 0
+.last_PSR% EQUD 0
+.last_R12% EQUD 0
+
+.da_base_ptr% EQUD 0
+
+.ldm_buf% EQUD 0 : EQUD 0
+
+.buffer%
+]
+NEXT pass
+
+seed%=-TIME
+PRINT "seed: ";seed%
+A%=RND(seed%)
+
+wp%=RND
+da_num%=0
+
+ON ERROR PRINT REPORT$;" at ";ERL : PROCend(1)
+
+PRINT "handler: ";~da_handler%
+PRINT "wp: ";~wp%
+PRINT "last_call: ";~last_call%
+
+DIM expected% 8
+
+REM Offsets to test:
+REM
+REM Start of mapped page, middle of mapped page, end of mapped page
+DATA 4096-4,4096+2048,8192-4,-1
+
+ap%=0
+REPEAT
+ SYS "OS_Memory",17,ap% TO ,ap%,permissions%
+ IF ap%=-1 THEN PROCend(0)
+ PROCtestap
+ PROCendtest
+ ap%+=1
+UNTIL FALSE
+
+DEF PROCtestap
+ PRINT "ap ";ap%;" permissions ";~permissions%
+
+ REM Must be readable in SVC mode
+ IF (permissions% AND &20)<>&20 THEN PRINT "Never readable?" : ENDPROC
+
+ !last_R0%=0
+ !last_R1%=0
+ !last_R2%=0
+ !last_R3%=0
+ !last_R4%=0
+ !last_R5%=0
+ !last_PSR%=0
+ !last_R12%=0
+
+ REM Create a sparse abortable DA
+ SYS "OS_DynamicArea",0,-1,0,-1,ap%+(1<<7)+(1<<10)+(1<<16),da_size%,da_handler%,wp%,"ATTest" TO ,da_num%,,da_base%
+
+ !da_base_ptr%=da_base%
+
+ PRINT "da_base: ";~da_base%
+
+ REM Map in the middle page. We'll perform accesses which cross from the mapped
+ REM page into the unmapped area around it, to check that page access is
+ REM is checked on a per-page basis instead of sending everything through our
+ REM AbortTrap handler
+ SYS "OS_DynamicArea",9,da_num%,da_base%+4096,4096
+
+ REM Report memory permissions
+ PROCcheckvalid
+
+ REM Fill sparse page with test data (if writable in SVC, else just use whatever's currently there)
+ IF permissions% AND &10 THEN PROCfill(da_base%+4096,4096)
+ REM Fill buffer with test data
+ PROCfill(buffer%,da_size%)
+
+ REM perform the access tests
+ RESTORE
+ READ offset%
+ REPEAT
+  PROCexpected(offset%,8,4)
+  A%=da_base%+offset%
+  CALL ldm_usr%
+  IF expected%!0<>ldm_buf%!0 OR expected%!4<>ldm_buf%!4 THEN PRINT "USR LDM ERROR @ ";~offset%;" expected ";~(expected%!0);" ";~(expected%!4);" actual ";~(ldm_buf%!0);" ";~(ldm_buf%!4) : PROCend(1)
+
+  PROCexpected(offset%,8,32)
+  A%=da_base%+offset%
+  CALL ldm_svc%
+  IF expected%!0<>ldm_buf%!0 OR expected%!4<>ldm_buf%!4 THEN PRINT "SVC LDM ERROR @ ";~offset%;" expected ";~(expected%!0);" ";~(expected%!4);" actual ";~(ldm_buf%!0);" ";~(ldm_buf%!4) : PROCend(1)
+
+  ldm_buf%!0=RND
+  ldm_buf%!4=RND
+  A%=da_base%+offset%
+  CALL stm_usr%
+  PROCexpected(offset%,8,2)
+  REM "expected" and "actual" are reversed here, because we're using FNexpected to read back what's been written to the memory
+  IF expected%!0<>ldm_buf%!0 OR expected%!4<>ldm_buf%!4 THEN PRINT "USR STM ERROR @ ";~offset%;" expected ";~(ldm_buf%!0);" ";~(ldm_buf%!4);" actual ";~(expected%!0);" ";~(expected%!4) : PROCend(1)
+
+  ldm_buf%!0=RND
+  ldm_buf%!4=RND
+  A%=da_base%+offset%
+  CALL stm_svc%
+  PROCexpected(offset%,8,16)
+  REM "expected" and "actual" are reversed here, because we're using FNexpected to read back what's been written to the memory
+  IF expected%!0<>ldm_buf%!0 OR expected%!4<>ldm_buf%!4 THEN PRINT "SVC STM ERROR @ ";~offset%;" expected ";~(ldm_buf%!0);" ";~(ldm_buf%!4);" actual ";~(expected%!0);" ";~(expected%!4) : PROCend(1)
+  READ offset%
+ UNTIL offset%=-1
+ENDPROC
+
+DEF PROCendtest
+ IF da_num%<>0 THEN PROClast : SYS "OS_DynamicArea",1,da_num% : da_num%=0
+ENDPROC
+
+DEF PROCend(E%)
+ PROCendtest
+ SYS "OS_Module",7,,rma%
+ IF E% THEN ERROR EXT 0,"Failed"
+ PRINT "Success"
+ END
+ENDPROC
+
+DEF PROClast
+ PRINT "last R0 ";~!last_R0%;" R1 ";~!last_R1%;" R2 ";~!last_R2%;" R3 ";~!last_R3%;" R4 ";~!last_R4%;" R5 ";~!last_R5%;" PSR ";~!last_PSR%;" R12 ";~!last_R12%
+ENDPROC
+
+DEF PROCfill(base%,len%)
+ WHILE len%>0
+  A%=base%
+  B%=RND
+  CALL writew_svc%
+  base%+=4
+  len%-=4
+ ENDWHILE
+ENDPROC
+
+DEF FNexpected(addr%,access%)
+ IF addr%<da_base% OR addr%>=da_base%+da_size% THEN PRINT "Bad addr ";~addr% : PROCend(1)
+ addr%-=da_base%
+ IF (permissions% AND access%)=access% AND addr%>=4096 AND addr%<8192 THEN A%=da_base%+addr% : =USR readb_svc%
+=buffer%?addr%
+
+DEF PROCcheckvalid
+ PROCcheckpage("Low",0)
+ PROCcheckpage("Mid",4096)
+ PROCcheckpage("High",8192)
+ENDPROC
+
+DEF PROCcheckpage(name$,offset%)
+ LOCAL flags%,access%
+ SYS "OS_ValidateAddress",da_base%+offset%,da_base%+offset%+4096 TO ;flags%
+ SYS "OS_Memory",24,da_base%+offset%,da_base%+offset%+4096 TO ,access%
+ PRINT name$;" valid: ";((NOT flags%) AND 2);" ";~access%
+ENDPROC
+
+DEF PROCexpected(offset%,len%,access%)
+ WHILE len%>0
+  len%-=1
+  expected%?len%=FNexpected(da_base%+offset%+len%,access%)
+ ENDWHILE
+ENDPROC

@@ -1,0 +1,3157 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* c.CoreFn - FileSwitch entry-point handlers for LanManFS.
+ *
+ * Implements FSEntry_Open/Close/Args/File/Func/GetBytes/PutBytes; carries the always-on diagnostic infrastructure
+ * (FSE_ENTER / FSE_PATH / FSE_OK ring buffer, FSE_FAIL signature dedupe) that captures recent FSEntry traffic for
+ * a dump for diagnosis on the first occurrence of each unique (handler, reason, errnum) failure.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "kernel.h"
+#include "swis.h"
+#include "stdtypes.h"
+
+#include "LanMan.h"
+#include "Params.h"
+#include "CoreFn.h"
+#include "Workspace.h"
+#include "Xlate.h"
+#include "LMVars.h"
+#include "Attr.h"
+#include "SMB.h"
+#include "SMB2.h"
+#include "Omni.h"
+#include "Transact.h"
+#include "NameCache.h"
+#include "SMBFind.h"
+#include "LanMan_MH.h"
+#include "Cache.h"
+#include "Tick.h"
+
+#define NAMEBUF_LEN (2 * DOS_NAME_LEN)
+#define name_R(x)   ((char *)regs->r[x])
+
+/* Size of the buffer FileSwitch keeps for each open file, as the open call reports it: the largest its interface allows. */
+#define FILE_BUFFER_BYTES 1024
+
+/* Most entries one directory read asks for: the count is kept below the top of an unsigned short so that adding 2 cannot overflow it. */
+#define RD_MAX_NAMES 0xfffdu
+
+/* Size of the open-file table (FileTbl[] below).  Matches the RISC OS 255-handle FileSwitch limit
+ * so we don't run out of slots before FileSwitch does.  See SMB2_MAX_OPEN_FILES in h.SMB2 for the
+ * SMB2-side companion.
+ */
+#define MAXFILES 255
+
+/* FSEntry-level diagnostics.  Two tiers:
+ *
+ *   SMB2_DEBUG          - on first occurrence of each unique (handler, reason, errnum) failure, dump the ring buffer of
+ *                         recent ops + the open-file table.  Later occurrences print only the FSE_FAIL line.  Prints little, and only
+ *                         on failures.
+ *   SMB2_DEBUG_VERBOSE  - additionally print FSE_ENTER / FSE_PATH / FSE_OK for every op.  Verbose; for chasing a specific
+ *                         hang or live correlation with wire traces.
+ *
+ * The ring buffer state is always populated when DEBUG+SMB2_DEBUG is in effect (cheap struct copies into static memory).
+ */
+#if defined(DEBUG) && defined(SMB2_DEBUG)
+
+/* Ring buffer of recent FSEntry ops, plus per-op "current" state populated by ENTER/PATH and consumed by EXITPTR.
+ * All file-scope, so no stack arrays.  Single-threaded RISC OS, so a global current-op cursor is safe.
+ */
+#define CF_RING_LEN 32
+#define CF_PATH_LEN 96
+static struct cf_ring_ent {
+  char handler[12];
+  int reason;
+  char path[CF_PATH_LEN];
+  unsigned errnum;
+  void *errptr;
+} cf_ring[CF_RING_LEN];
+static int cf_ring_head;
+
+static char cf_cur_label[12];
+static int cf_cur_reason;
+static char cf_cur_path[CF_PATH_LEN];
+
+static void cf_dump_filetbl(void);
+
+/* Dump the ring buffer of recent FSEntry ops to the debug stream.
+ *
+ * Walks oldest-first starting at cf_ring_head (which points at the next slot to be written, so is
+ * the wrap point for the oldest entry).  Empty slots (handler[0] == 0) are skipped.
+ *
+ * Parameters:
+ *   why  short reason tag printed in the dump header (e.g. "FAIL-FIRST")
+ */
+static void cf_dump_ring(const char *why) {
+  int i, idx;
+  debug("CF_RING (%s):\n", why);
+  for (i = 0; i < CF_RING_LEN; i++) {
+    idx = (cf_ring_head + i) % CF_RING_LEN;
+    if (cf_ring[idx].handler[0] == 0) {
+      continue;
+    }
+    debug("  %-9s r0=%-3d errnum=0x%08X ptr=%p path=\"%s\"\n", cf_ring[idx].handler, cf_ring[idx].reason, cf_ring[idx].errnum,
+          cf_ring[idx].errptr, cf_ring[idx].path);
+  }
+}
+
+/* Up to 32 unique (handler, reason, errnum) failure signatures already dumped are remembered.
+ * Subsequent occurrences are recorded into the ring (so they show up in another op's
+ * fail dump), but do not trigger a fresh dump themselves.  Without this, repeated probes such
+ * as "Func r0=0 errnum=0x16617" flood the log.
+ */
+#define CF_FAIL_SIGS 32
+static struct {
+  char handler[12];
+  int reason;
+  unsigned errnum;
+  int count;
+} cf_fail_sigs[CF_FAIL_SIGS];
+static int cf_fail_sigs_used;
+
+/* Look up (or record) a failure signature in the dedup table.
+ *
+ * Used by cf_record_exit to decide whether to dump the ring buffer + open-file table on this
+ * failure (first sighting) or stay quiet (already seen).  Overflow past CF_FAIL_SIGS unique
+ * signatures is silently dropped: those failures count as "new" forever and re-trigger dumps,
+ * which is the right side to err on for a diagnostic tool.
+ *
+ * Parameters:
+ *   label   short handler tag ("Func", "File", "Open", ...)
+ *   reason  per-handler reason code (FSEntry_Func reason, etc.)
+ *   errnum  RISC OS error number
+ *
+ * Returns: 1 if the signature was already known (count bumped); 0 if this is a fresh signature.
+ */
+static int cf_fail_seen(const char *label, int reason, unsigned errnum) {
+  int i;
+
+  /* Linear scan: signature already known => bump count and report seen. */
+  for (i = 0; i < cf_fail_sigs_used; i++) {
+    if (cf_fail_sigs[i].reason == reason && cf_fail_sigs[i].errnum == errnum && strcmp(cf_fail_sigs[i].handler, label) == 0) {
+      cf_fail_sigs[i].count++;
+      return 1;
+    }
+  }
+
+  /* New signature: record it (capped at CF_FAIL_SIGS; overflow silently dropped). */
+  if (cf_fail_sigs_used < CF_FAIL_SIGS) {
+    strncpy(cf_fail_sigs[cf_fail_sigs_used].handler, label, sizeof(cf_fail_sigs[0].handler) - 1);
+    cf_fail_sigs[cf_fail_sigs_used].handler[sizeof(cf_fail_sigs[0].handler) - 1] = 0;
+    cf_fail_sigs[cf_fail_sigs_used].reason = reason;
+    cf_fail_sigs[cf_fail_sigs_used].errnum = errnum;
+    cf_fail_sigs[cf_fail_sigs_used].count = 1;
+    cf_fail_sigs_used++;
+  }
+  return 0;
+}
+
+/* Update the ring buffer entry and, on first occurrence of a unique (handler, reason, errnum)
+ * failure, dump the recent ring + open-file table for diagnosis.
+ *
+ * The per-error one-liner ("FSE_FAIL %s ...") is emitted by the CF_TRK_EXITPTR macro on every
+ * error exit, so the dedup-and-dump here doesn't mask later occurrences.
+ *
+ * Parameters:
+ *   label  short handler tag ("Func", "File", "Open", ...)
+ *   pe     OS-error block from the handler return, or NULL for a successful exit
+ */
+static void cf_record_exit(const char *label, _kernel_oserror *pe) {
+  struct cf_ring_ent *e = &cf_ring[cf_ring_head];
+
+  /* Stamp the next ring slot with this op's outcome. */
+  strncpy(e->handler, label, sizeof(e->handler) - 1);
+  e->handler[sizeof(e->handler) - 1] = 0;
+  e->reason = cf_cur_reason;
+  strncpy(e->path, cf_cur_path, sizeof(e->path) - 1);
+  e->path[sizeof(e->path) - 1] = 0;
+  e->errnum = pe ? pe->errnum : 0;
+  e->errptr = (void *)pe;
+  cf_ring_head = (cf_ring_head + 1) % CF_RING_LEN;
+
+  /* First sighting of a unique failure signature: dump ring + open-file table. */
+  if (pe != NULL && !cf_fail_seen(label, cf_cur_reason, (unsigned)pe->errnum)) {
+    cf_dump_ring("FAIL-FIRST");
+    cf_dump_filetbl();
+  }
+}
+
+/* FSEntry tracker macros, two tiers:
+ *
+ *   DEBUG (always-on under SMB2_DEBUG):
+ *     CF_TRK_PRINT_FAIL   - one-liner per error exit showing handler, reason, path, errnum and errmess
+ *
+ *   VERBOSE (SMB2_DEBUG_VERBOSE only):
+ *     CF_TRK_PRINT_ENTER  - one-liner per FSEntry entry showing handler + r0/r1
+ *     CF_TRK_PRINT_PATH   - one-liner per path stamp showing handler + path
+ *     CF_TRK_FH           - one-liner per handle-based op naming the file behind the handle
+ *     CF_TRK_VPRINT_OK    - one-liner per success exit
+ *
+ * A build runs hundreds of thousands of FSEntry calls, and printing each one buried everything else in a debug
+ * log.  The ring buffer still records every op, and is dumped on the first sighting of each failure, so a debug
+ * log keeps the lead-up to a failure; the FAIL line carries the reason and path the ENTER and PATH lines would
+ * have given.
+ */
+#define CF_TRK_PRINT_ENTER(label, r0_, r1_) vdebug("FSE_ENTER %s r0=%d r1=0x%08X\n", (label), (int)(r0_), (unsigned)(r1_))
+#define CF_TRK_PRINT_PATH(label, cf__p)     vdebug("FSE_PATH  %s path=\"%s\"\n", (label), (cf__p) ? (cf__p) : "(null)")
+#define CF_TRK_PRINT_FAIL(label, pe)                                                                                                  \
+  debug("FSE_FAIL  %s r0=%d path=\"%s\" errnum=0x%08X errmess=\"%s\"\n", (label), cf_cur_reason, cf_cur_path, (unsigned)(pe)->errnum, \
+        (pe)->errmess)
+#define CF_TRK_VPRINT_OK(label) vdebug("FSE_OK    %s\n", (label))
+
+/* CF_TRK_FH records the path that backs a FileSwitch handle as the current op's path, so the ring buffer and the
+ * FAIL line name the file, and prints it at the verbose tier.  Used by the handle-based FSEntry handlers (Args /
+ * GetBytes / PutBytes / GBPB / Close).  Tolerates out-of-range handles, freed slots, and SMB1 handles (whose path
+ * isn't centrally retained); falls back to a marker so the caller can see at least the handle.
+ */
+#define CF_TRK_FH(label, fh)                                                           \
+  do {                                                                                 \
+    int cf__fid = (int)(fh)-1;                                                         \
+    if (cf__fid >= 0 && cf__fid < MAXFILES && !FileTbl[cf__fid].Free) {                \
+      const char *cf__p = SMB_GetPathFromFH(FileTbl[cf__fid].SMB_FH);                  \
+      strncpy(cf_cur_path, cf__p ? cf__p : "(SMB1/unknown)", sizeof(cf_cur_path) - 1); \
+      cf_cur_path[sizeof(cf_cur_path) - 1] = 0;                                        \
+      vdebug("FSE_FH    %s handle=%d path=\"%s\"\n", (label), (int)(fh), cf_cur_path); \
+    } else {                                                                           \
+      vdebug("FSE_FH    %s handle=%d (unbound)\n", (label), (int)(fh));                \
+    }                                                                                  \
+  } while (0)
+
+#define CF_TRK_ENTER2(label, r0_, r1_)                        \
+  do {                                                        \
+    strncpy(cf_cur_label, (label), sizeof(cf_cur_label) - 1); \
+    cf_cur_label[sizeof(cf_cur_label) - 1] = 0;               \
+    cf_cur_reason = (int)(r0_);                               \
+    cf_cur_path[0] = 0;                                       \
+    CF_TRK_PRINT_ENTER((label), (r0_), (r1_));                \
+  } while (0)
+#define CF_TRK_PATH(label, p)                               \
+  do {                                                      \
+    const char *cf__p = (p);                                \
+    if (cf__p) {                                            \
+      strncpy(cf_cur_path, cf__p, sizeof(cf_cur_path) - 1); \
+      cf_cur_path[sizeof(cf_cur_path) - 1] = 0;             \
+    }                                                       \
+    CF_TRK_PRINT_PATH((label), cf__p);                      \
+  } while (0)
+/* Exit with _kernel_oserror*: pe == NULL is success, non-NULL is the actual error block. */
+#define CF_TRK_EXITPTR(label, pe)       \
+  do {                                  \
+    if ((pe) != NULL) {                 \
+      CF_TRK_PRINT_FAIL((label), (pe)); \
+    } else {                            \
+      CF_TRK_VPRINT_OK(label);          \
+    }                                   \
+    cf_record_exit((label), (pe));      \
+  } while (0)
+#else
+#define CF_TRK_ENTER2(label, r0_, r1_) ((void)0)
+#define CF_TRK_EXITPTR(label, pe)      ((void)0)
+#define CF_TRK_PATH(label, p)          ((void)0)
+#define CF_TRK_FH(label, fh)           ((void)0)
+#endif
+
+/* DOSnamebuf - shared scratch for path conversions.  Backed by the module-global Dynamic Area; SetWorkspace
+ * installs the pointer before any FSEntry handler runs.  See h.Workspace.
+ */
+static char *DOSnamebuf;
+
+/* The file length FileSwitch was last given by a catalogue read, and the path it was given for.  FileSwitch checks a load's
+ * destination against that length before asking us to load, so LoadFile must never write more.
+ */
+static struct {
+  bool valid;            // false until a catalogue read reports a file
+  char key[NAMEBUF_LEN]; // DOS path of the file reported, drive letter included
+  uint32_t length;       // length reported to FileSwitch
+} cf_told;
+
+size_t CoreFn_WorkspaceBytes(void) {
+  return (size_t)NAMEBUF_LEN;
+}
+
+void CoreFn_SetWorkspace(void *base) {
+  DOSnamebuf = (char *)base;
+}
+
+/* Skip the "X:" drive-letter prefix on a DOS path to get the share-relative cache key.
+ *
+ * The cache is keyed by share-relative paths, and the SMB2 listing names objects within their share too, but DOSnamebuf always
+ * arrives with the "<drv>:" prefix Xlt_ConvertPath puts on it.  The pointer aliases the input buffer, so callers must not free or
+ * mutate it while the key is in use.
+ */
+static inline const char *cache_key_from_dos(const char *dos) {
+  return (dos != NULL) ? (dos + 2) : "";
+}
+
+/* A cached length as FileSwitch can take it: the cache keeps a file's 64-bit size, and one above 4 GiB is reported as the 32-bit
+ * maximum, as the server route reports it.
+ */
+static inline uint cf_length_for_fileswitch(uint64_t length) {
+  return (length > QWORD_OVERFLOW_32) ? UINT32_CLAMP : (uint)length;
+}
+
+/* True for a hidden or system object while hidden files are not shown: one opened by name is not learned, since a catalogue read served
+ * from the cache would then report an object the server lookup hides.
+ */
+static inline bool cf_hidden_by_namemode(const DOS_ATTRIBS *da) {
+  return !(LM_Vars.namemode & NM_HIDDEN) && (da->attr & (ATTR_HID | ATTR_SYS)) != 0;
+}
+
+/*
+ * Rename an object on the server, with the cache showing the new name before the request goes out.
+ *
+ * The server's notification of the rename can arrive while the request is still waiting for its answer, and is
+ * handled there and then.  Were the cache still showing the old name, the notification would look like another
+ * client removing the object, and evict its entry along with the binding of any handle open on it.  Showing the
+ * new name first, with the echo windows of the object and of both directories open, lets the notification be
+ * recognised as this client's.  A failed rename puts the old name back.
+ *
+ * Parameters:
+ *   cache    per-mount cache, or NULL
+ *   old_dos  DOS path of the object, with its drive prefix
+ *   new_dos  DOS path to give it, with its drive prefix
+ *
+ * Returns: the error from SMB_Rename.
+ */
+static err_t cf_rename(LMCache_t *cache, char *old_dos, char *new_dos) {
+  const char *old_key = cache_key_from_dos(old_dos);
+  const char *new_key = cache_key_from_dos(new_dos);
+  err_t err;
+
+  debug("CF_RENAME \"%s\" -> \"%s\" cache=%p\n", old_key, new_key, (void *)cache);
+  Cache_NotifyRename(cache, old_key, new_key);
+  Cache_BumpSuppress(cache, old_key);
+  Cache_BumpSuppress(cache, new_key);
+  err = SMB_Rename(old_dos, new_dos);
+
+  if (err != OK) {
+    debug("CF_RENAME failed err=%d - cache name put back\n", (int)err);
+    Cache_NotifyRenameFailed(cache, old_key, new_key);
+  }
+
+  return err;
+}
+
+/* Record what a catalogue read told FileSwitch about an object, so a following LoadFile can honour it.
+ *
+ * Parameters:
+ *   key     DOS path of the object, drive letter included, so that two mounts never share a record
+ *   type    object type returned to FileSwitch (1 = file); anything else forgets the record
+ *   length  length returned to FileSwitch
+ */
+static void cf_note_told_length(const char *key, int type, uint32_t length) {
+  cf_told.valid = type == 1 && strlen(key) < sizeof cf_told.key;
+
+  if (cf_told.valid) {
+    strcpy(cf_told.key, key);
+    cf_told.length = length;
+  }
+}
+
+/* Look up the length FileSwitch was last told for a file, if the last catalogue read was for that file.
+ *
+ * Parameters:
+ *   key         DOS path of the file about to be loaded, drive letter included
+ *   length_out  receives the length FileSwitch was told
+ *
+ * Returns: true if a length is on record for key.
+ */
+static bool cf_told_length(const char *key, uint32_t *length_out) {
+  if (!cf_told.valid || strcmp(cf_told.key, key) != 0) {
+    return false;
+  }
+
+  *length_out = cf_told.length;
+  return true;
+}
+
+/*
+ * Report whether the cache holds a leaf as absent, so a lookup can fail without a request to the server.
+ *
+ * Splits `key` into parent and leaf.  The leaf is ABSENT when the parent is cached as absent, when a current listing of the parent
+ * that leaves nothing out lacks it, or, with no listing, when Cache_PathRuledOut rules the parent out from further up; the caller
+ * may then report EFILENOTFOUND with no wire round trip.  PRESENT means the listing names the leaf, but the caller still asks the
+ * server for its details (the leaf's own cnode is not cached).  UNKNOWN means the cache cannot tell.
+ *
+ * Parameters:
+ *   cache  per-mount cache, or NULL
+ *   key    share-relative DOS path, "\\"-separated; cache_key_from_dos's output
+ *
+ * Returns: PRESENT / ABSENT / UNKNOWN.
+ */
+static LMLeafStatus_t cache_fast_miss_check(LMCache_t *cache, const char *key) {
+  char parent_buf[NAMEBUF_LEN];
+  const char *leaf;
+  LMCacheNode_t *parent;
+  size_t key_len;
+  size_t i;
+  size_t sep = 0u;
+
+  if (cache == NULL || key == NULL || key[0] == '\0') {
+    return LM_LEAF_UNKNOWN;
+  }
+
+  /* Cache stores share-relative paths without a leading separator, but accepts either form on input.  Skip a
+   * leading "\\" so the parent split matches the cache's canonicalisation.
+   */
+  if (key[0] == '\\') {
+    key++;
+  }
+  if (key[0] == '\0') {
+    return LM_LEAF_UNKNOWN; // root has no parent
+  }
+
+  /* Split key at the rightmost '\\' into (parent, leaf).  No '\\' means a bare leaf at the share root.
+   * After the strip above, any separator is at position >= 1, so sep != 0u serves as "found".
+   */
+  key_len = strlen(key);
+  for (i = key_len; i > 0u; i--) {
+    if (key[i - 1u] == '\\') {
+      sep = i - 1u;
+      break;
+    }
+  }
+  if (sep != 0u) {
+    if (sep + 1u > sizeof parent_buf) {
+      return LM_LEAF_UNKNOWN;
+    }
+    memcpy(parent_buf, key, sep);
+    parent_buf[sep] = '\0';
+    leaf = key + sep + 1u;
+  } else {
+    parent_buf[0] = '\0';
+    leaf = key;
+  }
+
+  /* A parent cached as absent means the leaf cannot exist either, so report ABSENT without the request that would only fail. */
+  parent = Cache_Lookup(cache, parent_buf);
+  if (parent != NULL && parent->obj_type == LMCACHE_OBJECT_NOTHING) {
+    return LM_LEAF_ABSENT;
+  }
+
+  /* Otherwise a current listing of the parent decides, or failing that one further up that rules the parent out. */
+  parent = Cache_LookupListing(cache, parent_buf);
+  if (parent == NULL) {
+    if (Cache_PathRuledOut(cache, parent_buf, Xlt_LeafnamesEquivalent)) {
+      return LM_LEAF_ABSENT;
+    }
+
+    return LM_LEAF_UNKNOWN;
+  }
+
+  /* Parent is a known directory; ask the leafnames blob whether it carries `leaf`. */
+  return Cache_DirHasLeaf(parent, leaf);
+}
+
+/* Retry following the symbolic link a DOS path names if the cache holds it as one that could not be followed; see SMB_CheckInertSymlink. */
+static inline err_t cf_check_inert_symlink(hSHARE hS, const char *dos_path) {
+  return SMB_CheckInertSymlink(hS, cache_key_from_dos(dos_path));
+}
+
+static err_t FileGetAttribsOrLink(char *filename, DOS_ATTRIBS *pda, RISCOS_ATTRIBS *pra);
+
+/* Give a path that came from Xlate's memory a second chance when the server does not know it.
+ *
+ * A remembered spelling is only as good as the last time the server was asked: if another machine has since renamed or retyped
+ * the object, the server reports it missing.  Before that is believed, the path is resolved afresh into DOSnamebuf so the caller
+ * can repeat the operation.  Only read-only operations may rely on this; anything that changes the server forgets the remembered
+ * path before converting, so it never gets here with one.
+ *
+ * Parameters:
+ *   err      result of the operation just tried
+ *   ro_path  the RISC OS path it was tried on
+ *
+ * Returns: true if the path has been re-resolved and the operation should be repeated.
+ */
+static bool cf_refresh_remembered_path(err_t err, const char *ro_path) {
+  if ((err != EFILENOTFOUND && err != EPATHNOTFOUND) || !Xlt_PathWasRemembered()) {
+    return false;
+  }
+
+  debug("FSE_RETRY remembered path for \"%s\" not found on the server - resolving it again\n", ro_path);
+  Xlt_ForgetTranslation();
+  return Xlt_ConvertPath(ro_path, DOSnamebuf) == OK;
+}
+
+/* Convert DOS attribs to RISC OS attribs and inject the leaf-derived filetype into the load address.
+ *
+ * Every cache-miss / open / FileGetAttribs path runs through here, hence `inline`: the function is a small
+ * two-call wrapper but lives on the hot path of all wire-fetched-then-cached metadata.
+ */
+static inline void da_to_ra_full(const char *dos_path, DOS_ATTRIBS *pda, RISCOS_ATTRIBS *pra, hSHARE hS) {
+  Xlt_CnvDOStoRO(pda, pra, CNV_DATETIME | CNV_ATTRIBS, hS);
+  Attr_GetInfo((char *)dos_path, NULL, pra);
+}
+
+/* Read-directory subroutines ======================================= */
+static int RD_Reason;
+static char *RD_BufPtr;
+static int RD_BufLen;
+static int RD_ReqCount; /* No. of entries required */
+static int RD_CurCount; /* No. of entries given */
+static bool RD_BufFull; // the entries wanted were given with another still waiting
+
+/* Write one directory entry, already decoded into RISC OS form, to the caller's buffer.
+ *
+ * The record takes one of three forms, varying in size, chosen by the FSEntry_Func reason.  Updates RD_BufLen as a side effect, and
+ * sets it to -1 when the record does not fit.
+ *
+ * Parameters:
+ *   reason   FSEntry_Func reason code selecting the record format
+ *   ptr      next write position in the caller's buffer
+ *   namebuf  RISC OS leafname
+ *   pda      DOS attributes (for the length and the directory flag)
+ *   pra      RISC OS attributes (for the load and exec addresses and the access flags)
+ *
+ * Returns: advanced write pointer on success, NULL if the record would overflow.
+ */
+static char *WriteEntry(int reason, char *ptr, const char *namebuf, const DOS_ATTRIBS *pda, const RISCOS_ATTRIBS *pra) {
+  int name_len = strlen(namebuf) + 1;
+  int rec_len;
+  int *IntPtr;
+
+  /* Three FileSwitch FSEntry_Func reasons share this writer; each emits a different record
+   * format.  rec_len is sized for the chosen layout (rounded to a whole word where the
+   * subsequent reader expects word-aligned fields), and the body is only written when the
+   * record fits the remaining buffer space.
+   */
+  switch (reason) {
+  case FSEntry_Func_Reason_ReadDirectoryEntries:
+    /* Name only: bare leaf with NUL terminator. */
+    rec_len = name_len;
+    if (rec_len <= RD_BufLen) {
+      memcpy(ptr, namebuf, name_len);
+    }
+    break;
+
+  case FSEntry_Func_Reason_ReadDirectoriesAndInformation:
+    /* 20-byte fixed header (load/exec/length/flags/object-type) then the name. */
+    rec_len = (20 + name_len + 3) & ~3; // Round up to whole word
+    if (rec_len <= RD_BufLen) {
+      IntPtr = (int *)ptr;
+      IntPtr[0] = pra->loadaddr;
+      IntPtr[1] = pra->execaddr;
+      IntPtr[2] = pda->length;
+      IntPtr[3] = pra->flags;
+      IntPtr[4] = (pda->attr & ATTR_DIR) ? 2 : 1;
+      memcpy(ptr + 20, namebuf, name_len);
+    }
+    break;
+
+  case FSEntry_Func_Reason_ReadDirectoryEntriesAndInformation:
+    /* 29-byte header: the 20 bytes above, a system internal name (always 0 here), then the 5-byte
+     * time stamp, whose low four bytes are the exec address and whose top byte is the low byte of
+     * the load address.  The name follows at offset 29 and the record is rounded up to a whole word.
+     */
+    rec_len = (29 + name_len) + 3 & ~3; // Round up to whole word
+    if (rec_len <= RD_BufLen) {
+      IntPtr = (int *)ptr;
+      IntPtr[0] = pra->loadaddr;
+      IntPtr[1] = pra->execaddr;
+      IntPtr[2] = pda->length;
+      IntPtr[3] = pra->flags;
+      IntPtr[4] = (pda->attr & ATTR_DIR) ? 2 : 1;
+      IntPtr[5] = 0;
+      IntPtr[6] = pra->execaddr;
+      ptr[28] = pra->loadaddr & 0xFF;
+      memcpy(ptr + 29, namebuf, name_len);
+    }
+    break;
+
+  default:
+    /* Unknown reason: shouldn't happen; caller's pointer is returned untouched. */
+    return ptr;
+  }
+
+  /* Overflow detection.  RD_BufLen=-1 is the sentinel for "the buffer overflowed" that the
+   * outer iterator picks up via the EOUTOFMEM return path.
+   */
+  if (rec_len > RD_BufLen) {
+    debug("WriteEntry detects a buffer overflow (%d > %d)\n", rec_len, RD_BufLen);
+    RD_BufLen = -1;
+    return NULL;
+  }
+
+  RD_BufLen -= rec_len;
+  return (ptr + rec_len);
+}
+
+/* ------------------------------ */
+
+/*
+ * Decode one entry from the SMBFind_EnumDir iterator and write it into the caller's buffer, skipping "." and "..".
+ *
+ * The directory read in hand is described by the RD_* statics.  An entry arriving once the caller's count is met is not taken, and
+ * RD_BufFull records that more were available.
+ *
+ * Parameters:
+ *   entry   directory entry in the iterator's wire form
+ *   format  1 for a long-name (X2) entry, otherwise the SMBsearch form
+ *   taken   set true when the entry is written to the caller's buffer
+ *   pw      unused
+ *   hS      share the entry came from, for converting its times
+ *
+ * Returns: OK to carry on, or EOUTOFMEM when the caller's buffer has no room left, which stops the iterator.
+ */
+static err_t Dir_CallbackFn(uint8_t *entry, int format, bool *taken, void *pw, hSHARE hS) {
+  char namebuf[DOS_NAME_LEN];
+  DOS_ATTRIBS da;
+  RISCOS_ATTRIBS ra;
+
+  UNUSED(pw);
+
+  *taken = false;
+
+  /* Skip the synthetic "." and ".." entries the wire directory iterators emit. */
+  /* Insert check for . and .. here */
+  if (format == 1) {
+    if (entry[23] == '.') {
+      if (entry[22] == 1 || entry[24] == '\0') {
+        return OK;
+      }
+      if (entry[24] == '.' && (entry[22] == 2 || entry[25] == '\0')) {
+        return OK;
+      }
+    }
+  } else if (entry[9] == '.') {
+    /* Ignore '.' and '..' directories */
+    if (entry[10] == '.' && entry[11] == '\0' || entry[10] == '\0') {
+      return OK;
+    }
+  }
+
+  /* Decode the wire entry to RISC OS form (namebuf + da + ra). */
+  if (format == 1) {
+    Xlt_ExpandSearchEntryX2(entry, DOSnamebuf, namebuf, &da, &ra, hS);
+  } else {
+    Xlt_ExpandSearchEntry(entry, DOSnamebuf, namebuf, &da, &ra, hS);
+  }
+
+  vdebug("WriteEntry (\"%s\")\n", namebuf);
+
+  /* Deliver to the caller's buffer while entries are still wanted; a full buffer stops the iterator with EOUTOFMEM. */
+  if (RD_ReqCount > 0) {
+    char *w_result = WriteEntry(RD_Reason, RD_BufPtr, namebuf, &da, &ra);
+    if (w_result != NULL) {
+      RD_BufPtr = w_result;
+      RD_ReqCount--;
+      RD_CurCount++;
+      *taken = true;
+    } else {
+      debug("Oh dear - client ran out of buffer space!\n");
+      return EOUTOFMEM;
+    }
+  } else {
+    RD_BufFull = true;
+  }
+
+  return OK;
+}
+
+/* Directory snapshots ============================================== */
+
+/*
+ * A program walking a tree often reads a directory a few entries per call, with calls for its sub-directories in between.  Each later call
+ * would otherwise find the directory's listing replayed from the start, or gone stale and read from the server again.  So the first call
+ * of a pass over a directory keeps a copy of the whole listing, as handed to FileSwitch, in a snapshot for the directory's depth, and the
+ * rest of the pass is answered from it, as is the catalogue read FileSwitch makes of each sub-directory before reading it.  The first call
+ * of every pass still goes to the cache or the server, so a snapshot never serves anything older than the start of its pass.  Of a
+ * directory too big to keep whole, a snapshot keeps the start, and the pass carries on from the cache or the server after it.
+ *
+ * Holding something per directory depth was prompted by looking at how other filing systems, such as Sunfish and LanMan98, cope with
+ * tree walks.  Here each slot holds a copy of the entries already delivered, trusted only for the rest of its pass.
+ */
+#define SNAPSHOT_DEPTHS     (16)
+#define SNAPSHOT_LIFETIME   (3000u)        // centiseconds a pass may go on being answered from its snapshot
+#define SNAPSHOT_FIRST_SIZE (4096u)        // bytes first claimed for a snapshot, doubled as it fills
+#define SNAPSHOT_MAX_SIZE   (128u * 1024u) // most a snapshot holds; of a bigger directory it keeps only the start
+#define SNAPSHOT_HEADER     (20u)          // load, exec, length, attributes and object type, ahead of each leaf name
+
+typedef struct {
+  char *dir;           // RISC OS path of the directory, as FileSwitch quotes it; NULL when the slot is empty
+  uint32_t taken_at;   // LM_Tick() when the pass began
+  uint32_t generation; // SMB_DisconnectCount() when the pass began; a mount name may name another share after a disconnect
+  uint8_t *records;    // one word-aligned record per entry: the header words, then the NUL-terminated RISC OS leaf
+  uint32_t size;       // bytes claimed for records
+  uint32_t used;       // bytes of records filled
+  uint32_t count;      // entries held
+  uint32_t next_index; // entry the last continuation stopped before, so the next can start there without a walk
+  uint32_t next_at;    // offset of that entry in records
+  bool full;           // no more entries fit, so the snapshot holds only the start of the directory
+  bool complete;       // filled from a listing that worked; the whole directory is held unless full
+} DirSnapshot;
+
+static DirSnapshot cf_snapshots[SNAPSHOT_DEPTHS];
+
+/*
+ * Choose the snapshot slot for a directory by its depth, the number of separators in its path.
+ *
+ * Parameters:
+ *   path  RISC OS path, as FileSwitch quotes it
+ *
+ * Returns: the slot, or NULL for a directory deeper than the slots reach.
+ */
+static DirSnapshot *snapshot_slot(const char *path) {
+  int depth = 0;
+
+  for (; *path != '\0'; path++) {
+    if (*path == '.') {
+      depth++;
+    }
+  }
+
+  return (depth < SNAPSHOT_DEPTHS) ? &cf_snapshots[depth] : NULL;
+}
+
+/* Empty a snapshot slot and release its memory. */
+static void snapshot_drop(DirSnapshot *s) {
+  free(s->dir);
+  free(s->records);
+  s->dir = NULL;
+  s->records = NULL;
+  s->size = 0u;
+  s->used = 0u;
+  s->count = 0u;
+  s->full = false;
+  s->complete = false;
+}
+
+void CoreFn_ForgetSnapshots(void) {
+  int i;
+
+  for (i = 0; i < SNAPSHOT_DEPTHS; i++) {
+    if (cf_snapshots[i].dir != NULL) {
+      vdebug("SNAPSHOT DROP dir=\"%s\" reason=forgotten\n", cf_snapshots[i].dir);
+    }
+    snapshot_drop(&cf_snapshots[i]);
+  }
+}
+
+/*
+ * Start a snapshot of a directory whose first call of a pass is being answered, replacing whatever its depth's slot held.
+ *
+ * Parameters:
+ *   dir  RISC OS path of the directory, as FileSwitch quotes it
+ *
+ * Returns: the empty snapshot to fill, or NULL if the directory is too deep or memory is short.
+ */
+static DirSnapshot *snapshot_begin(const char *dir) {
+  DirSnapshot *s = snapshot_slot(dir);
+  size_t len = strlen(dir) + 1u;
+
+  if (s == NULL) {
+    return NULL;
+  }
+
+  snapshot_drop(s);
+  s->dir = malloc(len);
+  s->records = malloc(SNAPSHOT_FIRST_SIZE);
+  if (s->dir == NULL || s->records == NULL) {
+    snapshot_drop(s);
+    return NULL;
+  }
+
+  memcpy(s->dir, dir, len);
+  s->size = SNAPSHOT_FIRST_SIZE;
+  s->taken_at = LM_Tick();
+  s->generation = SMB_DisconnectCount();
+  s->next_index = 0u;
+  s->next_at = 0u;
+  vdebug("SNAPSHOT TAKE dir=\"%s\"\n", dir);
+  return s;
+}
+
+/*
+ * Add one entry to a snapshot being filled, growing it as needed.
+ *
+ * Parameters:
+ *   s     snapshot being filled
+ *   name  RISC OS leaf, as written to FileSwitch
+ *   pda   DOS attributes, for the length and the directory flag
+ *   pra   RISC OS attributes, for the load and exec addresses and the access flags
+ *
+ * Returns: true if the entry was added; false if the snapshot is full, having no room within SNAPSHOT_MAX_SIZE or memory being short.
+ */
+static bool snapshot_add(DirSnapshot *s, const char *name, const DOS_ATTRIBS *pda, const RISCOS_ATTRIBS *pra) {
+  size_t name_len = strlen(name) + 1u;
+  uint32_t rec_len = (uint32_t)((SNAPSHOT_HEADER + name_len + 3u) & ~3u);
+  uint32_t header[SNAPSHOT_HEADER / 4u];
+
+  /* Once an entry has been left out, a later one must not be held either, so the entries held are always the start of the directory. */
+  if (s->full) {
+    return false;
+  }
+
+  if (s->used + rec_len > s->size) {
+    uint32_t new_size = s->size;
+    uint8_t *grown;
+
+    while (new_size < s->used + rec_len) {
+      new_size *= 2u;
+    }
+    grown = (new_size <= SNAPSHOT_MAX_SIZE) ? realloc(s->records, new_size) : NULL;
+    if (grown == NULL) {
+      s->full = true;
+      return false;
+    }
+    s->records = grown;
+    s->size = new_size;
+  }
+
+  header[0] = (uint32_t)pra->loadaddr;
+  header[1] = (uint32_t)pra->execaddr;
+  header[2] = (uint32_t)pda->length;
+  header[3] = (uint32_t)pra->flags;
+  header[4] = (pda->attr & ATTR_DIR) ? 2u : 1u;
+  memcpy(s->records + s->used, header, SNAPSHOT_HEADER);
+  memcpy(s->records + s->used + SNAPSHOT_HEADER, name, name_len);
+  s->used += rec_len;
+  s->count++;
+  return true;
+}
+
+/* Empty a snapshot being filled, for a listing about to be tried again from its start.  Safe with NULL. */
+static void snapshot_restart(DirSnapshot *s) {
+  if (s != NULL) {
+    s->used = 0u;
+    s->count = 0u;
+    s->full = false;
+  }
+}
+
+/*
+ * End the filling of a snapshot: keep it for the rest of the pass if the listing worked, or drop it.
+ *
+ * A full snapshot is kept too.  The listing that filled it stopped at the first entry left out, so the call of the pass that reaches
+ * that entry carries on from the cache or the server exactly where the listing stopped.
+ *
+ * Parameters:
+ *   s   snapshot being filled, or NULL if there is none
+ *   ok  true if the listing worked
+ */
+static void snapshot_finish(DirSnapshot *s, bool ok) {
+  if (s == NULL) {
+    return;
+  }
+
+  if (ok) {
+    s->complete = true;
+    vdebug("SNAPSHOT KEEP dir=\"%s\" entries=%u whole=%d\n", s->dir, (unsigned)s->count, !s->full);
+  } else {
+    vdebug("SNAPSHOT DROP dir=\"%s\" reason=failed\n", s->dir);
+    snapshot_drop(s);
+  }
+}
+
+/* Length of the snapshot record that starts at p. */
+static inline uint32_t snapshot_record_len(const uint8_t *p) {
+  return (uint32_t)((SNAPSHOT_HEADER + strlen((const char *)p + SNAPSHOT_HEADER) + 1u + 3u) & ~3u);
+}
+
+/*
+ * Find the current snapshot of a directory, dropping one that has outlived its pass.
+ *
+ * Parameters:
+ *   dir      RISC OS path of the directory
+ *   dir_len  length of dir, which need not be NUL-terminated there
+ *
+ * Returns: the snapshot, or NULL if there is none to answer from.
+ */
+static DirSnapshot *snapshot_find(const char *dir, size_t dir_len) {
+  DirSnapshot *s;
+  int depth = 0;
+  size_t i;
+
+  for (i = 0u; i < dir_len; i++) {
+    if (dir[i] == '.') {
+      depth++;
+    }
+  }
+  if (depth >= SNAPSHOT_DEPTHS) {
+    return NULL;
+  }
+
+  s = &cf_snapshots[depth];
+  if (s->dir == NULL || !s->complete || strlen(s->dir) != dir_len || memcmp(s->dir, dir, dir_len) != 0) {
+    return NULL;
+  }
+
+  /* A pass that has run on too long, or whose mount may now be another share, starts again from the cache or the server. */
+  if ((uint32_t)(LM_Tick() - s->taken_at) >= SNAPSHOT_LIFETIME || s->generation != SMB_DisconnectCount()) {
+    vdebug("SNAPSHOT DROP dir=\"%s\" reason=%s\n", s->dir, (s->generation != SMB_DisconnectCount()) ? "disconnected" : "aged");
+    snapshot_drop(s);
+    return NULL;
+  }
+
+  return s;
+}
+
+/*
+ * Answer a later call of a pass from the directory's snapshot.
+ *
+ * Parameters:
+ *   path_name       RISC OS path of the directory, as FileSwitch quotes it
+ *   n_names         most entries wanted
+ *   dir_offset      offset the previous call returned
+ *   pOutNread       receives the number of entries written
+ *   pOutNextOffset  receives the offset to continue from, or -1 when the directory has been read to the end
+ *   pres            receives the outcome: OK, or EOUTOFMEM when the next entry does not fit the caller's whole buffer
+ *
+ * Returns: true if the call was answered; false if there is no snapshot for it, so it must be read as before.
+ */
+static bool snapshot_continue(const char *path_name, int n_names, int dir_offset, int *pOutNread, int *pOutNextOffset, err_t *pres) {
+  DirSnapshot *s = snapshot_find(path_name, strlen(path_name));
+  uint32_t index;
+  uint32_t at;
+  int delivered = 0;
+
+  /* An offset beyond the entries held, or at the end of a snapshot holding only the start, carries on from the cache or the server. */
+  if (s == NULL || (uint32_t)dir_offset > s->count || ((uint32_t)dir_offset == s->count && s->full)) {
+    if (s != NULL) {
+      vdebug("SNAPSHOT PAST_END dir=\"%s\" offset=%d entries=%u\n", s->dir, dir_offset, (unsigned)s->count);
+    }
+    return false;
+  }
+
+  /* Most calls carry on where the last stopped; any other offset is found by walking from the start. */
+  if ((uint32_t)dir_offset == s->next_index) {
+    index = s->next_index;
+    at = s->next_at;
+  } else {
+    for (index = 0u, at = 0u; index < (uint32_t)dir_offset; index++) {
+      at += snapshot_record_len(s->records + at);
+    }
+  }
+
+  /* Write entries until the caller has as many as it asked for or its buffer is full. */
+  while (index < s->count && delivered < n_names) {
+    uint32_t header[SNAPSHOT_HEADER / 4u];
+    RISCOS_ATTRIBS ra;
+    DOS_ATTRIBS da;
+    char *w_result;
+
+    memcpy(header, s->records + at, SNAPSHOT_HEADER);
+    ra.loadaddr = (uint)header[0];
+    ra.execaddr = (uint)header[1];
+    ra.flags = (uint)header[3];
+    da.length = (int)header[2];
+    da.attr = (header[4] == 2u) ? ATTR_DIR : 0;
+    da.utime = 0u;
+    w_result = WriteEntry(RD_Reason, RD_BufPtr, (const char *)(s->records + at + SNAPSHOT_HEADER), &da, &ra);
+    if (w_result == NULL) {
+      break;
+    }
+    RD_BufPtr = w_result;
+    at += snapshot_record_len(s->records + at);
+    index++;
+    delivered++;
+  }
+
+  s->next_index = index;
+  s->next_at = at;
+
+  /* An entry too big for the caller's whole buffer is reported, as the other routes report it, so the caller does not ask for ever. */
+  *pres = (delivered == 0 && index < s->count) ? EOUTOFMEM : OK;
+  *pOutNread = delivered;
+  *pOutNextOffset = (*pres == OK && (index < s->count || s->full)) ? (int)index : -1;
+  vdebug("SNAPSHOT READ dir=\"%s\" offset=%d gave=%d next=%d\n", s->dir, dir_offset, delivered, *pOutNextOffset);
+  return true;
+}
+
+/*
+ * Answer a catalogue read of a sub-directory from the snapshot of the directory holding it, so the read FileSwitch makes ahead of each
+ * call of a pass needs no path conversion, cache lookup or server request.
+ *
+ * Only directories are answered: a file's length in a listing can lag a file being written elsewhere, and FileSwitch sizes a load by
+ * the length it is told.
+ *
+ * Parameters:
+ *   path  RISC OS path of the object, as FileSwitch quotes it
+ *   regs  FileSwitch's registers, given the object type, load and exec addresses, length and attributes when answered
+ *
+ * Returns: true if the read was answered; false if not, including for a name beyond the entries a full snapshot holds.
+ */
+static bool snapshot_catalogue(const char *path, _kernel_swi_regs *regs) {
+  const char *sep = strrchr(path, '.');
+  const char *leaf;
+  DirSnapshot *s;
+  uint32_t index;
+  uint32_t at;
+
+  if (sep == NULL) {
+    return false;
+  }
+
+  s = snapshot_find(path, (size_t)(sep - path));
+  if (s == NULL) {
+    return false;
+  }
+
+  /* The name must match exactly: a program walking the tree quotes each name as the listing gave it. */
+  leaf = sep + 1;
+  for (index = 0u, at = 0u; index < s->count; index++) {
+    uint32_t header[SNAPSHOT_HEADER / 4u];
+
+    memcpy(header, s->records + at, SNAPSHOT_HEADER);
+    if (header[4] == 2u && strcmp((const char *)(s->records + at + SNAPSHOT_HEADER), leaf) == 0) {
+      regs->r[0] = 2;
+      regs->r[2] = (int)header[0];
+      regs->r[3] = (int)header[1];
+      regs->r[4] = (int)header[2];
+      regs->r[5] = (int)header[3];
+      vdebug("SNAPSHOT CATALOGUE path=\"%s\"\n", path);
+      return true;
+    }
+    at += snapshot_record_len(s->records + at);
+  }
+
+  return false;
+}
+
+/* ----------------- */
+
+/* Per-call state of a directory read through dir_visitor.
+ *
+ * Two cursors live here on purpose: `skip_remaining` counts down the entries already delivered on earlier calls, which the cache
+ * replays from the start of the directory every time, while `delivered` counts what this call wrote and feeds the resume cursor
+ * handed back to FileSwitch.
+ */
+typedef struct {
+  int skip_remaining;    // entries still to step past before delivering; 0 for a wire listing, which steps over them itself
+  int n_names_left;      // per-call delivery budget; reaches 0 when the caller's R3 budget is exhausted
+  int delivered;         // visible entries written to the user buffer this call
+  bool buf_full;         // set when WriteEntry overflows the buffer or the budget hits 0 with more available
+  DirSnapshot *snapshot; // snapshot taking each entry until it is full, when this call starts a pass; NULL otherwise
+} ReadDirCtx;
+
+/*
+ * Write one listed entry into the caller's buffer, stepping past those already delivered and stopping the listing once the buffer or
+ * the budget is used up.  A call that starts a pass keeps the listing going past that point until its snapshot is full or has the whole
+ * directory.
+ *
+ * The entry's DOS leaf is put into RISC OS form and any ",ttt" type suffix taken off it; the RD_* statics say where and in what format
+ * to write.
+ *
+ * Parameters:
+ *   node  the entry, a cnode or a temporary copy of a wire record
+ *   user  the ReadDirCtx of the directory read in hand
+ *
+ * Returns: true to be given the next entry; false to stop the listing.
+ */
+static bool dir_visitor(LMCacheNode_t *node, void *user) {
+  ReadDirCtx *ctx = (ReadDirCtx *)user;
+  bool filling;
+  char namebuf[DOS_NAME_LEN];
+  DOS_ATTRIBS da;
+  RISCOS_ATTRIBS ra;
+  RISCOS_ATTRIBS leaf_ra;
+  const char *leaf;
+  char *terminator;
+  char *w_result;
+
+  if (node == NULL || ctx == NULL) {
+    return false;
+  }
+
+  /* Walk past entries already delivered on previous calls. */
+  if (ctx->skip_remaining > 0) {
+    ctx->skip_remaining--;
+    return true;
+  }
+
+  /* Buffer or budget exhausted, with no snapshot still taking entries: stop the listing and let the caller resume next time. */
+  filling = ctx->snapshot != NULL && !ctx->snapshot->full;
+  if ((ctx->n_names_left == 0 || ctx->buf_full) && !filling) {
+    ctx->buf_full = true;
+    return false;
+  }
+
+  /* A cached directory stores its full DOS path, a file only its leaf; strrchr handles both. */
+  leaf = strrchr(node->name, '\\');
+  leaf = (leaf != NULL) ? (leaf + 1) : node->name;
+
+  /* Translate DOS leaf to RISC OS leaf via the lanmanfs lookup table.  Flips DOS '.' (extension separator) to RISC OS
+   * '/' and applies the contentious-character substitutions that the RISC OS Filer expects.  Without this step
+   * "Foo.txt" would go out to FileSwitch verbatim and the user would see a literal dot in the leaf.
+   */
+  {
+    size_t i;
+    size_t leaf_len = strlen(leaf);
+    if (leaf_len >= sizeof(namebuf)) {
+      leaf_len = sizeof(namebuf) - 1u;
+    }
+    for (i = 0; i < leaf_len; i++) {
+      namebuf[i] = (char)lanmanfs_lookup_table[(unsigned char)leaf[i]];
+    }
+    namebuf[leaf_len] = '\0';
+  }
+
+  /* Strip an explicit ",ttt" suffix if present.  Xlt_SplitLeafnameX2 also returns OK for mimemap-derived
+   * filetypes (where the RISC OS display name keeps its "/ext" suffix), but in that case the terminator points
+   * at the trailing NUL rather than at a comma, which the literal `,` test below tells apart.
+   */
+  leaf_ra.loadaddr = 0u;
+  leaf_ra.execaddr = 0u;
+  leaf_ra.flags = 0u;
+  if (Xlt_SplitLeafnameX2(namebuf, &leaf_ra, &terminator) == OK && terminator != NULL && *terminator == ',') {
+    *terminator = '\0';
+  }
+
+  /* Turn the entry's metadata into the (ra, da) pair WriteEntry expects. */
+  ra.loadaddr = (uint)node->load_addr;
+  ra.execaddr = (uint)node->exec_addr;
+  ra.flags = (uint)node->attrs;
+  da.attr = (node->obj_type == LMCACHE_OBJECT_DIRECTORY) ? ATTR_DIR : 0;
+  da.length = cf_length_for_fileswitch(node->length);
+  da.utime = 0;
+
+  /*
+   * The caller has all it can take: carry on only to fill the snapshot.  Once that is full, stop at this entry, the first it left out,
+   * so the listing stops exactly where a later call of the pass goes on from the cache or the server.
+   */
+  if (filling) {
+    filling = snapshot_add(ctx->snapshot, namebuf, &da, &ra);
+  }
+  if (ctx->n_names_left == 0 || ctx->buf_full) {
+    ctx->buf_full = true;
+    return filling;
+  }
+
+  /* Emit; on overflow, mark the buffer full and stop iterating unless the snapshot still wants entries. */
+  w_result = WriteEntry(RD_Reason, RD_BufPtr, namebuf, &da, &ra);
+  if (w_result == NULL) {
+    ctx->buf_full = true;
+    return filling;
+  }
+  RD_BufPtr = w_result;
+  ctx->n_names_left--;
+  ctx->delivered++;
+  return true;
+}
+
+/*
+ * Report the outcome of a directory read made through dir_visitor: the entries delivered and the offset the next call carries on from.
+ *
+ * An entry too big for the caller's whole buffer stops the read before anything is delivered.  That is reported as EOUTOFMEM, as the SMB1
+ * path reports it, because an empty success at an unchanged offset would have the caller ask again for ever.
+ *
+ * Parameters:
+ *   ctx             state of the directory read
+ *   res             outcome of the listing
+ *   dir_offset      offset the read started at
+ *   pOutNread       receives the number of entries written
+ *   pOutNextOffset  receives the offset to continue from, or -1 when the read is over
+ *
+ * Returns: res, or EOUTOFMEM when the first entry did not fit.
+ */
+static err_t dir_read_result(const ReadDirCtx *ctx, err_t res, int dir_offset, int *pOutNread, int *pOutNextOffset) {
+  if (res == OK && ctx->buf_full && ctx->delivered == 0) {
+    res = EOUTOFMEM;
+  }
+
+  *pOutNread = ctx->delivered;
+  *pOutNextOffset = (res == OK && ctx->buf_full) ? (dir_offset + ctx->delivered) : -1;
+  return res;
+}
+
+/*
+ * Read directory entries for the FSEntry_Func directory-read reasons.
+ *
+ * An SMB2 mount is read through its cache, or straight off the wire when it has none or the cache cannot list the directory; a listing
+ * the previous call left part-read carries straight on.  An SMB1 mount is read through SMBFind_EnumDir.
+ *
+ * Parameters:
+ *   reason          FSEntry_Func reason, which decides the format each entry is written in
+ *   path_name       RISC OS path of the directory, as FileSwitch gives it
+ *   buffer          caller's buffer for the entries
+ *   n_names         most entries wanted
+ *   dir_offset      offset to start at: 0 for the first call, then the value the previous call returned
+ *   buflen          size of buffer, in bytes
+ *   pOutNread       receives the number of entries written
+ *   pOutNextOffset  receives the offset to continue from, or -1 when the directory has been read to the end
+ *
+ * Returns: OK, or the error that stopped the read.
+ */
+static err_t Func_ReadDir1(int reason, char *path_name, char *buffer, int n_names, int dir_offset, int buflen, int *pOutNread,
+                           int *pOutNextOffset) {
+  static SMBFind_t smbfind;
+  err_t res;
+  hSHARE hS;
+  LMCache_t *cache;
+  ReadDirCtx ctx;
+  LMCacheEnumResult_t enum_res;
+  SMB2_ListingStart from;
+  bool cache_eligible;
+
+  /* Nothing wanted, or the previous call reached the end: report no entries and no resume point. */
+  if (n_names == 0 || dir_offset == -1 || buffer == NULL || buflen <= 0) {
+    SMB2_EndListing();
+    *pOutNread = 0;
+    *pOutNextOffset = -1;
+    return OK;
+  }
+  if ((unsigned int)n_names > RD_MAX_NAMES) {
+    n_names = (int)RD_MAX_NAMES;
+  }
+
+  RD_Reason = reason;
+  RD_BufPtr = buffer;
+  RD_BufLen = buflen;
+  RD_CurCount = 0;
+  RD_ReqCount = n_names;
+  RD_BufFull = false;
+
+  /* The direct SMB2 listing steps past already-delivered entries itself, so its visitor is told to skip none. */
+  ctx.skip_remaining = 0;
+  ctx.n_names_left = n_names;
+  ctx.delivered = 0;
+  ctx.buf_full = false;
+  ctx.snapshot = NULL;
+
+  /* A later call of a pass whose first call kept a snapshot is answered from it, with no path to resolve and nothing to ask. */
+  if (dir_offset > 0 && snapshot_continue(path_name, n_names, dir_offset, pOutNread, pOutNextOffset, &res)) {
+    return res;
+  }
+
+  /* The listing is known to the SMB2 layer by the path FileSwitch quotes, so a continuation is recognised without converting it. */
+  from.tag = path_name;
+  from.index = (uint32_t)dir_offset;
+
+  /* A listing this caller left part-read is still open on the server: carry straight on, with no path to resolve. */
+  if (SMB2_ResumeListing(&from, dir_visitor, &ctx, &res)) {
+    return dir_read_result(&ctx, res, dir_offset, pOutNread, pOutNextOffset);
+  }
+
+  /* Not a continuation, so whatever listing was left open has been abandoned by its reader. */
+  SMB2_EndListing();
+
+  res = Xlt_ConvertPath(path_name, DOSnamebuf);
+  if (res != OK) {
+    *pOutNread = 0;
+    *pOutNextOffset = -1;
+    return res;
+  }
+
+  /*
+   * Pick a path: SMB2 mounts have a wire vtable and drive enumeration via the cache; SMB1 falls back below.  A directory the
+   * cache cannot list (too big, or holding names that differ only in case) is read through the cache only from the start,
+   * which costs one short scan and lets it rejoin the cache if it has shrunk.  Later pages go to the server as for an
+   * uncached mount, so each page carries on where the last stopped.
+   */
+  hS = SMB_GetShareFileName(DOSnamebuf);
+  cache = SMB_GetCache(hS);
+  cache_eligible = cache != NULL && cache->wire.first != NULL;
+
+  if (cache_eligible && dir_offset > 0 && Cache_DirNotCacheable(cache, cache_key_from_dos(DOSnamebuf))) {
+    cache_eligible = false;
+  }
+
+  if (cache_eligible) {
+    ctx.skip_remaining = dir_offset; // the cache replays the directory from its start on every call
+    if (dir_offset == 0) {
+      ctx.snapshot = snapshot_begin(path_name);
+    }
+    enum_res = Cache_EnumerateDirectory(cache, cache_key_from_dos(DOSnamebuf), dir_visitor, &ctx);
+
+    /* A remembered path the server no longer knows is resolved afresh and the listing tried once more. */
+    if (enum_res.not_found && cf_refresh_remembered_path(EPATHNOTFOUND, path_name)) {
+      snapshot_restart(ctx.snapshot);
+      enum_res = Cache_EnumerateDirectory(cache, cache_key_from_dos(DOSnamebuf), dir_visitor, &ctx);
+    }
+
+    if (enum_res.not_found) {
+      snapshot_finish(ctx.snapshot, false);
+      *pOutNread = 0;
+      *pOutNextOffset = -1;
+      return EPATHNOTFOUND;
+    }
+
+    if (enum_res.is_authoritative || enum_res.served_from_cache) {
+      snapshot_finish(ctx.snapshot, true);
+      return dir_read_result(&ctx, OK, dir_offset, pOutNread, pOutNextOffset);
+    }
+
+    /* The listing failed part-way: report it, so a copy or a Filer window never takes what arrived for the whole directory. */
+    snapshot_finish(ctx.snapshot, false);
+    *pOutNread = 0;
+    *pOutNextOffset = -1;
+    return (enum_res.wire_error != OK) ? (err_t)enum_res.wire_error : ELINKFAILED;
+  }
+
+  /* No cache on an SMB2 mount, or a directory it cannot list: scan the wire directly, from the start of the directory, stepping
+   * over the entries already delivered.  A failure is reported as an error; a visitor stop (buffer or budget exhausted) yields a
+   * resume cursor and leaves the listing open for the next call to continue.
+   */
+  if (dir_offset == 0) {
+    ctx.snapshot = snapshot_begin(path_name);
+  }
+  if (SMB_EnumerateSMB2Directory(hS, cache_key_from_dos(DOSnamebuf), &from, dir_visitor, &ctx, &res)) {
+    if (cf_refresh_remembered_path(res, path_name)) {
+      snapshot_restart(ctx.snapshot);
+      (void)SMB_EnumerateSMB2Directory(SMB_GetShareFileName(DOSnamebuf), cache_key_from_dos(DOSnamebuf), &from, dir_visitor, &ctx, &res);
+    }
+
+    snapshot_finish(ctx.snapshot, res == OK);
+    return dir_read_result(&ctx, res, dir_offset, pOutNread, pOutNextOffset);
+  }
+  snapshot_finish(ctx.snapshot, false);
+
+  /* An SMB1 mount, or a share that could not be reached just now: drive SMBFind_EnumDir, which writes through Dir_CallbackFn. */
+  res = OK;
+  while (dir_offset != -1 && res == OK && // More names available
+         RD_ReqCount > 0)                 // More names wanted
+  {
+    res = SMBFind_EnumDir(&smbfind, dir_offset, path_name, RD_ReqCount, Dir_CallbackFn, NULL, &dir_offset);
+  }
+
+  /* Process results */
+  if (res == EOUTOFMEM && RD_BufLen == -1 && RD_CurCount > 0) {
+    /* Special result when client buffer space exhausted */
+    res = OK;
+  }
+  if (res == ENOMOREFILES && RD_BufFull) {
+    /* The search ended with entries still waiting: the next call restarts it and skips to dir_offset. */
+    res = OK;
+  }
+
+  if (res != OK) {
+    /* Ran out of files, or error */
+    *pOutNextOffset = -1;
+  } else {
+    *pOutNextOffset = dir_offset;
+  }
+
+  *pOutNread = RD_CurCount;
+
+  if (res == ENOMOREFILES) {
+    return OK;
+  }
+
+  return res;
+}
+
+/* Func ============================================================= */
+
+/*
+ * Canonicalise the disc name of a path for FileSwitch: the mount's name as it was mounted, whatever case it was given in.  Without
+ * this FileSwitch selects the disc and reads its name back, two more calls for every path it canonicalises.  LanManFS has no special
+ * field.  A name no mount has is handed back as it was, for the call using the path to report.
+ *
+ * Parameters:
+ *   regs  FileSwitch's registers: r2 the disc name or 0, r4 a buffer of r6 bytes for the result or 0 to ask the length needed;
+ *         r1 to r4 are set as FSEntry_Func 23 returns them
+ */
+static void func_canonicalise_disc(_kernel_swi_regs *regs) {
+  const char *given = (const char *)regs->r[2];
+  const char *canonical = NULL;
+  char letter;
+  size_t len;
+
+  regs->r[1] = 0;
+  regs->r[3] = 0;
+  if (given == NULL) {
+    regs->r[4] = 0;
+    return;
+  }
+
+  letter = Omni_GetDrvLetter(given);
+  if (letter != 0) {
+    canonical = Omni_GetMountName(letter);
+  }
+  if (canonical == NULL) {
+    canonical = given;
+  }
+
+  /* With no buffer the overflow is the whole name, which is how FileSwitch learns how much to claim. */
+  len = strlen(canonical);
+  if (regs->r[4] == 0) {
+    regs->r[4] = (int)len;
+    return;
+  }
+
+  if (len + 1u <= (size_t)regs->r[6]) {
+    memmove((char *)regs->r[4], canonical, len + 1u); // canonical may be the caller's own string
+    regs->r[2] = regs->r[4];
+    regs->r[4] = 0;
+  } else {
+    regs->r[4] = (int)(len + 1u - (size_t)regs->r[6]);
+  }
+}
+
+/*
+ * Handle the FSEntry_Func entry point.
+ *
+ * Directory reads, renames, the current-drive and disc-name reasons, the start-up banner, booting and shutdown are served here; the
+ * directory and object catalogue reasons go back to FileSwitch with ENORISCOS2.  A listing left open survives only into a directory read
+ * that may continue it.  A boot mount's !ArmBoot runs after the re-entry guard is released.
+ *
+ * Parameters:
+ *   regs  FileSwitch's registers: r0 the reason code, the rest as that reason defines; results are written back
+ *   pw    module private word, unused
+ *
+ * Returns: NULL on success, or the error to give FileSwitch.
+ */
+_kernel_oserror *fsentry_func_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret;
+  err_t err;
+  int reason = regs->r[0];
+
+  /*
+   * Canonicalising a path and resolving a wildcard come ahead of almost every call naming a path.  The first is answered from the mount
+   * list and the second is left to FileSwitch, so neither needs the re-entry guard, the network or a trace line.
+   */
+  if (reason == FSEntry_Func_Reason_CanonicaliseSpecialAndDisc) {
+    func_canonicalise_disc(regs);
+    return NULL;
+  }
+  if (reason == FSEntry_Func_Reason_ResolveWildcard) {
+    regs->r[4] = -1; // FileSwitch resolves it, as it does for a filing system without these calls
+    return NULL;
+  }
+
+  CF_TRK_ENTER2("Func", regs->r[0], regs->r[1]);
+
+  /* Most FSEntry_Func reasons pass a path in r1.  Exceptions where r1 is unused, zero, or an output buffer
+   * skip the path stamp: dereferencing r1 as a string in those cases would print garbage at best.
+   */
+  switch (regs->r[0]) {
+  case FSEntry_Func_Reason_SetFilingSystemOptions:                   // r1 unused
+  case FSEntry_Func_Reason_BootFilingSystem:                         // r1 unused
+  case FSEntry_Func_Reason_ReadNameAndBootOptionOfDisc:              // r1 unused, r2 = output buffer
+  case FSEntry_Func_Reason_ReadCurrentDirectoryNameAndPrivilegeByte: // r2 = output buffer
+  case FSEntry_Func_Reason_ReadLibraryDirectoryNameAndPrivilegeByte: // r2 = output buffer
+  case FSEntry_Func_Reason_ShutDown:                                 // r1 unused
+  case FSEntry_Func_Reason_PrintStartUpBanner:                       // r1 unused
+    break;
+  default:
+    CF_TRK_PATH("Func", name_R(1));
+    break;
+  }
+
+  FSEnterKeepingListing();
+  UNUSED(pw);
+
+  /* Only a directory read can be the continuation of a listing left open; Func_ReadDir1 settles that for itself. */
+  switch (regs->r[0]) {
+  case FSEntry_Func_Reason_ReadDirectoryEntries:
+  case FSEntry_Func_Reason_ReadDirectoriesAndInformation:
+  case FSEntry_Func_Reason_ReadDirectoryEntriesAndInformation:
+    break;
+  default:
+    SMB2_EndListing();
+    break;
+  }
+
+  switch (regs->r[0]) {
+  case FSEntry_Func_Reason_SetCurrentDirectory:
+    /* Although we don't maintain a current directory, we use this to keep track of the current drive.
+     *
+     * FileSwitch strips our "LanMan:" prefix before passing the path through, so a bare "Dir LanMan:" (select our filing
+     * system without naming a mount or directory) arrives here as an empty string.  That isn't an error: there is
+     * no drive for us to learn about, so accept it silently.  Without this check Xlt_ConvertPath rejects the empty
+     * string with EBADNAME and the caller gets a spurious "Illegal name" pop-up after every mount.
+     */
+    if (name_R(1)[0] == '\0') {
+      err = OK;
+      break;
+    }
+    err = Xlt_ConvertPath(name_R(1), DOSnamebuf);
+    if (err == OK) {
+      Xlt_SetDefaultDrv(DOSnamebuf);
+    }
+    break;
+
+  /* Reasons we don't service, handed back to FileSwitch via ENORISCOS2. */
+  case FSEntry_Func_Reason_SetLibraryDirectory:
+  case FSEntry_Func_Reason_CatalogueDirectory:
+  case FSEntry_Func_Reason_ExamineCurrentDirectory:
+  case FSEntry_Func_Reason_CatalogueLibraryDirectory:
+  case FSEntry_Func_Reason_ExamineLibraryDirectory:
+  case FSEntry_Func_Reason_ExamineObjects:
+  case FSEntry_Func_Reason_ReadCurrentDirectoryNameAndPrivilegeByte:
+  case FSEntry_Func_Reason_ReadLibraryDirectoryNameAndPrivilegeByte:
+  case FSEntry_Func_Reason_SetDirectoryContexts:
+  case FSEntry_Func_Reason_AccessObjects:
+  case FSEntry_Func_Reason_OutputFullInformationOnObjects:
+    err = ENORISCOS2;
+    break;
+
+  case FSEntry_Func_Reason_RenameObject: {
+    /* Source path into DOSnamebuf, destination into the tail half of the same buffer (shares one allocation).  Both
+     * are resolved against the server as it stands, never from memory, because names are about to change.
+     */
+    Xlt_ForgetTranslation();
+    CoreFn_ForgetSnapshots();
+    err = Xlt_ConvertPath(name_R(1), DOSnamebuf);
+    if (err == OK) {
+      DOS_ATTRIBS da;
+      RISCOS_ATTRIBS ra;
+      err_t src_err;
+
+      /* Ask for the source's details before converting the destination: the lookup that has just resolved the source can
+       * answer for them, but only until the next lookup displaces it.  Only its type and attributes are wanted, not its length.
+       */
+      SMB2_LengthNotNeeded();
+      src_err = FileGetAttribsOrLink(DOSnamebuf, &da, &ra);
+      err = Xlt_ConvertPath(name_R(2), DOSnamebuf + DOS_NAME_LEN);
+
+      /* A missing source has no details to carry over; the rename below reports it as missing. */
+      if (err == OK && src_err != OK && src_err != EFILENOTFOUND && src_err != EPATHNOTFOUND) {
+        err = src_err;
+      }
+
+      if (err == OK && src_err == OK) {
+        /* Trim any RISC OS extension and append the ones from the source instead */
+        Xlt_RemoveROType(DOSnamebuf + DOS_NAME_LEN);
+        if ((da.attr & ATTR_DIR) == 0) {
+          Xlt_AddROType(DOSnamebuf + DOS_NAME_LEN, DOS_NAME_LEN, ra.loadaddr, ra.execaddr);
+        }
+      }
+    }
+    /* A file's cache entry keeps its address through the rename, so a handle bound to it stays valid; a directory's cached subtree is
+     * dropped.
+     */
+    if (err == OK) {
+      err = cf_rename(SMB_GetCache(SMB_GetShareFileName(DOSnamebuf)), DOSnamebuf, DOSnamebuf + DOS_NAME_LEN);
+    }
+
+    if (SMB_IsLongNameFS(DOSnamebuf + DOS_NAME_LEN)) {
+      if (err == EBADRENAME) {
+        regs->r[1] = 1;
+        err = OK;
+      } else {
+        regs->r[1] = 0;
+      }
+      break;
+    }
+    /* Don't bother with any of this rubbish for long filename discs */
+
+    if (err == OK) // If rename worked, swap attribs
+    {
+      RISCOS_ATTRIBS ra;
+      ra.loadaddr = 0xFFF00000;
+      ra.execaddr = 0;
+      ra.flags = ROA_READ | ROA_WRITE;
+      if (Attr_GetInfo(DOSnamebuf, NULL, &ra) == OK) {
+        Attr_DeleteInfo(DOSnamebuf);
+        Attr_SetInfo(DOSnamebuf + DOS_NAME_LEN, &ra);
+      }
+      regs->r[1] = 0;
+    } else if (err == EBADRENAME) {
+      regs->r[1] = 1; // Indicate failure
+      err = OK;
+    }
+    break;
+  }
+
+  case FSEntry_Func_Reason_WriteBootOption:
+  case FSEntry_Func_Reason_SetFilingSystemOptions:
+    err = ENOTPRESENT;
+    break;
+
+  case FSEntry_Func_Reason_ReadBootOption:
+    regs->r[2] = 0; // Report 'no boot', handled instead via !ARMBOOT
+    err = OK;
+    break;
+
+  case FSEntry_Func_Reason_ReadNameAndBootOptionOfDisc: {
+    /* Caller's buffer at R2 wants: <name-length byte><disc name><boot option byte>.  Our "current
+     * disc" is whichever mount the default drive letter resolves to (set by the SetCSD branch via
+     * Xlt_SetDefaultDrv); if there's no default drive yet, hand back the literal "Unset".  Boot
+     * option is always 0 - LanManFS doesn't persist *Opt 4 per mount.
+     */
+    uint8_t *buf = (uint8_t *)regs->r[2];
+    const char *disc_name = NULL;
+    size_t name_len;
+
+    if (Xlt_DefaultDrv != 0) {
+      disc_name = Omni_GetMountName(Xlt_DefaultDrv);
+    }
+    if (disc_name == NULL) {
+      disc_name = "Unset";
+    }
+    name_len = strlen(disc_name);
+    if (name_len > 255u) {
+      name_len = 255u; // length byte is 8-bit
+    }
+    buf[0] = (uint8_t)name_len;
+    memcpy(buf + 1, disc_name, name_len);
+    buf[1u + name_len] = 0u;
+    err = OK;
+    break;
+  }
+
+  /* Must identify and boot on request from OS. */
+  case FSEntry_Func_Reason_PrintStartUpBanner:
+    (void)_swix(OS_Write0, _IN(0), "Acorn LanManFS\n\r");
+    err = OK;
+    break;
+
+  case FSEntry_Func_Reason_BootFilingSystem:
+    LM_Boot();
+    err = OK;
+    break;
+
+  case FSEntry_Func_Reason_ShutDown:
+    err = SMB_Shutdown();
+    break;
+
+  case FSEntry_Func_Reason_ReadDirectoryEntries:
+  case FSEntry_Func_Reason_ReadDirectoriesAndInformation:
+  case FSEntry_Func_Reason_ReadDirectoryEntriesAndInformation:
+    err = Func_ReadDir1(regs->r[0], name_R(1), name_R(2), regs->r[3], regs->r[4], regs->r[5], &regs->r[3], &regs->r[4]);
+    break;
+
+  default:
+    err = EBADPARAM;
+    break;
+  }
+
+  NameCache_Flush(ncf_FSFUNC_EXIT);
+  /* The paths converted on the way in to a rename are not how the server spells anything once it has run. */
+  if (reason == FSEntry_Func_Reason_RenameObject) {
+    Xlt_ForgetTranslation();
+  }
+
+  ret = MsgError(err);
+  FSExit();
+
+  /* The boot mount's !ArmBoot runs now the guard is free; there is no caller to give its error to. */
+  if (reason == FSEntry_Func_Reason_BootFilingSystem) {
+    (void)Omni_RunDeferredBoots();
+  }
+  CF_TRK_EXITPTR("Func", ret);
+  return ret;
+}
+
+/* File  =================================================== */
+
+/*
+ * Write to an open file, reporting a write the server cut short as a full disc.
+ *
+ * A server takes fewer bytes than offered when it has no room for the rest.  FileSwitch cannot be told of a partial write, so
+ * the shortfall becomes an error rather than being lost.
+ *
+ * Parameters:
+ *   FH      SMB file handle
+ *   offset  file offset of the first byte
+ *   len     number of bytes to write
+ *   where   the bytes to write
+ *
+ * Returns: OK when every byte was written, EDISCFULL when the server took fewer, or the error from SMB_Write.
+ */
+static err_t cf_write_all(int FH, uint offset, uint len, uint8_t *where) {
+  uint written = 0u;
+  err_t err = SMB_Write(FH, offset, len, where, &written);
+
+  if (err == OK && written < len) {
+    err = EDISCFULL;
+  }
+
+  return err;
+}
+
+/*
+ * Fetch an object's DOS attributes from the server and convert them to RISC OS form.
+ *
+ * Parameters:
+ *   filename  full DOS path, drive letter included
+ *   pda       receives the DOS attributes
+ *   pra       receives the RISC OS attributes, set only on success
+ *
+ * Returns: OK, or the error from SMB_GetAttribs.
+ */
+static err_t FileGetAttribs(char *filename, DOS_ATTRIBS *pda, RISCOS_ATTRIBS *pra) {
+  err_t err;
+
+  vdebug("FileGetAttribs(\"%s\") ... \n", filename);
+  err = SMB_GetAttribs(filename, pda);
+  if (err == OK) {
+    da_to_ra_full(filename, pda, pra, SMB_GetShareFileName(filename));
+  }
+  return err;
+}
+
+/* Fetch an object's attributes as FileGetAttribs does, or a symbolic link's own when the link cannot be followed.
+ *
+ * Deleting and renaming act on a link itself, so a link whose target is missing, absolute or outside the share must
+ * still be found, and its own directory attribute then decides how it is deleted.
+ *
+ * Parameters:
+ *   filename  full DOS path
+ *   pda       destination DOS-side attributes
+ *   pra       destination RISC OS-side attributes (populated only if a fetch succeeded)
+ *
+ * Returns: OK on success, or the error from FileGetAttribs.
+ */
+static err_t FileGetAttribsOrLink(char *filename, DOS_ATTRIBS *pda, RISCOS_ATTRIBS *pra) {
+  err_t err = FileGetAttribs(filename, pda, pra);
+
+  if (err == EFILENOTFOUND || err == EPATHNOTFOUND || err == ESYMLINKFAILED) {
+    if (SMB_GetLinkAttribs(filename, pda) == OK) {
+      da_to_ra_full(filename, pda, pra, SMB_GetShareFileName(filename));
+      err = OK;
+    }
+  }
+
+  return err;
+}
+
+/* ------------------- */
+
+/*
+ * Dispatch an FSEntry_File call by its reason code: SaveFile, CreateFile, LoadFile, the catalogue reads, the attribute writes,
+ * DeleteObject and CreateDirectory.
+ *
+ * Each reason that changes something on the server records the change in the cache and, on success, opens the echo windows, so the
+ * server's CHANGE_NOTIFY for it does not refresh the Filer a second time.  LoadFile is served from a file's cached content when that fits
+ * the length FileSwitch sized the destination from, and otherwise keeps the content of a whole file it reads, for a type worth caching.
+ * A catalogue read leaves a part-read listing open for the directory read it heralds; every other reason closes it.
+ *
+ * Parameters:
+ *   regs  FileSwitch register block (r0 = reason; the PRM gives each reason's argument layout)
+ *   pw    private word from the cmhg veneer (unused)
+ *
+ * Returns: NULL on success, or an error block on failure.
+ */
+_kernel_oserror *fsentry_file_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret;
+  err_t err;
+  int FH;
+  int tmp;
+  hSHARE hS;
+  DOS_ATTRIBS da;
+  RISCOS_ATTRIBS ra;
+  int reason = regs->r[0]; // captured before regs->r[0] is repurposed as the object type on exit
+  bool reads_catalogue;
+  bool reads_only;
+
+  CF_TRK_ENTER2("File", regs->r[0], regs->r[1]);
+  CF_TRK_PATH("File", name_R(1));
+
+  FSEnterKeepingListing();
+  UNUSED(pw);
+
+  reads_catalogue = reason == FSEntry_File_Reason_ReadCatalogueInformation ||
+                    reason == FSEntry_File_Reason_ReadCatalogueInformationNoLength;
+  reads_only = reads_catalogue || reason == FSEntry_File_Reason_LoadFile;
+
+  /* FileSwitch reads a directory's catalogue entry ahead of every call that reads its contents, so a catalogue read must leave a
+   * part-read listing open for the call it heralds.  Should the read need a directory scan of its own, starting that scan closes it.
+   */
+  if (!reads_catalogue) {
+    SMB2_EndListing();
+  }
+
+  /* A catalogue read reports a file's length only from an open of the file, but one that wants none can be answered by the lookup. */
+  if (reason == FSEntry_File_Reason_ReadCatalogueInformationNoLength) {
+    SMB2_LengthNotNeeded();
+  }
+
+  vdebug("FS_file(%d)\n", regs->r[0]);
+
+  /* A sub-directory of a directory being read in a pass is answered from the pass's snapshot. */
+  if (reads_catalogue && snapshot_catalogue(name_R(1), regs)) {
+    if (reason == FSEntry_File_Reason_ReadCatalogueInformation) {
+      cf_told.valid = false; // the length last told is no longer the last catalogue read's
+    }
+    ret = MsgError(OK);
+    goto exit;
+  }
+
+  /* Anything that may create, delete or rename resolves its path against the server as it stands, never from memory, and no pass
+   * goes on reading a listing that may now be wrong.
+   */
+  if (!reads_only) {
+    Xlt_ForgetTranslation();
+    CoreFn_ForgetSnapshots();
+  }
+
+  err = Xlt_ConvertPath(name_R(1), DOSnamebuf);
+
+  /* This is a bodge to stop cmd-line 'copies' with wildcards not working! */
+
+  if (err == ENOWILDCARD &&
+      (regs->r[0] == FSEntry_File_Reason_ReadCatalogueInformationNoLength || regs->r[0] == FSEntry_File_Reason_ReadCatalogueInformation)) {
+    regs->r[0] = 0;
+    ret = MsgError(OK);
+    goto exit;
+  }
+
+  if (err != OK) {
+    ret = MsgError(err);
+    goto exit;
+  }
+
+  hS = SMB_GetShareFileName(DOSnamebuf);
+
+  /* Heal an inert symlink up-front for the reasons that need to look through the link to its target; the others act on the link
+   * itself or are about to replace the path.  A post-heal EOBJECTCHANGED is an error for LoadFile, whose destination was sized for
+   * the inert shape, but is ignored for the catalogue reads, which then read the fresh state.
+   */
+  switch (regs->r[0]) {
+  case FSEntry_File_Reason_LoadFile:
+    err = cf_check_inert_symlink(hS, DOSnamebuf);
+    if (err != OK) {
+      ret = MsgError(err);
+      goto exit;
+    }
+    break;
+  case FSEntry_File_Reason_ReadCatalogueInformation:
+  case FSEntry_File_Reason_ReadCatalogueInformationNoLength:
+    err = cf_check_inert_symlink(hS, DOSnamebuf);
+    if (err != OK && err != EOBJECTCHANGED) {
+      ret = MsgError(err);
+      goto exit;
+    }
+    break;
+  default:
+    break;
+  }
+
+  switch (regs->r[0]) {
+  case FSEntry_File_Reason_CreateFile:
+  case FSEntry_File_Reason_SaveFile:
+    ra.loadaddr = regs->r[2];
+    ra.execaddr = regs->r[3];
+    ra.flags = ROA_READ | ROA_WRITE;
+    Xlt_CnvROtoDOS(&ra, &da, CNV_DATETIME | CNV_ATTRIBS, hS);
+    /* CreateFile callers (*Create, SparkFS unpacking, etc.) often pass DEADDEAD in load/exec when
+     * they have no real timestamp to give, leaving the type implicit in the leaf.  Without recovering
+     * it from its ",ttt" suffix or its extension, Xlt_AddROType below would write ",xxx" and create
+     * the wrong-typed object on the server.  The recovery comes after the date conversion so that the
+     * file still gets no timestamp from us.
+     */
+    if (regs->r[0] == FSEntry_File_Reason_CreateFile && ra.loadaddr == (uint)0xDEADDEAD) {
+      char leaf_copy[DOS_NAME_LEN];
+      const char *src_leaf = Xlt_GetRISCOSLeafName(name_R(1));
+      RISCOS_ATTRIBS leaf_ra;
+      char *terminator;
+
+      leaf_ra.loadaddr = leaf_ra.execaddr = leaf_ra.flags = 0;
+      strncpy(leaf_copy, src_leaf, sizeof leaf_copy - 1);
+      leaf_copy[sizeof leaf_copy - 1] = '\0';
+
+      if (Xlt_SplitLeafnameX2(leaf_copy, &leaf_ra, &terminator) == OK && leaf_ra.loadaddr != (uint)0xDEADDEAD) {
+        debug("FS_file(7): recovered type from path \"%s\": load=0x%08x\n", leaf_copy, leaf_ra.loadaddr);
+        ra.loadaddr = leaf_ra.loadaddr;
+        ra.execaddr = leaf_ra.execaddr;
+      }
+    }
+
+    /* Long-name shares: Xlt_AddROType may rewrite the leaf in-place to fold the filetype into a ",ttt"
+     * suffix.  When it reports a rewrite, delete the file under the old name first so it does not survive
+     * beside the new one; the report also comes back for a name that ends as it began, and the delete then
+     * clears the way for the create.  Drop the old cnode in the same step, because leaving it would let a
+     * catalogue read of the old name be answered from the cache for an object that no longer exists.
+     * Change notification is no safety net here, since Unix servers do not reliably send it.
+     */
+    strncpy(DOSnamebuf + DOS_NAME_LEN, DOSnamebuf, DOS_NAME_LEN);
+    if (Xlt_AddROType(DOSnamebuf, DOS_NAME_LEN, ra.loadaddr, ra.execaddr)) {
+      err = SMB_Delete(DOSnamebuf + DOS_NAME_LEN, false); // a symbolic link stays, and the create rewrites what it points to
+      if (err != OK && err != EFILENOTFOUND) {
+        /* Oh dear - looks likely the create would fail anyway! */
+        break;
+      }
+      Cache_NotifyDelete(SMB_GetCache(hS), cache_key_from_dos(DOSnamebuf + DOS_NAME_LEN));
+    }
+
+    err = SMB_Create(DOSnamebuf, &da, &FH);
+    if (err == OK) {
+      /* Populate the just-created file: SaveFile writes the full payload, CreateFile only sets the
+       * end-of-file extent (caller will write later via PutBytes).
+       */
+      if (regs->r[0] == FSEntry_File_Reason_SaveFile) {
+        err = cf_write_all(FH, 0,                    // Offset
+                           regs->r[5] - regs->r[4],  // Len
+                           (uint8_t *)(regs->r[4])); // Where
+      } else if (regs->r[0] == FSEntry_File_Reason_CreateFile) {
+        err = SMB_Truncate(FH, regs->r[5] - regs->r[4]);
+      }
+      SMB_Close(FH, &da);
+
+      Attr_SetInfo(DOSnamebuf, &ra);
+
+      if (err == OK) {
+        LMCache_t *cache = SMB_GetCache(hS);
+        const char *key = cache_key_from_dos(DOSnamebuf);
+        uint32_t len32 = (uint32_t)regs->r[5] - (uint32_t)regs->r[4];
+        uint64_t length = len32;
+
+        uint32_t cache_flags = Xlt_NormaliseAttribs((uint32_t)ra.flags, false, hS);
+
+        /* Cache-side mirror of the new file's details, and the echo windows for the server's notification of it. */
+        Cache_NotifyCreate(cache, key, (uint8_t)LMCACHE_OBJECT_FILE, (uint32_t)ra.loadaddr, (uint32_t)ra.execaddr, length, cache_flags);
+        Cache_BumpSuppress(cache, key);
+      } else {
+        LMCache_t *cache = SMB_GetCache(hS);
+        const char *key = cache_key_from_dos(DOSnamebuf);
+
+        /* The create made or emptied the file before the write failed: record the name, but leave its details to the server. */
+        Cache_NotifyCreate(cache, key, (uint8_t)LMCACHE_OBJECT_FILE, (uint32_t)ra.loadaddr, (uint32_t)ra.execaddr, 0u,
+                           Xlt_NormaliseAttribs((uint32_t)ra.flags, false, hS));
+        Cache_NotifyChange(cache, key);
+      }
+    }
+
+    regs->r[6] = (int)Xlt_GetRISCOSLeafName(name_R(1));
+    break;
+
+  case FSEntry_File_Reason_LoadFile: {
+    LMCache_t *cache = SMB_GetCache(hS);
+    const char *key = cache_key_from_dos(DOSnamebuf);
+    LMCacheNode_t *cnode = Cache_Lookup(cache, key);
+    uint8_t *load_buf = (uint8_t *)(regs->r[2]);
+    uint32_t told = 0u;
+    bool have_told = cf_told_length(DOSnamebuf, &told);
+
+    /*
+     * Serve the file from its captured content when the cache holds it, as long as it fits the length FileSwitch sized the destination
+     * from.  Otherwise, if the cache holds the leaf as absent (see cache_fast_miss_check), fail without opening it; failing that, open,
+     * read, and learn the details and content.
+     */
+    if (cnode != NULL && cnode->obj_type == LMCACHE_OBJECT_FILE && cnode->u.file.data != NULL && cnode->length <= 0xFFFFFFFFu &&
+        (!have_told || cnode->length <= told)) {
+      memcpy(load_buf, cnode->u.file.data, (size_t)cnode->length);
+      regs->r[2] = (int)cnode->load_addr;
+      regs->r[3] = (int)cnode->exec_addr;
+      regs->r[4] = (int)cnode->length;
+      regs->r[5] = (int)cnode->attrs;
+      err = OK;
+    } else if (cnode == NULL && cache_fast_miss_check(cache, key) == LM_LEAF_ABSENT) {
+      err = EFILENOTFOUND;
+    } else {
+      err = SMB_Open(MODE_RD, DOSnamebuf, &da, &FH, &tmp);
+      if (cf_refresh_remembered_path(err, name_R(1))) {
+        err = SMB_Open(MODE_RD, DOSnamebuf, &da, &FH, &tmp);
+      }
+
+      if (err == OK) {
+        DOS_ATTRIBS close_da;
+        uint actual = 0u;
+
+        /* The file has grown since FileSwitch sized the destination: loading it now would overrun the caller's memory. */
+        if (have_told && (uint32_t)da.length > told) {
+          err = ESHARING;
+        } else {
+          err = SMB_Read(FH, 0, da.length, load_buf, &actual);
+        }
+
+        /* Close with a zero time so the load leaves the file's date to the server: SMB2 would send a non-zero time with SET_INFO
+         * before the close, and SMB1 puts it in the close request.
+         */
+        close_da = da;
+        close_da.utime = 0;
+        SMB_Close(FH, &close_da);
+
+        da_to_ra_full(DOSnamebuf, &da, &ra, hS);
+
+        regs->r[2] = ra.loadaddr;
+        regs->r[3] = ra.execaddr;
+        regs->r[4] = da.length;
+        regs->r[5] = ra.flags;
+
+        /*
+         * Keep the content only if every byte arrived.  Otherwise learn the current details alone, so a retry's catalogue read is told the
+         * new length.
+         */
+        if (!cf_hidden_by_namemode(&da)) {
+          if (err == OK && actual == (uint)da.length) {
+            Cache_NotifyLearnedWithContent(cache, key, (uint32_t)ra.loadaddr, (uint32_t)ra.execaddr, (uint64_t)da.length,
+                                           (uint32_t)ra.flags, load_buf);
+          } else {
+            Cache_NotifyLearned(cache, key, (uint8_t)LMCACHE_OBJECT_FILE, (uint32_t)ra.loadaddr, (uint32_t)ra.execaddr, (uint64_t)da.length,
+                                (uint32_t)ra.flags);
+          }
+        }
+      }
+    }
+
+    regs->r[6] = (int)Xlt_GetRISCOSLeafName(name_R(1));
+    break;
+  }
+
+    /* Read/write file attribute calls ------------------- */
+
+  case FSEntry_File_Reason_WriteLoadAddress:
+  case FSEntry_File_Reason_WriteExecutionAddress:
+  case FSEntry_File_Reason_WriteAttributes: {
+    bool is_dir;
+
+    /* Existing attribs first: we apply the caller's delta on top of them rather than starting from
+     * zero (so WriteLoadAddress doesn't accidentally clear the exec field, etc.).  Missing file is OK
+     * here (matches FileSwitch convention: silent no-op).  Any other failure leaves da and ra unset, so stop.
+     */
+    err = FileGetAttribs(DOSnamebuf, &da, &ra);
+    if (err != OK) {
+      if (err == EFILENOTFOUND || err == EPATHNOTFOUND) {
+        err = OK;
+      }
+      break;
+    }
+    is_dir = (da.attr & ATTR_DIR) != 0;
+
+    if (regs->r[0] == FSEntry_File_Reason_WriteLoadAddress) {
+      ra.loadaddr = regs->r[2];
+      Xlt_CnvROtoDOS(&ra, &da, CNV_DATETIME, hS);
+      /* Long-name shares: changing the filetype encoded in the load address may rename the wire-side
+       * leaf (",ttt" suffix change).  When Xlt_AddROType reports a rewrite, rename the object here so
+       * SMB_SetAttribs below lands on it; the report also comes back for a name that ends as it began, and
+       * the rename is then sent for an unchanged name.  Directories don't carry filetypes so they're skipped.
+       */
+      {
+        if (da.attr & ATTR_DIR) {
+          ;
+        } else {
+          strncpy(DOSnamebuf + DOS_NAME_LEN, DOSnamebuf, DOS_NAME_LEN);
+          if (Xlt_AddROType(DOSnamebuf + DOS_NAME_LEN, DOS_NAME_LEN, ra.loadaddr, ra.execaddr)) {
+            vdebug("WriteLoad: rename \"%s\"\n    -> \"%s\"\n", DOSnamebuf, DOSnamebuf + DOS_NAME_LEN);
+            /* The server holds only the new name from here, whatever happens to the attribute write below. */
+            err = cf_rename(SMB_GetCache(hS), DOSnamebuf, DOSnamebuf + DOS_NAME_LEN);
+            if (err != OK) {
+              debug("WriteLoad: rename failed err=%d\n", err);
+              break;
+            }
+
+            strcpy(DOSnamebuf, DOSnamebuf + DOS_NAME_LEN);
+          }
+        }
+      }
+    } else if (regs->r[0] == FSEntry_File_Reason_WriteExecutionAddress) {
+      ra.execaddr = regs->r[3];
+      Xlt_CnvROtoDOS(&ra, &da, CNV_DATETIME, hS);
+    } else if (regs->r[0] == FSEntry_File_Reason_WriteAttributes) {
+      int kept = da.attr & (ATTR_HID | ATTR_SYS); // RISC OS has no form of these, so the server's stay as they are
+
+      ra.flags = regs->r[5];
+      Xlt_CnvROtoDOS(&ra, &da, CNV_ATTRIBS, hS);
+      da.attr |= kept;
+    }
+
+    Attr_SetInfo(DOSnamebuf, &ra);
+    err = SMB_SetAttribs(DOSnamebuf, &da);
+
+    if (err == OK) {
+      LMCache_t *cache = SMB_GetCache(hS);
+      const char *new_key = cache_key_from_dos(DOSnamebuf);
+      uint64_t length = (uint64_t)da.length;
+
+      /* A directory's details carry the conventional length, as a catalogue read reports it, not the server's figure. */
+      if (is_dir) {
+        length = 4096u;
+      }
+
+      Cache_NotifyMutate(cache, new_key, (uint32_t)ra.loadaddr, (uint32_t)ra.execaddr, length,
+                         Xlt_NormaliseAttribs((uint32_t)ra.flags, is_dir, hS), false);
+      Cache_BumpSuppress(cache, new_key);
+    } else {
+      /* A retype may already have renamed the object, so expire what is cached under its current name rather than keep the old type. */
+      Cache_NotifyChange(SMB_GetCache(hS), cache_key_from_dos(DOSnamebuf));
+    }
+    break;
+  }
+
+  case FSEntry_File_Reason_WriteCatalogueInformation: {
+    bool is_dir = false;
+    int kept = 0; // the server's hidden and system bits, which RISC OS has no form of
+
+    /* Caller hands us full load/exec/flags, so no read-modify-write is needed. */
+    ra.loadaddr = regs->r[2];
+    ra.execaddr = regs->r[3];
+    ra.flags = regs->r[5];
+
+    /* Long-name shares: filetype-encoding change may rename the wire-side leaf.  Directories don't
+     * carry filetypes so they're skipped (only record is_dir for the post-rename cache update).
+     */
+    {
+      RISCOS_ATTRIBS test_ra;
+      err = FileGetAttribsOrLink(DOSnamebuf, &da, &test_ra);
+      if (err == OK) {
+        kept = da.attr & (ATTR_HID | ATTR_SYS);
+      }
+
+      if (err == OK && (da.attr & ATTR_DIR)) {
+        is_dir = true;
+      } else {
+        strncpy(DOSnamebuf + DOS_NAME_LEN, DOSnamebuf, DOS_NAME_LEN);
+        if (Xlt_AddROType(DOSnamebuf + DOS_NAME_LEN, DOS_NAME_LEN, ra.loadaddr, ra.execaddr)) {
+          vdebug("WriteCatInfo: rename \"%s\"\n    -> \"%s\"\n", DOSnamebuf, DOSnamebuf + DOS_NAME_LEN);
+          /* The server holds only the new name from here, whatever happens to the attribute write below. */
+          err = cf_rename(SMB_GetCache(hS), DOSnamebuf, DOSnamebuf + DOS_NAME_LEN);
+          if (err != OK) {
+            debug("WriteCatInfo: rename failed err=%d\n", err);
+            break;
+          }
+
+          strcpy(DOSnamebuf, DOSnamebuf + DOS_NAME_LEN);
+        }
+      }
+    }
+
+    Xlt_CnvROtoDOS(&ra, &da, CNV_ATTRIBS | CNV_DATETIME, hS);
+    da.attr |= kept;
+    Attr_SetInfo(DOSnamebuf, &ra);
+    err = SMB_SetAttribs(DOSnamebuf, &da);
+
+    if (err == OK) {
+      LMCache_t *cache = SMB_GetCache(hS);
+      const char *new_key = cache_key_from_dos(DOSnamebuf);
+      uint64_t length = (uint64_t)da.length;
+
+      /* A directory's details carry the conventional length, as a catalogue read reports it, not the server's figure. */
+      if (is_dir) {
+        length = 4096u;
+      }
+
+      Cache_NotifyMutate(cache, new_key, (uint32_t)ra.loadaddr, (uint32_t)ra.execaddr, length,
+                         Xlt_NormaliseAttribs((uint32_t)ra.flags, is_dir, hS), false);
+      Cache_BumpSuppress(cache, new_key);
+    } else {
+      /* A retype may already have renamed the object, so expire what is cached under its current name rather than keep the old type. */
+      Cache_NotifyChange(SMB_GetCache(hS), cache_key_from_dos(DOSnamebuf));
+    }
+    break;
+  }
+
+  case FSEntry_File_Reason_DeleteObject:
+    err = FileGetAttribsOrLink(DOSnamebuf, &da, &ra);
+    if (err == OK) {
+      /* Return the deleted object's pre-delete metadata to the caller. */
+      regs->r[2] = ra.loadaddr;
+      regs->r[3] = ra.execaddr;
+      regs->r[4] = da.length;
+      regs->r[5] = ra.flags;
+
+      /* Dispatch directory vs regular-file delete to the right wire-side primitive. */
+      if (da.attr & ATTR_DIR) {
+        regs->r[0] = 2;
+        Attr_CheckEmptyDir(DOSnamebuf);
+        err = SMB_RmDir(DOSnamebuf);
+      } else {
+        regs->r[0] = 1;
+        err = SMB_Delete(DOSnamebuf, true);
+      }
+
+      if (err == OK) {
+        LMCache_t *cache = SMB_GetCache(hS);
+        const char *key = cache_key_from_dos(DOSnamebuf);
+
+        Attr_DeleteInfo(DOSnamebuf);
+
+        Cache_NotifyDelete(cache, key);
+        Cache_BumpSuppress(cache, key);
+      }
+    }
+    break;
+
+  case FSEntry_File_Reason_CreateDirectory: {
+    bool created = false;
+
+    /* Strip any spurious ",ttt" suffix: directories don't carry filetypes on the wire. */
+    Xlt_RemoveROType(DOSnamebuf);
+    err = SMB_MkDir(DOSnamebuf, &created);
+    if (err == OK && created) {
+      LMCache_t *cache = SMB_GetCache(hS);
+      const char *key = cache_key_from_dos(DOSnamebuf);
+
+      /* Cache_NotifyMkdir (not Cache_NotifyCreate) so nothing left cached under an earlier directory of this name survives into the
+       * new one, which is known to be empty, and the new directory starts with a definitive empty listing: files then written into it
+       * are appended to that listing, and lookups of anything else in it are answered without a wire trip.  The server stamped the
+       * date, which is not known here, so the entry is left expired.
+       */
+      Cache_NotifyMkdir(cache, key, Xlt_NormaliseAttribs(ROA_READ | ROA_WRITE, true, hS));
+      Cache_BumpSuppress(cache, key);
+    } else if (err == OK) {
+      /* The directory was already there, with contents unknown here: drop whatever the cache holds that says it is absent. */
+      Cache_NotifyDirExists(SMB_GetCache(hS), cache_key_from_dos(DOSnamebuf));
+    }
+    break;
+  }
+
+    /* Read information calls ---------------------------- */
+
+  case FSEntry_File_Reason_ReadCatalogueInformationNoLength:
+  case FSEntry_File_Reason_ReadCatalogueInformation: {
+    LMCache_t *cache = SMB_GetCache(hS);
+    const char *key = cache_key_from_dos(DOSnamebuf);
+    LMCacheNode_t *cnode = Cache_Lookup(cache, key);
+
+    /* Cache hit (positive): serve from RAM, no wire trip. */
+    if (cnode != NULL && cnode->obj_type != LMCACHE_OBJECT_NOTHING) {
+      regs->r[0] = (cnode->obj_type == LMCACHE_OBJECT_DIRECTORY) ? 2 : 1;
+      regs->r[2] = (int)cnode->load_addr;
+      regs->r[3] = (int)cnode->exec_addr;
+      regs->r[4] = (int)cf_length_for_fileswitch(cnode->length);
+      regs->r[5] = (int)cnode->attrs;
+      err = OK;
+      break;
+    }
+
+    /* Cached as absent, because an earlier listing found the path missing: report not found without a wire trip. */
+    if (cnode != NULL) {
+      regs->r[0] = 0;
+      err = OK;
+      break;
+    }
+
+    /* The cache may hold the leaf as absent even without a cnode for it (see cache_fast_miss_check).  Synthesise
+     * the not-found return without a wire trip.
+     */
+    if (cache_fast_miss_check(cache, key) == LM_LEAF_ABSENT) {
+      regs->r[0] = 0;
+      err = OK;
+      break;
+    }
+
+    /* Cache miss: round-trip to the wire and learn the result. */
+    err = FileGetAttribs(DOSnamebuf, &da, &ra);
+    if (cf_refresh_remembered_path(err, name_R(1))) {
+      err = FileGetAttribs(DOSnamebuf, &da, &ra);
+    }
+
+    if (err == OK) {
+      if (da.attr & ATTR_DIR) {
+        regs->r[0] = 2;
+        /* RISC OS convention: directories report length 4096 regardless of the server's actual allocation. */
+        da.length = 4096;
+      } else {
+        regs->r[0] = 1;
+      }
+
+      regs->r[2] = ra.loadaddr;
+      regs->r[3] = ra.execaddr;
+      regs->r[4] = da.length;
+      regs->r[5] = ra.flags;
+
+      /* A read without length may have been answered from a listing, whose length for a file can lag one being written elsewhere. */
+      if ((da.attr & ATTR_DIR) || reason == FSEntry_File_Reason_ReadCatalogueInformation) {
+        Cache_NotifyLearned(cache, key, (da.attr & ATTR_DIR) ? (uint8_t)LMCACHE_OBJECT_DIRECTORY : (uint8_t)LMCACHE_OBJECT_FILE,
+                            (uint32_t)ra.loadaddr, (uint32_t)ra.execaddr, (uint64_t)da.length, (uint32_t)ra.flags);
+      }
+    } else if (err == EFILENOTFOUND || err == EPATHNOTFOUND) {
+      /* A missing object is reported as object type 0, not as an error. */
+      regs->r[0] = 0;
+      err = OK;
+    }
+    break;
+  }
+
+  default:
+    err = EBADPARAM;
+    break;
+  }
+
+  /* Keep the length a catalogue read gave FileSwitch, so a load that follows cannot be made to overrun it. */
+  if (reason == FSEntry_File_Reason_ReadCatalogueInformation && err == OK) {
+    cf_note_told_length(DOSnamebuf, regs->r[0], (uint32_t)regs->r[4]);
+  }
+
+  NameCache_Flush(ncf_FSFILE_EXIT);
+  ret = MsgError(err);
+
+exit:
+  /* Leave nothing remembered: the path converted on the way in may not be how the server spells the object now. */
+  if (!reads_only) {
+    Xlt_ForgetTranslation();
+  }
+
+  FSExit();
+  CF_TRK_EXITPTR("File", ret);
+  return ret;
+}
+
+/* Open/Close subroutines --------------------------------------- */
+
+static struct FileInfo {
+  bool Free;  // true when this slot is not in use
+  int SMB_FH; // File handle for SMB use
+
+  DOS_ATTRIBS da;
+  int filesw_id; // Fileswitch handle for the file
+
+  /*
+   * Read capture: the file's content copied as it is read, so that a later load or open of it is served from the cache.  The block is held
+   * by the cache against the handle (Cache_StreamBlock), because emptying or destroying the content heap withdraws it; only the progress
+   * is kept here.  The block is claimed at the first read from the start, each read in sequence appends to it, any other read abandons
+   * it, and Close attaches it to the file's cnode once the whole file has been read.
+   */
+  uint32_t stream_pos;      // bytes captured so far, and so the offset the next read must start at
+  uint32_t stream_capacity; // file length to capture; non-zero with no block means not yet claimed, or withdrawn; zero means no capture
+
+} FileTbl[MAXFILES];
+
+static int NextHandle;
+
+/*
+ * Claim the capture block a read-only open asked for, now that the file is being read from its start.
+ *
+ * Claiming at the open would cost a block, and perhaps other files' content to make room for it, for every file opened and closed unread,
+ * as a compiler does with a header it has already seen.  A claim that fails is not retried.
+ *
+ * Parameters:
+ *   fid    open-file table index being read
+ *   cnode  the file's cnode, or NULL if the handle is not bound
+ */
+static void streaming_claim_on_first_read(int fid, LMCacheNode_t *cnode) {
+  LMCache_t *cache = (cnode != NULL) ? cnode->mount : NULL;
+
+  if (cache == NULL || FileTbl[fid].stream_capacity == 0u || FileTbl[fid].stream_pos != 0u ||
+      Cache_StreamBlock((uint8_t)(fid + 1)) != NULL) {
+    return;
+  }
+
+  if (Cache_StreamClaim((uint8_t)(fid + 1), cache, (size_t)FileTbl[fid].stream_capacity) == NULL) {
+    debug("STREAM_ABANDON handle=%d reason=no_room pos=0 cap=%u\n", fid + 1, (unsigned)FileTbl[fid].stream_capacity);
+    FileTbl[fid].stream_capacity = 0u;
+  }
+}
+
+/*
+ * Abandon a handle's capture, returning its block to the content heap, for a read out of sequence, a write that changes the file, or a
+ * capture Close cannot attach.  Safe when the handle has no capture.
+ *
+ * Parameters:
+ *   fid  open-file table index whose capture to release
+ *   why  reason, for the debug trace
+ */
+static void streaming_abandon(int fid, const char *why) {
+  if (Cache_StreamBlock((uint8_t)(fid + 1)) != NULL) {
+    debug("STREAM_ABANDON handle=%d reason=%s pos=%u cap=%u\n", fid + 1, why, (unsigned)FileTbl[fid].stream_pos,
+          (unsigned)FileTbl[fid].stream_capacity);
+  }
+
+  /* Referenced only by the debug line; keep the compiler quiet in non-debug builds. */
+  (void)why;
+  Cache_StreamRelease((uint8_t)(fid + 1));
+  FileTbl[fid].stream_pos = 0u;
+  FileTbl[fid].stream_capacity = 0u;
+}
+
+/*
+ * Append the bytes a read from the server brought in to the handle's capture, if it has one.
+ *
+ * Only the bytes that arrived are copied, not the length asked for, and no more than the capture has room for, since FileSwitch asks for
+ * whole buffers past the end of the file.  A read out of sequence abandons the capture, which must hold the file without holes.
+ *
+ * Parameters:
+ *   fid     open-file table index read through
+ *   offset  file offset the read started at
+ *   src     the bytes read
+ *   actual  number of bytes that arrived
+ */
+static void streaming_append(int fid, uint32_t offset, const uint8_t *src, uint32_t actual) {
+  struct FileInfo *pFI = &FileTbl[fid];
+  uint8_t *block = Cache_StreamBlock((uint8_t)(fid + 1));
+  uint32_t cap_remaining;
+  uint32_t copy_len;
+
+  if (block == NULL) {
+    return;
+  }
+
+  if (offset != pFI->stream_pos) {
+    streaming_abandon(fid, "out_of_order");
+    return;
+  }
+
+  cap_remaining = pFI->stream_capacity - pFI->stream_pos;
+  copy_len = (actual < cap_remaining) ? actual : cap_remaining;
+
+  if (copy_len > 0u) {
+    memcpy(block + pFI->stream_pos, src, (size_t)copy_len);
+    pFI->stream_pos += copy_len;
+  }
+}
+
+/* Dump the open-file table (the FileTbl[] array) to the debug stream.
+ *
+ * Forward-declared at the top of the file because cf_record_exit calls it but the FileTbl array
+ * isn't declared until much later.  No-op on builds without SMB2_DEBUG.
+ */
+#if defined(DEBUG) && defined(SMB2_DEBUG)
+static void cf_dump_filetbl(void) {
+  int i, used = 0;
+  for (i = 0; i < MAXFILES; i++) {
+    if (!FileTbl[i].Free) {
+      used++;
+    }
+  }
+  debug("FILETBL used=%d/%d\n", used, MAXFILES);
+  for (i = 0; i < MAXFILES; i++) {
+    if (!FileTbl[i].Free) {
+      debug("  [%d] SMB_FH=%d filesw_id=0x%08X\n", i, FileTbl[i].SMB_FH, (unsigned)FileTbl[i].filesw_id);
+    }
+  }
+}
+#endif
+
+/* --------------- */
+
+/* Allocate a free slot in FileTbl.
+ *
+ * Round-robin starting from NextHandle to spread reuse across the table; falls back to a linear scan if the
+ * round-robin position is taken.
+ *
+ * Returns: slot index in [0, MAXFILES), or -1 if the table is full.
+ */
+static int NewHandle(void) {
+  int i;
+
+  /* Round-robin fast path: try the next position after the last allocation.  Wraps to 0
+   * when we run off the end.
+   */
+  if (NextHandle >= MAXFILES) {
+    NextHandle = 0;
+  }
+
+  if (FileTbl[NextHandle].Free) {
+    return NextHandle++;
+  }
+
+  /* Round-robin slot is taken; linear scan for the first free slot, then advance NextHandle
+   * past it so the next call resumes the round-robin from there.
+   */
+  for (i = 0; i < MAXFILES; i++) {
+    if (FileTbl[i].Free) {
+      NextHandle = i + 1;
+      return i;
+    }
+  }
+
+  /* Table full: say so loudly, so a future ceiling hit is obvious. */
+  debug("CoreFn: MAXFILES table full: bump limit (currently %d)\n", MAXFILES);
+  return -1;
+}
+
+/* Open  =================================================== */
+
+/*
+ * Open or create the file named in DOSnamebuf in the way one FSEntry_Open reason asks for.
+ *
+ * OpenRead fails at once, without a request, when the cache holds the name as absent.  Update falls back to a read-only open when the
+ * server refuses write access, so the caller still gets a handle.  CreateUpdate creates the file readable and writable, leaving the server
+ * to date it, and reports it empty.
+ *
+ * Parameters:
+ *   reason  FSEntry_Open reason code
+ *   pFI     FileTbl slot that receives the file's details and server handle
+ *   hS      share holding the file
+ *   modes   returns the access the file was opened with, as a MODE_* value
+ *
+ * Returns: OK, the error from the open or create, or EFILENOTFOUND when the cache rules the name out; EBADPARAM for an unknown reason.
+ */
+static err_t open_by_reason(int reason, struct FileInfo *pFI, hSHARE hS, int *modes) {
+  RISCOS_ATTRIBS ra;
+  err_t err;
+
+  switch (reason) {
+  case FSEntry_Open_Reason_OpenRead:
+    /* When the cache holds the leaf as absent (see cache_fast_miss_check), the SMB_Open round
+     * trip that would confirm the absence is saved.  Only OpenRead takes it: CreateUpdate means to create the file, so it
+     * has to go to the wire, and OpenUpdate is left to the server.
+     */
+    {
+      LMCache_t *cache = SMB_GetCache(hS);
+      const char *key = cache_key_from_dos(DOSnamebuf);
+      if (Cache_Lookup(cache, key) == NULL && cache_fast_miss_check(cache, key) == LM_LEAF_ABSENT) {
+        err = EFILENOTFOUND;
+        break;
+      }
+    }
+    err = SMB_Open(MODE_RD, DOSnamebuf, &pFI->da, &pFI->SMB_FH, modes);
+    break;
+
+  case FSEntry_Open_Reason_Update:
+    err = SMB_Open(MODE_RDWR, DOSnamebuf, &pFI->da, &pFI->SMB_FH, modes);
+
+    /* Read-only filesystems: fall back to a read-only open so the caller still gets a usable handle. */
+    if (err == ENOACCESS) {
+      err = SMB_Open(MODE_RD, DOSnamebuf, &pFI->da, &pFI->SMB_FH, modes);
+    }
+
+    break;
+
+  case FSEntry_Open_Reason_CreateUpdate:
+    /* Synthesised attribs: caller doesn't supply them on this path. */
+    ra.execaddr = 0; // Not called by RISCOS 3??
+    ra.loadaddr = 0; // If so, should be the current time
+    ra.flags = ROA_READ | ROA_WRITE;
+    Xlt_CnvROtoDOS(&ra, &pFI->da, CNV_DATETIME | CNV_ATTRIBS, hS);
+    err = SMB_Create(DOSnamebuf, &pFI->da, &pFI->SMB_FH);
+    pFI->da.length = 0;
+    *modes = MODE_RDWR;
+    break;
+
+  default:
+    err = EBADPARAM;
+    break;
+  }
+
+  return err;
+}
+
+/*
+ * Dispatch an FSEntry_Open call by its reason code: OpenRead, Update or CreateUpdate.
+ *
+ * On success the file takes a FileTbl slot, its details are recorded in the cache, and the FileSwitch handle is bound to the file's cnode
+ * so that GetBytes, PutBytes, Args and Close reach it without a path.  A read-only open of a file worth caching that holds no content yet
+ * asks for its content to be captured as it is read; the block is claimed at the first read.
+ *
+ * Parameters:
+ *   regs  FileSwitch register block (r0 = reason, r1 = path, r3 = FileSwitch handle)
+ *   pw    private word from the cmhg veneer (unused)
+ *
+ * Returns: NULL on success, or an error block on failure.
+ */
+_kernel_oserror *fsentry_open_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret = NULL;
+  err_t err;
+  int fid;
+  int modes = 0;
+  int reason = regs->r[0]; // captured before regs->r[0] is repurposed below as the file-information word
+  hSHARE hS;
+  struct FileInfo *pFI;
+
+  CF_TRK_ENTER2("Open", regs->r[0], regs->r[1]);
+  CF_TRK_PATH("Open", name_R(1));
+
+  FSEnter();
+  UNUSED(pw);
+
+  vdebug("FS_open(%d)", regs->r[0]);
+
+  /* A create resolves its path against the server as it stands, never from memory. */
+  if (reason == FSEntry_Open_Reason_CreateUpdate) {
+    Xlt_ForgetTranslation();
+  }
+
+  /* An open for writing may change the file's length and date, or create it, under a listing a pass is reading. */
+  if (reason != FSEntry_Open_Reason_OpenRead) {
+    CoreFn_ForgetSnapshots();
+  }
+
+  /* Convert to DOS name & allocate handle */
+
+  err = Xlt_ConvertPath(name_R(1), DOSnamebuf);
+
+  if (err != OK) {
+    ret = MsgError(err);
+    goto exit;
+  }
+
+  fid = NewHandle();
+  if (fid < 0) {
+    ret = MsgError(ENOHANDLES);
+    goto exit;
+  }
+
+  pFI = &FileTbl[fid];
+  pFI->filesw_id = regs->r[3];
+
+  hS = SMB_GetShareFileName(DOSnamebuf);
+
+  /* An inert symlink is retried before the open, for every reason.  This applies to every open variant: read, update,
+   * and create-update all need the target to exist and be openable.  The handle slot allocated above
+   * stays Free=true on this early return (pFI->Free is only flipped to false after a successful open
+   * lower down) so no slot leaks.
+   */
+  err = cf_check_inert_symlink(hS, DOSnamebuf);
+  if (err != OK) {
+    ret = MsgError(err);
+    goto exit;
+  }
+
+  /* A remembered path the server no longer knows is resolved afresh and the open tried once more.  A create never
+   * gets here with one: it forgot the remembered path before converting.
+   */
+  err = open_by_reason(reason, pFI, hS, &modes);
+  if (cf_refresh_remembered_path(err, name_R(1))) {
+    err = open_by_reason(reason, pFI, hS, &modes);
+  }
+
+  if (err == OK) {
+    LMCache_t *cache = SMB_GetCache(hS);
+    const char *key = cache_key_from_dos(DOSnamebuf);
+    RISCOS_ATTRIBS open_ra;
+    LMCacheNode_t *node;
+
+    /* Mark the slot live and report capabilities and handle to FileSwitch. */
+    pFI->Free = false;
+    regs->r[0] = (modes == MODE_RD)     ? OPEN_Readable
+                 : (modes == MODE_RDWR) ? OPEN_Readable | OPEN_Writable
+                 : (modes == MODE_WR)   ? OPEN_Writable
+                                        : 0;
+
+    regs->r[1] = fid + 1;
+    /* FileSwitch user-side OS_BGet / OS_BPut buffer size (PRM 2-541): a power of two between 64 and 1024.  At
+     * 1024 FileSwitch fills its buffer once via FSEntry_GetBytes and serves the next 1024 sequential bytes from
+     * RAM without re-entering the FS, which is the most this interface allows.
+     */
+    regs->r[2] = FILE_BUFFER_BYTES;
+    regs->r[3] = pFI->da.length;
+
+    /* Allocated size is the extent rounded up to a whole buffer, unless rounding would wrap past 4 GiB to zero. */
+    if ((unsigned)regs->r[3] > 0xFFFFFC00u) {
+      regs->r[4] = regs->r[3];
+    } else {
+      regs->r[4] = (int)(((unsigned)regs->r[3] + 1023u) & ~1023u);
+    }
+
+    /* Surface the open in the cache: learn-or-refresh metadata, then bind the FileSwitch handle to the cache
+     * node so FSEntry_PutBytes / Args / Close can resolve it cheaply.  For the create-class reason the entry
+     * may be new, so its echo windows are opened against the CHANGE_NOTIFY about to arrive.
+     */
+    da_to_ra_full(DOSnamebuf, &pFI->da, &open_ra, hS);
+    if (reason == FSEntry_Open_Reason_CreateUpdate) {
+      node = Cache_NotifyCreate(cache, key, (uint8_t)LMCACHE_OBJECT_FILE, (uint32_t)open_ra.loadaddr, (uint32_t)open_ra.execaddr,
+                                (uint64_t)pFI->da.length, (uint32_t)open_ra.flags);
+      Cache_BumpSuppress(cache, key);
+
+      /* The open carries no date for the new file, so leave its details expired until they are read from the server. */
+      if (node != NULL) {
+        node->expires_at = 0u;
+      }
+    } else if (cf_hidden_by_namemode(&pFI->da)) {
+      node = NULL;
+    } else {
+      node = Cache_NotifyLearned(cache, key, (uint8_t)LMCACHE_OBJECT_FILE, (uint32_t)open_ra.loadaddr, (uint32_t)open_ra.execaddr,
+                                 (uint64_t)pFI->da.length, (uint32_t)open_ra.flags);
+    }
+    /* A NULL node here means every later call on this handle bypasses the cache. */
+    debug("HANDLE_ASSIGN handle=%u node=%p reason=%d key=\"%s\" length=%u\n", (unsigned)(fid + 1), (void *)node, (int)reason, key,
+          (unsigned)pFI->da.length);
+    if (node != NULL) {
+      Cache_HandleAssign((uint8_t)(fid + 1), cache, node);
+    }
+
+    /*
+     * Ask for a read capture sized to the file, so the bytes GetBytes brings in can be attached to the cnode at Close: only for a
+     * read-only open of a file holding no content yet whose content is worth keeping and which has been read before.  The block itself
+     * is claimed at the first read.
+     */
+    pFI->stream_pos = 0u;
+    pFI->stream_capacity = 0u;
+
+    if (reason == FSEntry_Open_Reason_OpenRead && cache != NULL && node != NULL && node->u.file.data == NULL &&
+        Cache_ShouldCacheContent(cache, (uint32_t)open_ra.loadaddr, (uint64_t)pFI->da.length) && Cache_ReadAgain(node)) {
+      pFI->stream_capacity = (uint32_t)pFI->da.length;
+    }
+  } else {
+    regs->r[1] = 0;
+    /* Take a risk to enhance cacheing :-) */
+    NameCache_Flush(ncf_FSOPEN_EXIT);
+  }
+  ret = MsgError(err);
+
+exit:
+  /* Leave nothing remembered after a create, now that the object may have come into being. */
+  if (reason == FSEntry_Open_Reason_CreateUpdate) {
+    Xlt_ForgetTranslation();
+  }
+
+  FSExit();
+  CF_TRK_EXITPTR("Open", ret);
+  return ret;
+}
+
+/* GetBytes  =================================================== */
+
+/*
+ * Read bytes from an open file into the caller's buffer, for FSEntry_GetBytes.
+ *
+ * The read is served from the file's cached content when the handle's cnode holds it, and otherwise from the server.  Bytes read from the
+ * server in sequence from the start of the file are appended to the handle's capture, if the open asked for one.
+ *
+ * Parameters:
+ *   regs  FileSwitch register block (r1 = handle, r2 = destination buffer, r3 = length, r4 = offset)
+ *   pw    private word from the cmhg veneer (unused)
+ *
+ * Returns: NULL on success, or an error block on failure.
+ */
+_kernel_oserror *fsentry_getbytes_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret = NULL;
+  int fid = regs->r[1] - 1;
+  uint32_t offset = (uint32_t)regs->r[4];
+  uint32_t length = (uint32_t)regs->r[3];
+  uint8_t *dst = (uint8_t *)(regs->r[2]);
+  uint32_t actual = 0u;
+  LMCacheNode_t *cnode;
+
+  CF_TRK_ENTER2("GetBytes", regs->r[0], regs->r[1]);
+  CF_TRK_FH("GetBytes", regs->r[1]);
+
+  FSEnter();
+  UNUSED(pw);
+
+  /* Reject out-of-range handle indices; the table is 0..MAXFILES-1 and a Free slot is closed. */
+  if (fid < 0 || fid >= MAXFILES || FileTbl[fid].Free) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  /*
+   * Serve the read from the file's captured content when the cache holds it.  FileSwitch reads in whole buffers, so the last read of most
+   * files runs past the end; as with a short read from the server, that copies what the file holds and leaves the rest of the buffer alone.
+   */
+  cnode = Cache_HandleLookup((uint8_t)regs->r[1]);
+
+  if (cnode != NULL && cnode->obj_type == LMCACHE_OBJECT_FILE && cnode->u.file.data != NULL && (uint64_t)offset <= cnode->length) {
+    uint64_t held = cnode->length - (uint64_t)offset;
+    size_t copy_len = (size_t)length;
+
+    if (held < (uint64_t)length) {
+      copy_len = (size_t)held;
+    }
+
+    memcpy(dst, cnode->u.file.data + offset, copy_len);
+    goto exit;
+  }
+
+  /* A read from the start is the moment to claim a capture the open asked for. */
+  if (offset == 0u) {
+    streaming_claim_on_first_read(fid, cnode);
+  }
+
+  /* Read from the server, and append what arrived to the capture if there is one. */
+  ret = MsgError(SMB_Read(FileTbl[fid].SMB_FH, (int)offset, (int)length, dst, &actual));
+
+  if (ret == NULL) {
+    streaming_append(fid, offset, dst, actual);
+  }
+
+exit:
+  FSExit();
+  CF_TRK_EXITPTR("GetBytes", ret);
+  return ret;
+}
+
+/* PutBytes  =================================================== */
+
+/*
+ * Forget what the cache holds of a file's bytes after a write to it through an open handle has failed.
+ *
+ * A long write goes to the server in several requests, so one that fails part-way may have changed some of the file.  Its content is
+ * dropped, any capture of it under way through another handle is abandoned, and its details are expired so the next lookup asks the
+ * server.  A handle bound to no file in the cache leaves nothing to forget.
+ *
+ * Parameters:
+ *   handle  one-based RISC OS file handle written through
+ */
+static void cf_forget_failed_write(int handle) {
+  LMCacheNode_t *cnode = Cache_HandleLookup((uint8_t)handle);
+
+  if (cnode != NULL && cnode->obj_type == LMCACHE_OBJECT_FILE) {
+    cnode->expires_at = 0u;
+    Cache_NotifyMutateNode(cnode->mount, cnode, cnode->load_addr, cnode->exec_addr, cnode->length, cnode->attrs, true);
+  }
+}
+
+/*
+ * Write bytes from the caller's buffer to an open file, for FSEntry_PutBytes.
+ *
+ * The write goes to the server first.  On success the bound cnode's length grows to cover it, its details are expired so the next lookup
+ * takes the server's datestamp for the write, its content is dropped along with any capture of it through another handle, and its echo
+ * window is opened for the CHANGE_NOTIFY to come.  On failure the cache forgets the file's content and details, since part of the write
+ * may have reached the server.
+ *
+ * Parameters:
+ *   regs  FileSwitch register block (r1 = handle, r2 = source buffer, r3 = length, r4 = offset)
+ *   pw    private word from the cmhg veneer (unused)
+ *
+ * Returns: NULL on success, or an error block on failure.
+ */
+_kernel_oserror *fsentry_putbytes_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret = NULL;
+  int fid = regs->r[1] - 1;
+  err_t err;
+  uint32_t offset = (uint32_t)regs->r[4];
+  uint32_t length = (uint32_t)regs->r[3];
+
+  CF_TRK_ENTER2("PutBytes", regs->r[0], regs->r[1]);
+  CF_TRK_FH("PutBytes", regs->r[1]);
+
+  FSEnter();
+  UNUSED(pw);
+
+  /* A write changes the file's length and date under any listing a pass is reading. */
+  CoreFn_ForgetSnapshots();
+
+  if (fid < 0 || fid >= MAXFILES || FileTbl[fid].Free) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  /* Wire write first; cache update only on success. */
+  err = cf_write_all(FileTbl[fid].SMB_FH, offset, length, (uint8_t *)(regs->r[2]));
+  if (err == OK) {
+    /* Reach the cache via the global handle table; the bound node carries enough state to refresh metadata
+     * without a path reconstruction.  Length grows monotonically.  The file's echo window is opened so the
+     * server's CHANGE_NOTIFY for the write is recognised as this client's.
+     */
+    LMCacheNode_t *cnode = Cache_HandleLookup((uint8_t)regs->r[1]);
+    if (cnode != NULL && cnode->obj_type == LMCACHE_OBJECT_FILE) {
+      /* The node's mount back-pointer, set when the cnode was made, names the cache without a lookup through the handle. */
+      LMCache_t *cache = cnode->mount;
+      uint64_t new_length = (uint64_t)offset + (uint64_t)length;
+      if (new_length < cnode->length) {
+        new_length = cnode->length;
+      }
+      Cache_NotifyMutateNode(cache, cnode, cnode->load_addr, cnode->exec_addr, new_length, cnode->attrs, true);
+      cnode->expires_at = 0u; // the server dates the write by its own clock, so the next lookup fetches the datestamp
+      Cache_BumpSuppressNode(cnode);
+    }
+  } else {
+    cf_forget_failed_write(regs->r[1]);
+  }
+  ret = MsgError(err);
+exit:
+  FSExit();
+  CF_TRK_EXITPTR("PutBytes", ret);
+  return ret;
+}
+
+/* GBPB  =================================================== */
+
+/* FSEntry_GBPB handler: unimplemented; always returns ENOGBPB so FileSwitch falls back to GetBytes/PutBytes.
+ *
+ * Parameters:
+ *   regs  FileSwitch register block (unused)
+ *   pw    private word from the cmhg veneer (unused)
+ *
+ * Returns: ENOGBPB error block.
+ */
+_kernel_oserror *fsentry_gbpb_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret;
+  CF_TRK_ENTER2("GBPB", regs->r[0], regs->r[1]);
+  CF_TRK_FH("GBPB", regs->r[1]);
+  FSEnter();
+  UNUSED(pw);
+  UNUSED(regs);
+  ret = MsgError(ENOGBPB);
+  FSExit();
+  CF_TRK_EXITPTR("GBPB", ret);
+  return ret;
+}
+
+/* Close  =================================================== */
+
+/*
+ * Close an open file, for FSEntry_Close, first applying any new timestamp FileSwitch passes.
+ *
+ * A new timestamp leaves the cnode's details expired, since the server may store it rounded.  A capture that holds the whole file is
+ * attached to the cnode as its content, and any other capture is abandoned.  The cache-side handle binding and the FileTbl slot are
+ * released whether or not the server's close succeeded.
+ *
+ * Parameters:
+ *   regs  FileSwitch register block (r1 = handle, r2/r3 = new load and exec addresses, or both zero)
+ *   pw    private word from the cmhg veneer (unused)
+ *
+ * Returns: NULL on success, or an error block on failure.
+ */
+_kernel_oserror *fsentry_close_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret = NULL;
+  err_t err;
+  RISCOS_ATTRIBS ra;
+  int fid = regs->r[1] - 1;
+  bool timestamp_change;
+
+  CF_TRK_ENTER2("Close", regs->r[0], regs->r[1]);
+  CF_TRK_FH("Close", regs->r[1]);
+
+  FSEnter();
+  UNUSED(pw);
+
+  if (fid < 0 || fid >= MAXFILES || FileTbl[fid].Free) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  /* SMB_Close passes da.utime on (SMB2 sends it with SET_INFO before the close, SMB1 puts it in the close request), and
+   * zero leaves the date to the server.  da.utime still holds the time from the open, so clear it and set it only when
+   * R2/R3 carry a new timestamp.  The filetype can't be altered here (Attr_SetInfo) because the file name is not known.
+   */
+  FileTbl[fid].da.utime = 0;
+  timestamp_change = regs->r[2] != 0 || regs->r[3] != 0;
+  if (timestamp_change) {
+    CoreFn_ForgetSnapshots(); // the file's date changes under any listing a pass is reading
+    hSHARE hS = SMB_GetShareFileHandle(FileTbl[fid].SMB_FH);
+    ra.loadaddr = regs->r[2];
+    ra.execaddr = regs->r[3];
+    Xlt_CnvROtoDOS(&ra, &FileTbl[fid].da, CNV_DATETIME, hS);
+  }
+
+  err = SMB_Close(FileTbl[fid].SMB_FH, &FileTbl[fid].da);
+
+  /* If the close carried a timestamp change, the server's stored datestamp is now authoritative and
+   * may differ from what we asked for (NTFS rounds, etc.).  Rather than cache the client-side intent
+   * and risk drift, force the cnode to expire so the next ReadCatInfo refetches.  The file's echo window
+   * stops the SET_INFO's CHANGE_NOTIFY echo from refreshing the Filer a second time.
+   */
+  {
+    LMCacheNode_t *cnode = Cache_HandleLookup((uint8_t)regs->r[1]);
+    /* Pairs with HANDLE_ASSIGN at the open, so a binding lost while the handle was open shows as a NULL cnode. */
+    debug("CLOSE handle=%u smb_err=%d cnode=%p obj_type=%d cur_cache_len=%u ts_change=%d\n", (unsigned)regs->r[1], (int)err, (void *)cnode,
+          cnode != NULL ? (int)cnode->obj_type : -1, cnode != NULL ? (unsigned)cnode->length : 0u, timestamp_change ? 1 : 0);
+    if (cnode != NULL && err == OK && timestamp_change && cnode->obj_type == LMCACHE_OBJECT_FILE) {
+      cnode->expires_at = 0u;
+      Cache_BumpSuppressNode(cnode);
+    }
+
+    /*
+     * Attach the read capture to the cnode only if the whole file was read, since a capture with a hole would serve wrong bytes;
+     * otherwise give its block back.
+     */
+    if (Cache_StreamBlock((uint8_t)(fid + 1)) != NULL) {
+      bool can_attach = (cnode != NULL && err == OK && cnode->obj_type == LMCACHE_OBJECT_FILE &&
+                         FileTbl[fid].stream_pos == FileTbl[fid].stream_capacity);
+
+      if (can_attach && Cache_StreamAttach((uint8_t)(fid + 1), (uint64_t)FileTbl[fid].stream_pos)) {
+        FileTbl[fid].stream_pos = 0u;
+        FileTbl[fid].stream_capacity = 0u;
+      } else if (can_attach) {
+        streaming_abandon(fid, "attach_refused");
+      } else if (cnode == NULL) {
+        streaming_abandon(fid, "unbound");
+      } else if (err != OK) {
+        streaming_abandon(fid, "close_failed");
+      } else if (FileTbl[fid].stream_pos != FileTbl[fid].stream_capacity) {
+        streaming_abandon(fid, "short_read");
+      } else {
+        streaming_abandon(fid, "not_file");
+      }
+    }
+  }
+
+  /* Drop the cache-side handle binding and free the FileTbl slot. */
+  Cache_HandleClear((uint8_t)regs->r[1]);
+
+  FileTbl[fid].Free = true;
+  ret = MsgError(err);
+
+exit:
+  FSExit();
+  CF_TRK_EXITPTR("Close", ret);
+  return ret;
+}
+
+/* Args ========================================== */
+
+/* Extend a file with `len` zero bytes starting at `offset` using the server-side zero fill of SMB write-bytes.
+ *
+ * SMB_Write (write bytes command, v1-spec-02 section 5.22) requires the server to zero any bytes between the
+ * previous EOF and the new one, so we only write a single byte per chunk and let the server fill the rest.  Very
+ * large extends are chopped up to avoid a reply-timeout (assuming the server can write at least 1 MiB/s); a single
+ * SMB_Truncate would pend all zero-filling until close, which is the failure mode this routine exists to avoid.
+ *
+ * Parameters:
+ *   FH      SMB file handle
+ *   offset  starting offset of the zero region
+ *   len     number of zero bytes to write
+ *
+ * Returns: OK on success, or the first error from cf_write_all.
+ */
+static err_t WriteZeros(int FH, uint offset, uint len) {
+  err_t res = OK;
+
+  /* The single byte written each iteration is a zero from this scratch buffer; reuse the
+   * DOS-name scratch because at this point it's not holding anything live.
+   */
+  memset(DOSnamebuf, 0, NAMEBUF_LEN);
+
+  /* Chunk size is sized so the server-fill of `tmp` bytes completes within the SMB1 reply timeout
+   * at an assumed 1 MB/s lower bound; SMB2's wait for each exchange is longer, so the chunk suits both.
+   * For smaller writes the final chunk is the remainder.
+   */
+  while (len > 0) {
+    uint tmp = min(1024 * 1024 * (REPLY_TIMEOUT / 100), len);
+    /* Write one zero byte at the end of this chunk (offset + tmp - 1).  Writing past the current EOF makes the
+     * server zero-fill everything up to that byte, so each chunk extends the file by tmp and the last chunk's
+     * byte lands at the true new end (the original offset + len - 1), covering the whole region.
+     */
+    res = cf_write_all(FH, offset + tmp - 1, 1, (uint8_t *)DOSnamebuf);
+    if (res != OK) {
+      break;
+    }
+    offset += tmp;
+    len -= tmp;
+  }
+  return res;
+}
+
+/* --------------------- */
+
+/*
+ * Dispatch an FSEntry_Args call by its reason code.
+ *
+ * Reasons FileSwitch can answer itself (reading or writing the sequential pointer, reading the extent, the end-of-file check) are handed
+ * back with ENOUNBUFF.  Setting the
+ * extent and writing zeros abandon the handle's capture and update the bound cnode as a write does (see fsentry_putbytes_handler); the
+ * allocated size is answered from the cnode when the cache holds it.
+ *
+ * Parameters:
+ *   regs  FileSwitch register block (r0 = reason, r1 = handle; the PRM gives each reason's other arguments)
+ *   pw    private word from the cmhg veneer (unused)
+ *
+ * Returns: NULL on success, or an error block on failure.
+ */
+_kernel_oserror *fsentry_args_handler(_kernel_swi_regs *regs, void *pw) {
+  _kernel_oserror *ret = NULL;
+  err_t err = OK;
+  int fid = regs->r[1] - 1;
+  uint tmp;
+
+  CF_TRK_ENTER2("Args", regs->r[0], regs->r[1]);
+  CF_TRK_FH("Args", regs->r[1]);
+
+  FSEnter();
+  UNUSED(pw);
+
+  if (fid < 0 || fid >= MAXFILES || FileTbl[fid].Free) {
+    ret = MsgError(EBADPARAM);
+    goto exit;
+  }
+
+  /* A new extent or written zeros change the file's length and date under any listing a pass is reading. */
+  if (regs->r[0] == FSEntry_Args_Reason_WriteFileExtent || regs->r[0] == FSEntry_Args_Reason_EnsureFileSize ||
+      regs->r[0] == FSEntry_Args_Reason_WriteZerosToFile) {
+    CoreFn_ForgetSnapshots();
+  }
+
+  switch (regs->r[0]) {
+  case FSEntry_Args_Reason_ReadSequentialFilePointer:
+  case FSEntry_Args_Reason_WriteSequentialFilePointer:
+  case FSEntry_Args_Reason_ReadFileExtent:
+  case FSEntry_Args_Reason_EOFCheck:
+    /* Answered by FileSwitch locally; no server round-trip. */
+    err = ENOUNBUFF;
+    break;
+
+  case FSEntry_Args_Reason_WriteFileExtent:
+    err = SMB_Truncate(FileTbl[fid].SMB_FH, regs->r[2]);
+    if (err == OK) {
+      LMCacheNode_t *cnode;
+
+      /* A new extent leaves a capture under way short of the file, or holding bytes past its end. */
+      streaming_abandon(fid, "extent_set");
+
+      /* Cache mirror: stamp the new length onto the bound cnode, drop its content, and open its echo window for the coming notification. */
+      cnode = Cache_HandleLookup((uint8_t)regs->r[1]);
+      if (cnode != NULL && cnode->obj_type == LMCACHE_OBJECT_FILE) {
+        LMCache_t *cache = cnode->mount;
+        Cache_NotifyMutateNode(cache, cnode, cnode->load_addr, cnode->exec_addr, (uint64_t)(uint32_t)regs->r[2], cnode->attrs, true);
+        cnode->expires_at = 0u; // the server dates the write by its own clock, so the next lookup fetches the datestamp
+        Cache_BumpSuppressNode(cnode);
+      }
+    } else {
+      cf_forget_failed_write(regs->r[1]);
+    }
+    break;
+
+    /* We ignore this call - WriteFileExtent is used to truncate */
+
+  case FSEntry_Args_Reason_EnsureFileSize:
+    err = OK;
+    break;
+
+  case FSEntry_Args_Reason_ReadSizeAllocatedToFile: {
+    LMCacheNode_t *cnode = Cache_HandleLookup((uint8_t)regs->r[1]);
+
+    /* Cache hit: serve the length from RAM. */
+    if (cnode != NULL && cnode->obj_type == LMCACHE_OBJECT_FILE && cnode->length <= 0xFFFFFFFFu) {
+      regs->r[2] = (int)cnode->length;
+      err = OK;
+      break;
+    }
+
+    /* Cache miss: wire round-trip. */
+    err = SMB_GetLength(FileTbl[fid].SMB_FH, &tmp);
+    if (err == OK) {
+      regs->r[2] = tmp;
+    }
+    break;
+  }
+
+  case FSEntry_Args_Reason_FlushFileBuffer:
+    err = SMB_Flush(FileTbl[fid].SMB_FH);
+    break;
+
+  case FSEntry_Args_Reason_WriteZerosToFile:
+    err = WriteZeros(FileTbl[fid].SMB_FH, (uint)regs->r[2], // Offset
+                     (uint)regs->r[3] /* Length */);
+    if (err == OK) {
+      LMCacheNode_t *cnode;
+
+      /* Zeros written anywhere leave a capture under way holding the wrong bytes. */
+      streaming_abandon(fid, "zeros_written");
+
+      /* Cache mirror: extend the bound cnode if the zero-fill grew the file (never shrinks), and drop its content. */
+      cnode = Cache_HandleLookup((uint8_t)regs->r[1]);
+      if (cnode != NULL && cnode->obj_type == LMCACHE_OBJECT_FILE) {
+        LMCache_t *cache = cnode->mount;
+        uint64_t new_length = (uint64_t)(uint32_t)regs->r[2] + (uint64_t)(uint32_t)regs->r[3];
+        if (new_length < cnode->length) {
+          new_length = cnode->length;
+        }
+        Cache_NotifyMutateNode(cache, cnode, cnode->load_addr, cnode->exec_addr, new_length, cnode->attrs, true);
+        cnode->expires_at = 0u; // the server dates the write by its own clock, so the next lookup fetches the datestamp
+        Cache_BumpSuppressNode(cnode);
+      }
+    } else {
+      cf_forget_failed_write(regs->r[1]);
+    }
+    break;
+
+  case FSEntry_Args_Reason_ReadFileDateStamp: {
+    /* This call will be unable to correctly get the file type */
+    /* If this is needed, it must be done when the file is opened */
+    hSHARE hS = SMB_GetShareFileHandle(FileTbl[fid].SMB_FH);
+    RISCOS_ATTRIBS ra;
+    Xlt_CnvDOStoRO(&FileTbl[fid].da, &ra, CNV_DATETIME, hS);
+
+    regs->r[2] = ra.loadaddr;
+    regs->r[3] = ra.execaddr;
+  }
+    err = OK;
+    break;
+
+  default:
+    err = EBADPARAM;
+    break;
+  }
+
+  ret = MsgError(err);
+
+exit:
+  FSExit();
+  CF_TRK_EXITPTR("Args", ret);
+  return ret;
+}
+
+/* Init --------------------------------- */
+
+bool FS_Init(void) {
+  int i;
+
+  for (i = 0; i < MAXFILES; i++) {
+    FileTbl[i].Free = true;
+  }
+  NextHandle = 0;
+
+  return true;
+}

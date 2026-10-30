@@ -1,0 +1,711 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Attr.c - RISC OS file-type subsystem.
+ *
+ * On 8.3 shares the wire format has no place for RISC OS load/exec/type metadata, so we keep a
+ * per-directory side-file called "RISCOS.EA" containing one record per leaf.  Reads and writes
+ * here cache and update that file.
+ *
+ * On long-name shares the filetype is folded into the leaf's ",ttt" suffix and
+ * Xlt_SplitLeafnameX2 handles encode/decode directly - the .EA mechanism is bypassed entirely.
+ * Every external in this file therefore branches on SMB_IsLongNameFS() at the top, so on
+ * long-name shares most of these functions are effectively no-ops.
+ */
+
+/* System includes */
+
+#include <stdio.h>
+#include <ctype.h>
+#include <string.h>
+#include "kernel.h"
+#include "swis.h"
+#include "Global/FileTypes.h"
+
+/* Our includes */
+
+#include "stdtypes.h"
+
+#include "Attr.h"
+#include "SMB.h"
+#include "Xlate.h"
+#include "Omni.h"
+#include "LanMan.h"
+#include "LMVars.h"
+
+/* "Default" filetype logic ------------------------------------- */
+
+/* Fallback type-from-extension table for 8.3 shares when neither OmniFiler nor MimeMap recognise
+ * the leaf.  Tiny by design - if neither of the previous two helpers can resolve a common
+ * extension, this is the last-resort guess.
+ */
+
+struct ext_type {
+  char *ext;
+  int type;
+};
+
+static const struct ext_type FTypes[] = {
+    {"TXT", 0xFFF}, // Text
+    {"C",   0xFFF},
+    {"H",   0xFFF},
+    {"ASM", 0xFFF},
+    {"JPG", 0xC85}, // JPEG
+    {"PS",  0xFF5}, // Postscript
+    {NULL,  0    }
+};
+
+/* ---------------- */
+
+/* Set the filetype field of `ra->loadaddr` from a leaf's extension or the configured default.
+ *
+ * Tries three sources in order of preference: OmniFiler's ConvertClientToAcorn SWI (handles
+ * complex DOS->RO type mappings), MimeMap_Translate on the bare extension, then the small static
+ * FTypes table as a last resort.  Falls back to LM_Vars.default_type when nothing matches.
+ *
+ * Parameters:
+ *   leafname  DOS-form leaf, or NULL/empty for the bare default
+ *   ra        RISC OS attribute block; only the filetype field of loadaddr is updated
+ */
+static void GetDefaultType(char *leafname, RISCOS_ATTRIBS *ra) {
+  const struct ext_type *pET;
+  int ftype;
+  uint32_t mm_type = 0;
+  char *ext;
+
+  if (leafname == NULL || leafname[0] == '\0') {
+    ra->loadaddr = (ra->loadaddr & 0xFFF000FF) | (LM_Vars.default_type << 8);
+    return;
+  }
+
+  /* See if OmniFiler can help us */
+
+  if (Omni_GetDefaultType(leafname, &ftype) == OK) {
+    vdebug("Omni gave default type %X for \"%s\"\n", ftype, leafname);
+    ra->loadaddr = (ra->loadaddr & 0xFFF000FF) | ((ftype << 8) & 0x000FFF00);
+    return;
+  }
+
+  ext = strchr(leafname, '.');
+  if (ext == NULL) { // No extension
+    vdebug("Assuming filetype %03x due to no suffix\n", LM_Vars.default_type);
+    ra->loadaddr = (ra->loadaddr & 0xFFF000FF) | (LM_Vars.default_type << 8);
+    return;
+  }
+
+  ext++; // Skip '.'
+
+  /* Have a look in the mimemap */
+  if (Xlt_TypeForExtension(ext, &mm_type)) {
+    ra->loadaddr = (ra->loadaddr & 0xFFF000FF) | (mm_type << 8);
+    vdebug("Mimemap gave type %X for \"%s\"\n", (int)mm_type, ext);
+    return;
+  }
+
+  /* Look through the feable small table */
+  for (pET = FTypes; pET->ext != NULL; pET++) {
+    if (strcmp(pET->ext, ext) == 0) {
+      ra->loadaddr = (ra->loadaddr & 0xFFF000FF) | (pET->type << 8);
+      return;
+    }
+  }
+}
+
+/* Attribute-file logic --------------------------- */
+
+/* We keep RISCOS attributes in a file "RISCOS.EA" in each directory.
+ *
+ * This consists of one or more 'ATTR_REC' structures as defined below.
+ */
+
+#define ATTR_FILENAME "RISCOS.EA"
+
+typedef struct {
+  char name[16];
+  RISCOS_ATTRIBS attr;
+} ATTR_REC;
+
+#define ATTR_REC_SIZE sizeof(ATTR_REC)
+
+#define SEARCH_FAILED (-2) // SearchFileForEntry could not read the attributes file
+
+/* We also keep a cache of the attributes file, to avoid continual network traffic when reading a whole directory. */
+
+#define CACHE_SIZE 128
+
+/* Sized so that a typical RISC OS directory's worth (77 files) fits in the cache, and so that the cache is a whole
+ * number of disk sectors (128 entries x sizeof(ATTR_REC)).
+ */
+
+static char AttrFileName[DOS_NAME_LEN];
+/* Name of file for which AttrCache holds entries */
+static ATTR_REC AttrCache[CACHE_SIZE];
+static int AttrCacheLen;   /* Number of valid entries in cache */
+static int AttrCacheStart; /* Offset (in records) of first
+                                   record in cache */
+
+static bool AttrAllInCache; /* This is set if the entire attrib file
+                                is held in the cache, or if there is no
+                                attrib. file. This cuts out a lot of
+                                network activity when it is set. */
+
+#define LEAFNAME_SIZE 16
+static char AttrLeafName[LEAFNAME_SIZE];
+
+/* ---------------------- */
+
+/* Point AttrFileName at the RISCOS.EA file alongside `name`, invalidating the cache if it moves.
+ *
+ * The cache is keyed by the .EA file's path; a path change means the cached records belong to a
+ * different directory and must be flushed.  AttrLeafName captures the requested leaf (uppercased
+ * for the case-insensitive match against on-disk records, which are also stored uppercased).
+ *
+ * Parameters:
+ *   name  full DOS path; the leaf portion identifies the file whose attributes we want
+ *
+ * Returns: OK on success, EBADNAME if `name` has no '\\' separator.
+ */
+static err_t SetFileName(char *name) {
+  char *tmp;
+  int path_len; // Length of file's pathname
+
+  tmp = strrchr(name, '\\'); // Get pathname
+  if (tmp == NULL) {         // Shouldn't actually happen!
+    return EBADNAME;
+  }
+
+  /* Uppercase the leaf for case-insensitive matches against on-disk records. */
+  strcpyn_upper(AttrLeafName, tmp + 1, LEAFNAME_SIZE);
+  path_len = (tmp - name) + 1; // Length including last '\'
+
+  /* Refuse a directory path so long that composing <dir>RISCOS.EA would overrun AttrFileName - this also
+   * bounds the strncmp cache probe below, which reads path_len bytes of AttrFileName. */
+  if ((size_t)path_len + strlen(ATTR_FILENAME) + 1u > sizeof(AttrFileName)) {
+    return EBADNAME;
+  }
+
+  /* Same directory's .EA file as last time?  Cache contents remain valid. */
+  if (strncmp(AttrFileName, name, path_len) == 0 && strcmp(AttrFileName + path_len, ATTR_FILENAME) == 0) {
+    return OK; // Still in cache!
+  }
+
+  AttrCacheLen = 0; // Invalidate cache
+  AttrAllInCache = false;
+
+  /* New directory: compose <dir>\RISCOS.EA and remember it for the next call. */
+  strncpy(AttrFileName, name, path_len);
+  strcpy(AttrFileName + path_len, ATTR_FILENAME);
+  return OK;
+}
+
+/* ----------------------------------------- */
+
+/* Scan the in-memory AttrCache linearly for a matching leafname.
+ *
+ * The first-char fast-out keeps the common no-match cheap; the strcmp is only paid when the
+ * leading byte matches.
+ *
+ * Parameters:
+ *   name  uppercase leafname to search for
+ *
+ * Returns: cache slot index in [0, AttrCacheLen), or -1 if not found.
+ */
+static int GetEntryPos(char *name) {
+  int i;
+  char ch = name[0]; // Used as speedup
+
+  for (i = 0; i < AttrCacheLen; i++) {
+    if (ch == AttrCache[i].name[0] && strcmp(name, AttrCache[i].name) == 0) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+/* Terminate the name of each of the first `count` records read into AttrCache.
+ *
+ * The records come straight from the RISCOS.EA file on the server, and a corrupt or hostile file need not hold a NUL in each
+ * name field, yet the names are compared and formatted as strings.  A name this module writes is at most LEAFNAME_SIZE - 1
+ * characters, so the byte overwritten is already its terminator or padding.
+ */
+static void TerminateRecordNames(int count) {
+  int i;
+
+  for (i = 0; i < count; i++) {
+    AttrCache[i].name[sizeof(AttrCache[i].name) - 1u] = '\0';
+  }
+}
+
+/* ----------------------------- */
+
+/* Page the RISCOS.EA file through the cache, scanning each window for a matching leafname.
+ *
+ * Each iteration reads up to CACHE_SIZE records into AttrCache and checks them via GetEntryPos.
+ * If a short read comes back from the first chunk, the whole file fits and AttrAllInCache is set
+ * so subsequent lookups can skip the wire entirely.
+ *
+ * Parameters:
+ *   FH    SMB file handle for the open RISCOS.EA file
+ *   name  uppercase leafname to search for
+ *
+ * Returns: in-cache slot index of the match, -1 if the leafname wasn't found, or SEARCH_FAILED if the file could not be read.
+ */
+static int SearchFileForEntry(int FH, char *name) {
+  uint len;
+  int pos;
+  AttrCacheStart = 0;
+  AttrAllInCache = false;
+
+  while (1) {
+    /* Read one cache-window's worth of records starting at the current file offset.  A failed read must not pass for the end
+     * of the file, or the records not read would count as absent.
+     */
+    len = 0;
+    if (SMB_Read(FH, AttrCacheStart * ATTR_REC_SIZE, CACHE_SIZE * ATTR_REC_SIZE, (uint8_t *)AttrCache, &len) != OK) {
+      AttrCacheLen = 0;
+      return SEARCH_FAILED;
+    }
+
+    AttrCacheLen = len / ATTR_REC_SIZE;
+    TerminateRecordNames(AttrCacheLen);
+
+    /* First window was short: whole file fits, so we can skip the file on subsequent lookups. */
+    if (AttrCacheStart == 0 && AttrCacheLen < CACHE_SIZE) {
+      AttrAllInCache = true;
+    }
+
+    /* Found it in this window - return the in-cache slot index for the caller to dereference. */
+    pos = GetEntryPos(name);
+    if (pos >= 0) {
+      return pos;
+    }
+
+    if (AttrCacheLen < CACHE_SIZE) { // No more file
+      return -1;
+    }
+
+    AttrCacheStart += AttrCacheLen;
+  }
+}
+
+/* --------------------------- */
+
+/* Test whether every record in the cache window has its name field zeroed.
+ *
+ * Used by Attr_DeleteInfo to decide whether a tombstoned record leaves the whole cache window
+ * empty - if so, the window can be compacted out of the file rather than left as dead weight.
+ *
+ * Returns: true if all AttrCacheLen records have an empty name; false otherwise.
+ */
+static bool CacheEmpty(void) {
+  int i;
+  for (i = 0; i < AttrCacheLen; i++) {
+    if (AttrCache[i].name[0] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/* --------------------------- */
+
+/* Slide bytes in an open file leftwards (compact), then truncate to the new length.
+ *
+ * Used by Attr_DeleteInfo to compact a tombstoned cache window out of the .EA file when every
+ * record in the window has become empty.  Reads each chunk into AttrCache and writes it back at
+ * the lower offset; once the source runs dry, truncates the file to `to`.  ONLY VALID when
+ * from > to - a no-op otherwise.
+ *
+ * Side-effect: AttrCacheLen is overwritten and AttrAllInCache is cleared, since the cache no
+ * longer reflects any particular file window.
+ *
+ * Parameters:
+ *   FH    SMB file handle for the open .EA file
+ *   from  source offset (must be > to)
+ *   to    destination offset
+ */
+static void FileDataMove(int FH, uint from, uint to) {
+  uint req_len, len;
+
+  /* Guard against caller using us as a no-op or a right-shift (which would corrupt the file). */
+  if (from <= to) {
+    return;
+  }
+  req_len = from - to;
+
+  /* Slide chunks down using AttrCache as scratch; loop exits on the first short read (EOF). */
+  do {
+    len = 0;
+
+    /* A failed read leaves the rest of the file where it is, rather than truncating it away. */
+    if (SMB_Read(FH, from, req_len, (uint8_t *)AttrCache, &len) != OK) {
+      AttrCacheLen = 0;
+      AttrAllInCache = false;
+      return;
+    }
+    if (len != 0) {
+      SMB_Write(FH, to, len, (uint8_t *)AttrCache, NULL);
+    }
+
+    from += len;
+    to += len;
+  } while (len == req_len);
+
+  /* New EOF is the write head; AttrCache no longer matches any particular file window. */
+  SMB_Truncate(FH, to);
+  AttrCacheLen = len / ATTR_REC_SIZE;
+  TerminateRecordNames(AttrCacheLen);
+  AttrAllInCache = false; // Can't be sure, so assume not!
+}
+
+/* ------------------------------------------------------ */
+
+/* Selectively overlay saved attributes onto a DOS-derived attribute block.
+ *
+ * The .EA file can store either a full load/exec pair (for files with absolute load addresses, no
+ * datestamp) or only a filetype embedded in the load address (for normally-typed files).  The
+ * top-nibble check distinguishes: 0xFFF means "this is a date/type stamp" so only the filetype
+ * field is overlaid (preserving the DOS-derived date); otherwise the saved load/exec wholesale
+ * replaces the destination.
+ *
+ * Parameters:
+ *   src  saved attributes from the .EA file
+ *   dst  destination block already populated with DOS-derived date+attr; mutated in place
+ */
+static void InsertAttribs(RISCOS_ATTRIBS *src, RISCOS_ATTRIBS *dst) {
+  if ((src->loadaddr & 0xFFF00000) != 0xFFF00000) {
+    /* If it's a load/exec address rather than time/date stamp */
+    dst->loadaddr = src->loadaddr;
+    dst->execaddr = src->execaddr;
+  } else {
+    /* Preserve time & date stamp given by DOS */
+    dst->loadaddr = (dst->loadaddr & 0xFFF000FF) | (src->loadaddr & 0x000FFF00);
+  }
+}
+
+/* Attr_InvalidateDrive() --------------------------------- */
+
+void Attr_InvalidateDrive(char drvletter) {
+  UNUSED(drvletter);
+  AttrCacheLen = 0;
+  AttrAllInCache = false;
+  AttrFileName[0] = 0;
+}
+
+/* Attr_GetInfo() ----------------------------------------- */
+
+/* Long-name share fast path for Attr_GetInfo.
+ *
+ * On long-name shares the filetype lives in the leaf's ",ttt" suffix - hand the leaf
+ * to Xlt_SplitLeafnameX2 and we're done.  A failure to split means "no explicit type
+ * suffix" and the caller's load address already carries whatever Xlt_CnvDOStoRO derived from the
+ * date, which is the right answer.
+ *
+ * Parameters:
+ *   filename  full DOS path (used when leafname is NULL)
+ *   leafname  bare leaf, or NULL to derive it from filename
+ *   pRA       RISCOS_ATTRIBS to update with the decoded filetype
+ *
+ * Returns: OK always.
+ */
+static err_t Attr_GetInfoX2(char *filename, char *leafname, RISCOS_ATTRIBS *pRA) {
+  char *lastcomma;
+  (void)Xlt_SplitLeafnameX2((leafname != NULL) ? leafname : filename, pRA, &lastcomma);
+  return OK;
+}
+
+err_t Attr_GetInfo(char *filename, char *leafname, RISCOS_ATTRIBS *pRA) {
+  int Attr_FH; // File handle for attrib file
+  int pos;
+  DOS_ATTRIBS da;
+
+  /* Long-name shares carry the type in the leaf suffix; no .EA side file involved. */
+  if (SMB_IsLongNameFS(filename)) {
+    return Attr_GetInfoX2(filename, leafname, pRA);
+  }
+
+  /* Set up the cache key from the path; if the caller pre-extracted the leaf, prefer that
+   * (avoids re-parsing the trailing component).
+   */
+  if (SetFileName(filename) != OK) {
+    return EBADNAME;
+  }
+
+  if (leafname != NULL) {
+    strcpyn_upper(AttrLeafName, leafname, LEAFNAME_SIZE);
+  }
+
+  /* Hit in the in-memory window: jump straight to the overlay step. */
+  pos = GetEntryPos(AttrLeafName);
+  if (pos >= 0) {
+    goto got_pos;
+  }
+
+  /* Whole file already mapped and the leaf wasn't there - no point reopening. */
+  if (AttrAllInCache) {
+    goto get_failed;
+  }
+
+  /* Cache miss with the file not fully mapped: page through .EA looking for the leaf. */
+  if (SMB_Open(MODE_RD, AttrFileName, &da, &Attr_FH, NULL) == OK) {
+    pos = SearchFileForEntry(Attr_FH, AttrLeafName);
+    SMB_Close(Attr_FH, &da);
+
+    if (pos >= 0) {
+      goto got_pos;
+    }
+  } else {
+    /* No .EA file at all - record "nothing to find" so the next call doesn't reopen. */
+    AttrCacheLen = 0;
+    AttrAllInCache = true;
+  }
+
+get_failed:
+  GetDefaultType(AttrLeafName, pRA);
+  return EATTRIBREAD;
+
+got_pos:
+  InsertAttribs(&AttrCache[pos].attr, pRA);
+
+  return OK;
+}
+
+/* ------------------------------------------ */
+
+err_t Attr_DeleteInfo(char *pathname) {
+  int Attr_FH; // File handle for attrib file
+  int pos;
+  DOS_ATTRIBS da;
+
+  if (SMB_IsLongNameFS(pathname)) {
+    return OK;
+  }
+
+  if (SetFileName(pathname) != OK) {
+    return EBADNAME;
+  }
+
+  AttrAllInCache = false;
+
+  /* Try to read/write the file */
+
+  if (SMB_Open(MODE_RDWR, AttrFileName, &da, &Attr_FH, NULL) != OK) {
+    return EATTRIBWRITE;
+  }
+
+  /* Find position of entry */
+
+  pos = SearchFileForEntry(Attr_FH, AttrLeafName);
+
+  if (pos < 0) { // Can't find it: don't worry!
+    goto close_file;
+  }
+
+  /* Found entry: zero it out */
+
+  AttrCache[pos].name[0] = 0;
+
+  if (!CacheEmpty()) { // Update only this one
+    SMB_Write(Attr_FH, (AttrCacheStart + pos) * ATTR_REC_SIZE, ATTR_REC_SIZE, (uint8_t *)&AttrCache[pos], NULL);
+  } else {
+    FileDataMove(Attr_FH, (AttrCacheStart + AttrCacheLen) * ATTR_REC_SIZE, AttrCacheStart * ATTR_REC_SIZE);
+  }
+
+close_file:
+  SMB_Close(Attr_FH, &da);
+  return OK;
+}
+
+/* ---------------------- */
+
+extern err_t Attr_SetInfo(char *pathname, RISCOS_ATTRIBS *pRA) {
+  err_t err;
+  int Attr_FH; // File handle for attrib file
+  int pos;
+  DOS_ATTRIBS da;
+
+  debug("SetInfo for \"%s\"\n", pathname);
+
+  /* Wonderfully enough, we don't actually need an implementation of this at all! */
+  if (SMB_IsLongNameFS(pathname)) {
+    return OK;
+  }
+
+  if (SetFileName(pathname) != OK) {
+    return EBADNAME;
+  }
+
+  AttrAllInCache = false;
+
+  /* Try to read/write the file */
+
+  err = SMB_Open(MODE_RDWR, AttrFileName, &da, &Attr_FH, NULL);
+
+  if (err == OK) // File exists
+  {
+    /* Look for existing entry - if there is one, amend it */
+    pos = SearchFileForEntry(Attr_FH, AttrLeafName);
+    if (pos == SEARCH_FAILED) {
+      goto read_failed;
+    }
+    if (pos >= 0) {
+      debug("Found existing entry");
+      goto write_new;
+    }
+
+    /* Look for free entry - if there is one, use it */
+    pos = GetEntryPos("");
+    if (pos >= 0) {
+      debug("Found in-cache free entry");
+      goto write_new;
+    }
+
+    pos = SearchFileForEntry(Attr_FH, "");
+    if (pos == SEARCH_FAILED) {
+      goto read_failed;
+    }
+    if (pos >= 0) {
+      debug("Found file free entry");
+      goto write_new;
+    }
+
+    /* Else, add new entry */
+
+    if (AttrCacheLen == CACHE_SIZE) {
+      debug("Adding new block to file");
+      pos = 0;
+      AttrCacheStart += AttrCacheLen;
+      AttrCacheLen = 1;
+    } else {
+      debug("Extending file");
+      pos = AttrCacheLen;
+      AttrCacheLen++;
+    }
+    goto write_new;
+  } else if (err == EFILENOTFOUND) { // If attrib file doesn't exist, create one
+    da.utime = 0;
+    da.attr = ATTR_HID | ATTR_NORM | ATTR_ARC;
+    da.length = 0;
+    err = SMB_Create(AttrFileName, &da, &Attr_FH);
+    debug("Create attr file, res %d\n", err);
+    if (err == OK) {
+      AttrCacheStart = 0; // Write new info at beginning of file
+      AttrCacheLen = 1;
+      pos = 0;
+      goto write_new;
+    }
+  } else {
+    debug("Open \"%s\" gave error %d\n", AttrFileName, err);
+  }
+
+  /* All attempts have failed! */
+  return EATTRIBWRITE;
+
+read_failed:
+  /* Without the records, a new entry could land on one in use. */
+  SMB_Close(Attr_FH, &da);
+  return EATTRIBWRITE;
+
+write_new:
+  debug(" - new entry at base %d pos %d", AttrCacheStart, pos);
+  AttrAllInCache = false;
+  strcpy(AttrCache[pos].name, AttrLeafName);
+  AttrCache[pos].attr = *pRA;
+
+  SMB_Write(Attr_FH, (AttrCacheStart + pos) * ATTR_REC_SIZE, ATTR_REC_SIZE, (uint8_t *)&AttrCache[pos], NULL);
+
+  SMB_Close(Attr_FH, &da);
+  return OK;
+}
+
+/* ---------------------------------- */
+
+/* Set AttrFileName to dirname\leaf.
+ *
+ * Parameters:
+ *   dirname  DOS directory path
+ *   leaf     leaf name to append
+ *
+ * Returns: true if the whole path fitted; false if it was cut short, when AttrFileName must not be used.
+ */
+static bool MakeAttrFileName(const char *dirname, const char *leaf) {
+  int n = snprintf(AttrFileName, sizeof(AttrFileName), "%s\\%s", dirname, leaf);
+
+  return n >= 0 && (size_t)n < sizeof(AttrFileName);
+}
+
+void Attr_CheckEmptyDir(char *dirname) {
+  int i, FH;
+  uint pos, len;
+  DOS_ATTRIBS da, da2;
+
+  AttrAllInCache = false;
+  AttrCacheLen = 0;
+
+  /* Shouldn't be any RISCOS.EA file present - user must delete it if there is one - we're not hiding it away on long filename
+   * shares
+   */
+  if (SMB_IsLongNameFS(dirname)) {
+    return;
+  }
+
+  /* Open Attr file */
+
+  if (!MakeAttrFileName(dirname, ATTR_FILENAME) || SMB_Open(MODE_RD, AttrFileName, &da, &FH, NULL) != OK) {
+    AttrFileName[0] = 0;
+    return;
+  }
+
+  pos = 0;
+
+  do {
+    len = 0;
+    if (SMB_Read(FH, pos * ATTR_REC_SIZE, CACHE_SIZE * ATTR_REC_SIZE, (uint8_t *)AttrCache, &len) != OK) {
+      SMB_Close(FH, &da); // Records not read cannot be shown unused, so keep the file
+      AttrFileName[0] = 0;
+      return;
+    }
+
+    len /= ATTR_REC_SIZE;
+    TerminateRecordNames((int)len);
+
+    /* Try to find a file which exists, counting one that cannot be checked (including a path too long to name) as
+     * existing.
+     */
+    for (i = 0; i < len; i++) {
+      if (AttrCache[i].name[0] != 0) {
+        if (!MakeAttrFileName(dirname, AttrCache[i].name) || SMB_GetAttribs(AttrFileName, &da2) != EFILENOTFOUND) {
+          SMB_Close(FH, &da);
+          AttrFileName[0] = 0;
+          return;
+        }
+      }
+    }
+
+    pos += len;
+  } while (len == CACHE_SIZE);
+
+  /* If it doesn't, delete the attrib file */
+
+  SMB_Close(FH, &da);
+  (void)MakeAttrFileName(dirname, ATTR_FILENAME); // Fitted when the file was opened above
+  debug("Deleting \"%s\"\n", AttrFileName);
+
+  da.utime = 0;
+  da.attr = 0; // Reset hidden attribute
+  SMB_SetAttribs(AttrFileName, &da);
+  SMB_Delete(AttrFileName, false);
+  AttrFileName[0] = 0;
+}

@@ -1,0 +1,745 @@
+/*
+ * Copyright (c) 2024, RISC OS Open Ltd
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdnoreturn.h>
+#include <stdbool.h>
+#include <assert.h>
+#include "swis.h"
+#include "Global/Variables.h"
+#include "Global/FileTypes.h"
+#include "Interface/HighFSI.h"
+#include "AsmUtils/osvarlen.h"
+
+#include "mbedtls/platform.h"
+#include "mbedtls/error.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/rsa.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/base64.h"
+
+#include "sys/param.h"
+#include "sysexits.h"
+#include "unixlib.h"
+
+#define M_PRIVATE_FORMAT_ONLY   1 /* Switch -m only the private half */
+
+const char *__progname = "ssh-keygen";
+
+typedef enum
+{
+	KTYPE_DSA,
+	KTYPE_ECDSA,
+	KTYPE_ECDSA_SK,
+	KTYPE_ED25519,
+	KTYPE_ED25519_SK,
+	KTYPE_RSA,
+#define RSA_MIN_BITS    0x400
+#define RSA_DEF_BITS    0xC00
+#define RSA_MAX_BITS    0x4000
+	/* Number of key types */
+	KTYPE_MAX
+} ktype_t;
+typedef struct
+{
+	const char *name;
+	int   minbits, maxbits, defbits;
+} ktypeinfo_t;
+static const ktypeinfo_t ktypes[KTYPE_MAX] =
+{
+	{ "dsa",        0, 0, -1 },
+	{ "ecdsa",      0, 0, -1 },
+	{ "ecdsa-sk",   0, 0, -1 },
+	{ "ed25519",    0, 0, -1 },
+	{ "ed25519-sk", 0, 0, -1 },
+	{ "rsa",        1024, MBEDTLS_MPI_MAX_BITS, 2048 }
+};
+
+typedef enum
+{
+	KFORMAT_OPENSSH,
+	KFORMAT_PKCS8,
+	KFORMAT_PEM,
+	/* Number of private key formats */
+	KFORMAT_MAX
+} kformat_t;
+typedef struct
+{
+	const char *name;
+	bool  implemented;
+} kformatinfo_t;
+static const kformatinfo_t kformats[KFORMAT_MAX] =
+{
+	{ "openssh", true },
+	{ "pkcs8",   false },
+	{ "pem",     true }
+};
+
+static bool quiet = false;
+static int verbose;
+static int bits = -1;
+static ktype_t type = KTYPE_RSA;
+static kformat_t format = KFORMAT_OPENSSH;
+static char *outfile;
+
+/*
+ * OpenSSH supporting functions
+ */
+static size_t openssh_be_value(char *buf, size_t val)
+{
+	/* Write an unaligned length word out big endian */
+	buf[0] = val >> 24;
+	buf[1] = val >> 16;
+	buf[2] = val >> 8;
+	buf[3] = val >> 0;
+
+	return 4;
+}
+
+static size_t openssh_encode(char *buf, size_t len, const char *raw)
+{
+	size_t signedlen = len, skip = 4;
+
+	/* Write a polynomial out with a length descriptor */
+	if (*raw & 0x80)
+	{
+		/* Encode negative */
+		signedlen++;
+		buf[skip] = 0;
+		skip++;
+	}
+	openssh_be_value(buf, signedlen);
+	memcpy(&buf[skip], raw, len);
+	return 4 + signedlen;
+}
+
+static int write_openssh_public_key(mbedtls_pk_context *key, const char *output_file, const char *comment)
+{
+	static const unsigned char prefix[] = { 0x00, 0x00, 0x00, 0x07, 's', 's', 'h', '-', 'r', 's', 'a' };
+	int mbederr;
+	FILE *f;
+	char output_buf[8000];
+	char *raw, *encoded, *c = output_buf;
+	size_t total, offset, len;
+	mbedtls_rsa_context *rsa = mbedtls_pk_rsa(*key);
+	char *nraw, *eraw;
+	size_t nlen, elen;
+	mbedtls_mpi N, E;
+
+	raw = encoded = NULL;
+	mbedtls_mpi_init(&N); mbedtls_mpi_init(&E);
+	mbederr = mbedtls_rsa_export(rsa, &N, NULL, NULL, NULL, &E);
+	if (mbederr != 0) goto exporterr;
+
+	/* Grab some space for the raw keys */
+	elen = mbedtls_mpi_size(&E);
+	nlen = mbedtls_mpi_size(&N);
+	raw = malloc(elen + nlen);
+	if (raw == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	offset = 0;
+	eraw = &raw[offset]; offset += elen;
+	nraw = &raw[offset]; offset += nlen;
+
+	/* Export the public exponent */
+	mbederr = mbedtls_mpi_write_binary(&E, (unsigned char *)eraw, elen);
+	if (mbederr != 0) goto exporterr;
+	offset += elen;
+
+	/* Export the modulus */
+	mbederr = mbedtls_mpi_write_binary(&N, (unsigned char *)nraw, nlen);
+	if (mbederr != 0) goto exporterr;
+	offset += nlen;
+
+	/* Work out encoded length including header prefix, allowing for all negative polynomials */
+	total = sizeof(prefix) + elen + nlen + (2 * 5);
+	encoded = malloc(total);
+	if (encoded == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+
+	/* Build the encoded binary representation */
+	memcpy(encoded, prefix, sizeof(prefix));
+	len = sizeof(prefix);
+	len += openssh_encode(&encoded[len], elen, eraw);
+	len += openssh_encode(&encoded[len], nlen, nraw);
+
+	/* Convert the encoded binary to base64 printable */
+	total = len;
+	strcpy(c, "ssh-rsa ");
+	c += strlen("ssh-rsa ");
+	mbederr = mbedtls_base64_encode((unsigned char *)c, sizeof(output_buf) - strlen("ssh-rsa ") - 1 /* Terminator */,
+	                                &offset, (unsigned char *)encoded, total);
+	if (mbederr != 0) goto exporterr;
+
+	c[offset] = '\0';
+	c = output_buf;
+
+	/* Write it */
+	f = fopen(output_file, "wb");
+	if (f == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	len = strlen((const char *)c);
+	if (fwrite(c, 1, len, f) != len)
+	{
+		fclose(f);
+		return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	}
+
+	/* Append any comment */
+	len = comment ? strlen(comment) : 0;
+	if (len)
+	{
+		fputc(' ', f);
+		if (fwrite(comment, 1, len, f) != len)
+		{
+			fclose(f);
+			return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+		}
+	}
+	fputc('\n', f);
+	fclose(f);
+	_swix(OS_File, _INR(0,2), OSFile_SetType, output_file, FileType_Text);
+exporterr:
+	free(raw);
+	free(encoded);
+	mbedtls_mpi_free(&N); mbedtls_mpi_free(&E);
+	return mbederr;
+}
+
+static int write_openssh_private_key(mbedtls_pk_context *key, const char *output_file, const char *comment)
+{
+	static const unsigned char prefix[] = { 0x00, 0x00, 0x00, 0x07, 's', 's', 'h', '-', 'r', 's', 'a' };
+	int mbederr;
+	FILE *f;
+	char output_buf[8000];
+	char *raw, *encoded, *hdr, *subhdr, *c = output_buf;
+	size_t total, offset, len;
+	mbedtls_rsa_context *rsa = mbedtls_pk_rsa(*key);
+	char *nraw, *praw, *qraw, *draw, *eraw, *qpraw;
+	size_t nlen, plen, qlen, dlen, elen, qplen;
+	mbedtls_mpi N, P, Q, D, E, QP;
+
+#define OPENSSH_BEGIN_PRIVATE_KEY "-----BEGIN OPENSSH PRIVATE KEY-----"
+#define OPENSSH_END_PRIVATE_KEY   "-----END OPENSSH PRIVATE KEY-----"
+#define OPENSSH_BEGIN_END_LEN     strlen(OPENSSH_BEGIN_PRIVATE_KEY /* + */ OPENSSH_END_PRIVATE_KEY)
+#define OPENSSH_PADDING           "\x01\x02\x03\x04\x05\x06\x07\x08"
+#define OPENSSH_BLOCK_SIZE        8
+#define OPENSSH_PRETTY_WRAP       70
+
+	raw = encoded = NULL;
+	mbedtls_mpi_init(&N); mbedtls_mpi_init(&P); mbedtls_mpi_init(&Q);
+	mbedtls_mpi_init(&D); mbedtls_mpi_init(&E); mbedtls_mpi_init(&QP);
+	mbederr = mbedtls_rsa_export(rsa, &N, &P, &Q, &D, &E);
+	if (mbederr != 0) goto exporterr;
+	mbederr = mbedtls_rsa_export_crt(rsa, NULL, NULL, &QP);
+	if (mbederr != 0) goto exporterr;
+
+	/* Grab some space for the raw keys */
+	nlen = mbedtls_mpi_size(&N);
+	plen = mbedtls_mpi_size(&P);
+	qlen = mbedtls_mpi_size(&Q);
+	dlen = mbedtls_mpi_size(&D);
+	elen = mbedtls_mpi_size(&E);
+	qplen = mbedtls_mpi_size(&QP);
+	raw = malloc(nlen + plen + qlen + dlen + elen + qplen);
+	if (raw == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	offset = 0;
+	nraw =  &raw[offset]; offset += nlen;
+	praw =  &raw[offset]; offset += plen;
+	qraw =  &raw[offset]; offset += qlen;
+	draw =  &raw[offset]; offset += dlen;
+	eraw =  &raw[offset]; offset += elen;
+	qpraw = &raw[offset]; offset += qplen;
+
+	/* Export the modulus */
+	mbederr = mbedtls_mpi_write_binary(&N, (unsigned char *)nraw, nlen);
+	if (mbederr != 0) goto exporterr;
+
+	/* Export the prime p */
+	mbederr = mbedtls_mpi_write_binary(&P, (unsigned char *)praw, plen);
+	if (mbederr != 0) goto exporterr;
+
+	/* Export the prime q */
+	mbederr = mbedtls_mpi_write_binary(&Q, (unsigned char *)qraw, qlen);
+	if (mbederr != 0) goto exporterr;
+
+	/* Export the private exponent */
+	mbederr = mbedtls_mpi_write_binary(&D, (unsigned char *)draw, dlen);
+	if (mbederr != 0) goto exporterr;
+
+	/* Export the public exponent */
+	mbederr = mbedtls_mpi_write_binary(&E, (unsigned char *)eraw, elen);
+	if (mbederr != 0) goto exporterr;
+
+	/* Export the inverse Q mod P */
+	mbederr = mbedtls_mpi_write_binary(&QP, (unsigned char *)qpraw, qplen);
+	if (mbederr != 0) goto exporterr;
+
+	/* Work out encoded length including header prefix, allowing for all negative polynomials */
+	total = strlen("openssh-key-v1") + 1 + 8 + 8 + 4 + 4 +
+	        4 + sizeof(prefix) + elen + nlen + (2 * 5) +
+	        4 + sizeof(prefix) + nlen + elen + dlen + qplen + plen + qlen + (6 * 5) +
+	        4 + strlen(comment) +
+	        OPENSSH_BLOCK_SIZE;
+	encoded = malloc(total);
+	if (encoded == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+
+	/* Outermost header structure */
+	hdr = encoded;
+	strcpy(hdr,   "openssh-key-v1");
+	hdr += strlen("openssh-key-v1") + 1; /* Include the terminator */
+	memcpy(hdr, "\x00\x00\x00\x04none\x00\x00\x00\x04none", 8 + 8);
+	hdr += 8 + 8; /* Cipher and KDF name */
+	hdr += openssh_be_value(hdr, 0); /* No options */
+	hdr += openssh_be_value(hdr, 1); /* Number of keys */
+
+	/* Remember where the public key starts for later length fixup */
+	subhdr = hdr;
+	hdr += 4;
+	memcpy(hdr, prefix, sizeof(prefix));
+	len = sizeof(prefix);
+	len += openssh_encode(&hdr[len], elen, eraw);
+	len += openssh_encode(&hdr[len], nlen, nraw);
+	hdr += len;
+	openssh_be_value(subhdr, hdr - subhdr - 4); /* Fixup length */
+
+	/* Remember where the private key starts for later length fixup */
+	subhdr = hdr;
+	hdr += 4;
+	memcpy(hdr, "RISCRISC", 4 + 4); /* Arbitrary check value since no password */
+	hdr += 4 + 4;
+	memcpy(hdr, prefix, sizeof(prefix));
+	len = sizeof(prefix);
+	len += openssh_encode(&hdr[len], nlen, nraw);
+	len += openssh_encode(&hdr[len], elen, eraw);
+	len += openssh_encode(&hdr[len], dlen, draw);
+	len += openssh_encode(&hdr[len], qplen, qpraw);
+	len += openssh_encode(&hdr[len], plen, praw);
+	len += openssh_encode(&hdr[len], qlen, qraw);
+	hdr += len;
+
+	/* Append any comment */
+	len = comment ? strlen(comment) : 0;
+	hdr += openssh_be_value(hdr, len); /* Comment length */
+	if (len)
+	{
+		strcpy(hdr, comment);
+		hdr += len;
+	}
+
+	/* Pad to block size */
+	len = (hdr - subhdr - 4) % OPENSSH_BLOCK_SIZE;
+	if (len)
+	{
+		len = OPENSSH_BLOCK_SIZE - len;
+		memcpy(hdr, OPENSSH_PADDING, len);
+		hdr += len;
+	}
+	openssh_be_value(subhdr, hdr - subhdr - 4); /* Fixup length */
+
+	/* Convert the raw binary to base64 printable */
+	total = hdr - encoded;
+	mbederr = mbedtls_base64_encode((unsigned char *)c, sizeof(output_buf) - OPENSSH_BEGIN_END_LEN - 1 /* Terminator */,
+	                                &offset, (unsigned char *)encoded, total);
+	if (mbederr != 0) return mbederr;
+
+	c[offset] = '\0';
+	c = output_buf;
+
+	/* Write it */
+	f = fopen(output_file, "wb");
+	if (f == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	len = strlen((const char *)c);
+	fprintf(f, "%s", OPENSSH_BEGIN_PRIVATE_KEY); /* Top */
+
+	/* Wrap the base64 part so it looks OK in an editor */
+	while (len)
+	{
+		size_t wrap;
+
+		fputc('\n', f);
+		wrap = MIN(len, OPENSSH_PRETTY_WRAP);
+		if (fwrite(c, 1, wrap, f) != wrap)
+		{
+			fclose(f);
+			return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+		}
+		c   += wrap;
+		len -= wrap;
+	}
+
+	fprintf(f, "\n%s\n", OPENSSH_END_PRIVATE_KEY); /* Tail */
+	fclose(f);
+	_swix(OS_File, _INR(0,2), OSFile_SetType, output_file, FileType_Text);
+exporterr:
+	free(raw);
+	free(encoded);
+	mbedtls_mpi_free(&N); mbedtls_mpi_free(&P); mbedtls_mpi_free(&Q);
+	mbedtls_mpi_free(&D); mbedtls_mpi_free(&E); mbedtls_mpi_free(&QP);
+	return mbederr;
+}
+
+/*
+ * PEM supporting functions
+ */
+#if !M_PRIVATE_FORMAT_ONLY
+static int write_public_key(mbedtls_pk_context *key, const char *output_file)
+{
+	int mbederr;
+	FILE *f;
+	char output_buf[8000];
+	char *c = output_buf;
+	size_t len = 0;
+
+	memset(output_buf, 0, sizeof(output_buf));
+	mbederr = mbedtls_pk_write_pubkey_pem(key, (unsigned char *)output_buf, sizeof(output_buf));
+	if (mbederr != 0) return mbederr;
+	len = strlen(output_buf);
+
+	f = fopen(output_file, "wb");
+	if (f == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	if (fwrite(c, 1, len, f) != len)
+	{
+		fclose(f);
+		return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	}
+	fclose(f);
+	_swix(OS_File, _INR(0,2), OSFile_SetType, output_file, FileType_Text);
+	return 0;
+}
+#endif
+
+static int write_private_key(mbedtls_pk_context *key, const char *output_file)
+{
+	int mbederr;
+	FILE *f;
+	char output_buf[8000];
+	char *c = output_buf;
+	size_t len = 0;
+
+	memset(output_buf, 0, sizeof(output_buf));
+	mbederr = mbedtls_pk_write_key_pem(key, (unsigned char *)output_buf, sizeof(output_buf));
+	if (mbederr != 0) return mbederr;
+	len = strlen(output_buf);
+
+	f = fopen(output_file, "wb");
+	if (f == NULL) return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	if (fwrite(c, 1, len, f) != len)
+	{
+		fclose(f);
+		return MBEDTLS_ERR_ERROR_GENERIC_ERROR;
+	}
+	fclose(f);
+	_swix(OS_File, _INR(0,2), OSFile_SetType, output_file, FileType_Text);
+	return 0;
+}
+
+/*
+ * Command line interface
+ */
+static const char *allowed_ktypes(void)
+{
+	static char list[100];
+	size_t i;
+	bool any = false;
+
+	for (i = 0; i < KTYPE_MAX; i++)
+	{
+		if (ktypes[i].defbits > 0)
+		{
+			if (any) strcat(list, ",");
+			strcat(list, ktypes[i].name);
+			any = true;
+		}
+	}
+	return list;
+}
+
+static const char *allowed_kformats(void)
+{
+	static char list[100];
+	size_t i;
+	bool any = false;
+
+	for (i = 0; i < KFORMAT_MAX; i++)
+	{
+		if (kformats[i].implemented)
+		{
+			if (any) strcat(list, ",");
+			strcat(list, kformats[i].name);
+			any = true;
+		}
+	}
+	return list;
+}
+
+static noreturn void usage(void)
+{
+	fprintf(stderr,
+"Usage:   ssh-keygen [-qv] [-b bits] [-C comment] [-t type] [-m format] [-f keyfile]\n"
+"Options: -t  set the key type to be one of [%s]\n"
+"         -m  set the %s key output format to be one of [%s]\n"
+"         -b  number of bits in the key\n"
+"         -C  provide a comment\n"
+"         -f  names the output key file\n"
+"         -q  be somewhat quiet\n"
+"         -v  be verbose\n", allowed_ktypes(),
+	                     M_PRIVATE_FORMAT_ONLY ? "private" : "",
+	                     allowed_kformats());
+	exit(EX_USAGE);
+}
+
+int main(int argc, char **argv)
+{
+	mbedtls_entropy_context entropy;
+	mbedtls_ctr_drbg_context ctr_drbg;
+	mbedtls_pk_context key;
+	char leaf[256], custom[64];
+	const char *errmsg = NULL;
+	char *comment = NULL;
+	time_t now;
+	size_t i;
+	int ch, mbederr = EX_OK;
+	static_assert(EX_OK == MBEDTLS_EXIT_SUCCESS, "Clash between sysexits.h and mbedtls/platform.h");
+
+	while ((ch = getopt(argc, argv, "Aa:Bb:C:cD:E:eF:f:gHhI:iKkLlM:m:N:n:O:P:pQqR:r:s:t:UuV:vw:Y:yZ:z:")) != -1)
+	{
+		switch (ch)
+		{
+			case 't':
+				for (i = 0; i < KTYPE_MAX; i++)
+				{
+					if (strcasecmp(ktypes[i].name, optarg) == 0) break;
+				}
+				if ((i == KTYPE_MAX) || (ktypes[i].defbits <= 0))
+				{
+					errx(EX_USAGE, "Keys of type '%s' may not be generated with this tool", optarg);
+				}
+				type = (ktype_t)i;
+				break;
+			case 'm':
+				for (i = 0; i < KFORMAT_MAX; i++)
+				{
+					if (strcasecmp(kformats[i].name, optarg) == 0) break;
+				}
+				if ((i == KFORMAT_MAX) || !kformats[i].implemented)
+				{
+					errx(EX_USAGE, "Keys of format '%s' may not be generated with this tool", optarg);
+				}
+				format = (kformat_t)i;
+				break;
+			case 'b':
+				bits = atoi(optarg);
+				break;
+			case 'C':
+				comment = optarg;
+				break;
+			case 'f':
+				outfile = optarg;
+				break;
+			case 'q':
+				quiet = true;
+				verbose = 0;
+				break;
+			case 'v':
+				if (verbose < 3) verbose++; /* Saturate at 3 */
+				quiet = false;
+				break;
+			case 'h':
+				if (strcmp(argv[optind], "-help") == 0) usage();
+				/* Fall through */
+			case 'A': case 'a':
+			case 'B':
+			case 'c':
+			case 'D':
+			case 'E': case 'e':
+			case 'F':
+			case 'g':
+			case 'H':
+			case 'I': case 'i':
+			case 'K': case 'k':
+			case 'L': case 'l':
+			case 'M':
+			case 'N': case 'n':
+			case 'O':
+			case 'P': case 'p':
+			case 'Q':
+			case 'R': case 'r':
+			case 's':
+			case 'T':
+			case 'U': case 'u':
+			case 'V':
+			case 'w':
+			case 'Y': case 'y':
+			case 'Z': case 'z':
+				errx(EX_USAGE, "Option -%c is not currently implemented", ch);
+		}
+	}
+	if (argc - optind != 0) usage();
+
+	/* Set the default bits if unset at the command line */
+	if (bits == -1)
+	{
+		bits = ktypes[type].defbits;
+		if (verbose > 2) fprintf(stderr, "Bits was unset, defaulting to %u\n", bits);
+	}
+	if (bits < ktypes[type].minbits)
+	{
+		errx(EX_USAGE, "Too few bits for key, minimum is %u", ktypes[type].minbits);
+	}
+	if (bits > ktypes[type].maxbits)
+	{
+		errx(EX_USAGE, "Too many bits for key, maximum is %u", ktypes[type].maxbits);
+	}
+
+	/* Set the default comment if unset at the command line */
+	if (comment == NULL)
+	{
+		int len = osvarlen("Inet$HostName", VarType_Expanded);
+
+		comment = "RISC OS";
+		if (len > 0)
+		{
+			comment = malloc(len + 1);
+			if (comment)
+			{
+				_swix(OS_ReadVarVal, _INR(0,4), "Inet$HostName", comment, len + 1, 0, VarType_Expanded);
+				comment[len] = '\0';
+			}
+		}
+		if (verbose > 2) fprintf(stderr, "Comment was unset, defaulting to '%s'\n", comment);
+	}
+
+	/* Set the output filename if unset at the command line */
+	if (outfile == NULL)
+	{
+		static char temp[2 + L_tmpnam] = "@.";
+		char *name, *leaf;
+
+		name = tmpnam(&temp[2]);
+		leaf = strrchr(name, '.');
+		if (leaf == NULL) leaf = ".key";
+		leaf++; /* Advance past the dot */
+		i = strlen(leaf);
+		memmove(&temp[2], leaf, i); temp[2 + i] = '\0';
+		outfile = temp;
+		if (verbose > 2) fprintf(stderr, "Output file was unset, defaulting to '%s'\n", outfile);
+	}
+
+	/* Initialise components */
+	if (verbose > 2) fprintf(stderr, "Initialising MPI maths and entropy\n");
+	mbedtls_entropy_init(&entropy);
+	mbedtls_pk_init(&key);
+	mbedtls_ctr_drbg_init(&ctr_drbg);
+
+#if defined(MBEDTLS_USE_PSA_CRYPTO)
+	if (verbose > 2) fprintf(stderr, "Initialising PSA Crypto\n");
+	psa_status_t status = psa_crypto_init();
+	if (status != PSA_SUCCESS)
+	{
+		errx(EX_SOFTWARE, "Failed to initialise PSA Crypto: %d", (int)status);
+	}
+#endif /* MBEDTLS_USE_PSA_CRYPTO */
+
+	if (verbose > 2) fprintf(stderr, "Gathering entropy\n");
+	i = (_swi(OS_ReadMonotonicTime, _RETURN(0)) & 0xFF) + 1 /* Minimum 1 stir */;
+	while (i)
+	{
+		mbedtls_entropy_gather(&entropy);
+		i--;
+	}
+
+	if (verbose > 2) fprintf(stderr, "Initialising mbedtls_ctr_drbg_seed\n");
+	now = time(NULL); /* Append a tiny bit more entropy */
+	snprintf(custom, sizeof(custom), "%s.%s", __progname, asctime(gmtime(&now)));
+	mbederr = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+	                                (const unsigned char *)custom, strlen(custom));
+	if (mbederr != 0)
+	{
+		errmsg = "Failed mbedtls_ctr_drbg_seed returned -0x%04x";
+		goto tidyup;
+	}
+
+	/* Generate the key */
+	if (!quiet) fprintf(stderr, "Generating public/private %s key of %u bits\n", ktypes[type].name, bits);
+	mbederr = mbedtls_pk_setup(&key, mbedtls_pk_info_from_type((mbedtls_pk_type_t)MBEDTLS_PK_RSA));
+	if (mbederr != 0)
+	{
+		errmsg = "Failed mbedtls_pk_setup returned -0x%04x";
+		goto tidyup;
+	}
+#if defined(MBEDTLS_RSA_C) && defined(MBEDTLS_GENPRIME)
+	mbederr = mbedtls_rsa_gen_key(mbedtls_pk_rsa(key), mbedtls_ctr_drbg_random, &ctr_drbg,
+	                              bits, 65537);
+	if (mbederr != 0)
+	{
+		errmsg = "Failed mbedtls_rsa_gen_key returned -0x%04x";
+		goto tidyup;
+	}
+#else
+#error "Need RSA functions to generate RSA keys"
+#endif /* MBEDTLS_RSA_C */
+
+	/* Export the key */
+	if (!quiet) fprintf(stderr, "Writing private key to %s\n", outfile);
+	strcpy(leaf, outfile);
+	mbederr = (format == KFORMAT_PEM) ? write_private_key(&key, leaf)
+	                                  : write_openssh_private_key(&key, leaf, comment);
+	if (mbederr != 0)
+	{
+		errmsg = "Failed writing private key with -0x%04x";
+		goto tidyup;
+	}
+
+	if (!quiet) fprintf(stderr, "Writing public key to %s/pub\n", outfile);
+	strcpy(leaf, outfile);
+	strcat(leaf, "/pub");
+#if M_PRIVATE_FORMAT_ONLY
+	mbederr = write_openssh_public_key(&key, leaf, comment);
+#else
+	mbederr = (format == KFORMAT_PEM) ? write_public_key(&key, leaf)
+	                                  : write_openssh_public_key(&key, leaf, comment);
+#endif
+	if (mbederr != 0)
+	{
+		errmsg = "Failed writing public key with -0x%04x";
+		goto tidyup;
+	}
+
+	/* Success */
+	mbederr = EX_OK;
+tidyup:
+	mbedtls_pk_free(&key);
+	mbedtls_ctr_drbg_free(&ctr_drbg);
+	mbedtls_entropy_free(&entropy);
+#if defined(MBEDTLS_USE_PSA_CRYPTO)
+	mbedtls_psa_crypto_free();
+#endif /* MBEDTLS_USE_PSA_CRYPTO */
+	if (mbederr != 0) errx(EX_SOFTWARE, errmsg, -mbederr);
+
+	return mbederr;
+}

@@ -1,0 +1,5 @@
+#Errors
+NoFS:File server '%0' not found
+BadFile:Corrupt CMOS file
+BadVer:CMOS file is for a different OS version
+WantStr:System variable must contain a string

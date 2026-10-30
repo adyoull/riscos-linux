@@ -1,0 +1,108 @@
+#------------------------------------------------------------------------------
+# Components file for the DDE tool chain (APCS-R exported libraries)
+#------------------------------------------------------------------------------
+%BaseAddress   0x00000000
+%Image         Build$ImageName
+%Log           Build$ImageName
+%Messages      Sources.Internat.Messages
+%Joiner        BigSplit2
+%JoinerFormat  BigSplit
+
+#
+# Components only required for their headers
+#
+HdrSrc                  -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS> OPTIONS=ALL
+BufferManager           -type EXP
+ColourTrans             -type EXP
+FileSwitch              -type EXP
+FontManager             -type EXP
+HostFS                  -type EXP
+Hourglass               -type EXP
+Kernel                  -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>
+MessageTrans            -type EXP
+PDriver                 -type EXP
+ResourceFS              -type EXP
+Squash                  -type EXP
+TaskManager             -type EXP
+TerritoryManager        -type EXP
+WindowManager           -type EXP
+Filer_Action            -type EXP
+
+FileCore                -type EXP
+ADFS                    -type EXP
+ATAPI                   -type EXP
+CDFS                    -type EXP
+CDFSDriver              -type EXP
+DDT                     -type EXP
+DeviceFS                -type EXP
+DMAManager              -type EXP
+DOSFS                   -type EXP
+DrawMod                 -type EXP
+Econet                  -type EXP
+Free                    -type EXP
+Freeway                 -type EXP
+FSLock                  -type EXP
+IIC                     -type EXP
+Joystick                -type EXP
+ParallelDeviceDriver    -type EXP
+PCI                     -type EXP
+PDumperLJ               -type EXP
+Podule                  -type EXP
+PortableHAL             -type EXP
+RamFS                   -type EXP
+RemotePrinterSupport    -type EXP
+ScreenBlanker           -type EXP
+ScreenModes             -type EXP
+SCSIDriver              -type EXP
+SCSIFS                  -type EXP
+SDFS                    -type EXP
+SDIODriver              -type EXP
+ShellCLI                -type EXP
+SoundDMA_HAL            -type EXP
+SuperSample             -type EXP
+VCHIQ                   -type EXP
+VFPSupport              -type EXP
+ZLibMod                 -type EXP
+
+ITable                  -type EXP
+BlendTable              -type EXP
+RTC                     -type EXP
+
+ColourPicker            -type EXP
+DDEUtils                -type EXP
+Debugger                -type EXP
+DragAnObj               -type EXP
+DragASprite             -type EXP
+FilterManager           -type EXP
+FPEmulator              -type EXP
+TaskWindow              -type EXP
+
+#
+# Libraries
+#
+SharedCLibrary          -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib INSTTYPE=libraries
+TCPIPheaders            -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+inetlib                 -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+rpclib                  -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+socklib                 -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+unixlib                 -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+AsmUtils                -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+C++Lib                  -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+DDTLib                  -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+DeskLib                 -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+F77Lib                  -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+ModMallocLib            -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+PDebug                  -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+PlainArgvLib            -type EXP
+ToolboxLib              -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+RemoteDebug             -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+Wild                    -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+Trace                   -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+DebugLib                -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+tboxlib                 -type EXP
+UnicodeLib              -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+UtilLib                 -options INSTDIR=Install:DDE.AcornC/C++.Export.<APCS>.Lib
+
+ABRelease               -options INSTDIR=Install:DDE.Tools
+
+# EOF

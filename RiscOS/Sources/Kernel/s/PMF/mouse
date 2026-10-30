@@ -1,0 +1,417 @@
+; Copyright 1996 Acorn Computers Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+; > $.Source.PMF.Mouse
+
+; Mouse driving code
+
+; Author:       Steve Cormie
+; Started:      24-Feb-93
+
+; Change history:
+;
+; Date          Who     Description
+; ----          ---     -----------
+; 24-Feb-93     SMC     Created.
+
+; *****************************************************************************
+;
+;        Mouse initialisation
+;
+MouseInit
+        Push    "lr"
+        LDR     r11, =ZeroPage+KeyWorkSpace
+
+        MOV     r0, #MouseStepCMOS      ; setup mouse multipliers from CMOS
+        BL      Read
+        MOV     r0, r0, LSL #24         ; sign extend it
+        MOVS    r0, r0, ASR #24
+        MOVEQ   r0, #1                  ; if would be zero, set to 1
+        STR     r0, MouseXMult
+        STR     r0, MouseYMult
+
+        MOV     r0, #0
+        STRB    r0, MouseButtons
+
+        MOV     r0, #MouseCMOS
+        BL      Read
+        STRB    r0, MouseType
+
+        Pull    "pc"
+
+; *****************************************************************************
+;
+;       MouseButtonChange - Called by keyboard handler when mouse button change
+;
+; in:   R0 = state of three primary buttons (bit0=R, bit1=C, bit2=L)
+;       R11 -> KeyWorkSpace
+;
+
+MouseButtonChange ROUT
+        Entry   "R0-R5, R12"
+
+        LDRB    R1, MouseButtons        ; Preserve the extra buttons (they
+        AND     R0, R0, #7              ; aren't part of the keyboard handler)
+        BIC     R1, R1, #7
+        ORR     R0, R0, R1
+10
+        VDWS    WsPtr
+        STRB    R0, MouseButtons        ; save it for ReadMouse calls
+        MOV     R3, R0
+
+        LDR     R1, MouseX
+        LDR     R0, [WsPtr, #OrgX]
+        SUB     R1, R1, R0              ; mouse X
+
+        LDR     R2, MouseY
+        LDR     R0, [WsPtr, #OrgY]
+        SUB     R2, R2, R0              ; mouse Y
+
+        LDR     R4, =ZeroPage
+        LDR     R4, [R4, #MetroGnome]   ; use monotonic variable now
+
+        MOV     R0, #Event_Mouse
+        BL      OSEVEN
+
+; Use buffer manager's 'block insert' function
+
+; TMD 26-Feb-93: Fix bug - if X is negative, Y would be inserted in the buffer as -1
+
+        LDR     R0, MouseX              ; 16 bits, sign-extended to 32 bits
+        MOV     R0, R0, LSL #16
+        LDR     R1, MouseY              ; ditto
+        MOV     R1, R1, LSL #16
+        ORR     R0, R1, R0, LSR #16     ; combine, having knocked off the troublesome bits
+        ORR     R1, R3, R4, LSL #8      ; R1 = Combined 8bit buttons and 24 LSB's of time
+        MOV     R2, R4, LSR #24         ; R2 = MSB of time
+        SUB     SP, SP, #3*4            ; Create local mouse data buffer
+        STMIA   SP, {R0,R1,R2}          ; Write mouse data to buffer
+
+        MOV     R3, #9                  ; Mouse packet size
+        MOV     R2, SP                  ; R2-> block to insert
+        MOV     R1, #(Buff_Mouse:OR:(1:SHL:31)) ; Block insert to mouse buffer
+        Push    "R10,R12"
+        MOV     R10, #INSV              ; Insert
+        BL      GoVec2                  ; Call the vector in R10
+        Pull    "R10,R12"
+        ADD     SP, SP, #3*4            ; Destroy mouse data buffer
+        EXIT
+
+
+; *****************************************************************************
+;
+;       MouseButtonChange2 - Called when mouse buttons change
+;
+; in:   R0 = state of all buttons
+;       R11 -> KeyWorkSpace
+;
+MouseButtonChange2 ALTENTRY
+        B       %BT10
+
+; *****************************************************************************
+;
+;       Read mouse position
+;
+
+ReadMouse ROUT
+        Push    "R4-R6,R10-R12"
+        LDR     R11, =ZeroPage+KeyWorkSpace
+
+        SUB     SP, SP, #3*4            ; Create 9 byte local mouse data buffer
+        MOV     R3, #9                  ; Mouse packet size
+        MOV     R2, SP                  ; R2-> buffer for data
+        MOV     R1, #(Buff_Mouse:OR:(1:SHL:31)) ; Block remove from mouse buffer
+        CLRV                            ; Remove not examine
+        Push    "R10,R12"
+        MOV     R10, #REMV
+        BL      GoVec2                  ; Call the vector in R10
+        Pull    "R10,R12"
+
+        LDMCCIA SP, {R4,R5,R6}
+        ADD     SP, SP, #3*4            ; Destroy mouse data buffer
+        BCS     %FT10                   ; Jump if no buffered data
+
+        MOV     R0, R4, LSL #16
+        MOV     R0, R0, ASR #16         ; R0 = sign extended x coord
+        MOV     R1, R4, ASR #16         ; R1 = sign extended y coord
+        AND     R2, R5, #&FF            ; R2 = button state
+        MOV     R3, R5, LSR #8          ; R3 = 3 low order bytes of time
+        ORR     R3, R3, R6, LSL #24     ; R3 = time
+
+; code inserted here 12-Aug-88 to force position read from buffer to be inside
+; CURRENT bounding box; this removes the need to flush buffer when changing
+; the bounding box.
+
+        ADR     R4, MouseBounds
+        LDMIA   R4, {R4-R6,R10}         ; R4=LCol; R5=BRow; R6=RCol; R10=TRow;
+        CMP     R0, R4
+        MOVLT   R0, R4
+        CMP     R0, R6
+        MOVGT   R0, R6
+        CMP     R1, R5
+        MOVLT   R1, R5
+        CMP     R1, R10
+        MOVGT   R1, R10
+
+        B       %FT20                   ; correct for origin after clipping
+
+10
+        LDRB    R2, MouseButtons
+
+        LDR     R3, =ZeroPage
+        LDR     R3, [R3, #MetroGnome]           ; use monotonic variable now
+
+        LDR     R0, MouseX
+        LDR     R1, MouseY
+20
+        VDWS    WsPtr
+
+        LDR     R4, [WsPtr, #OrgX]
+        SUB     R0, R0, R4
+
+        LDR     R4, [WsPtr, #OrgY]
+        SUB     R1, R1, R4
+
+        Pull    "R4-R6,R10-R12,PC"
+
+Abso    DCB     "Abso"
+
+; *****************************************************************************
+;
+;       ProcessMouseXY - Called to update mouse position.
+;
+;       in:     r2  = signed 32-bit X movement
+;               r3  = signed 32-bit Y movement
+;               r4  = "Abso" if absolute movement
+;               r11 ->KeyWorkSpace
+;       out:    r2,r3 corrupted
+;
+ProcessMouseXY
+        Push    "r4,lr"
+
+; check for absolute position
+        LDR     lr, Abso
+        TEQ     r4, lr
+        BEQ     %FT40
+
+; process X movement
+        CMP     r2, #0
+        BEQ     %FT10
+
+        MOV     r2, r2, LSL #16         ; move delta X to top 16 bits
+
+        LDR     r4, MouseXMult
+        MUL     r2, r4, r2
+
+        LDR     r4, MouseX
+        ADD     r2, r2, r4, LSL #16     ; add signed value in top 16 bits
+        MOV     r2, r2, ASR #16         ; sign extend to 32 bits
+
+        LDR     r4, MouseBoundLCol      ; bound to bounding box
+        CMP     r2, r4
+        MOVLT   r2, r4
+        LDR     r4, MouseBoundRCol
+        CMP     r4, r2
+        MOVLT   r2, r4
+        STR     r2, MouseX
+
+10
+; process Y movement
+        CMP     r3, #0
+        Pull    "r4,pc",EQ
+
+        MOV     r3, r3, LSL #16         ; move delta Y to top 16 bits
+
+        LDR     r4, MouseYMult
+        MUL     r3, r4, r3
+
+        LDR     r4, MouseY
+        ADD     r3, r3, r4, LSL #16     ; add signed value in top 16 bits
+        MOV     r3, r3, ASR #16         ; sign extend to 32 bits
+
+        LDR     r4, MouseBoundBRow      ; bound to bounding box
+        CMP     r3, r4
+        MOVLT   r3, r4
+        LDR     r4, MouseBoundTRow
+        CMP     r4, r3
+        MOVLT   r3, r4
+        STR     r3, MouseY
+
+        Pull    "r4,pc"
+
+40
+; process absolute position
+        MOV     r2, r2, ASL #16         ; look only at bottom 16 bits,
+        MOV     r3, r3, ASL #16         ; sign extended
+        MOV     r2, r2, ASR #16
+        MOV     r3, r3, ASR #16
+
+        LDR     r4, MouseBoundLCol      ; bound to bounding box
+        CMP     r2, r4
+        MOVLT   r2, r4
+        LDR     r4, MouseBoundRCol
+        CMP     r4, r2
+        MOVLT   r2, r4
+        STR     r2, MouseX
+        LDR     r4, MouseBoundBRow      ; bound to bounding box
+        CMP     r3, r4
+        MOVLT   r3, r4
+        LDR     r4, MouseBoundTRow
+        CMP     r4, r3
+        MOVLT   r3, r4
+        STR     r3, MouseY
+        Pull    "r4,pc"
+
+
+; *****************************************************************************
+;
+;       PollPointer - Called on VSync to get mouse changes.
+;
+;       out:    corrupts r0-r3,r9-r11
+;
+PollPointer
+        Push    "r4,r12,lr"
+        LDR     r11, =ZeroPage+KeyWorkSpace
+
+        LDRB    r0, MouseReporting
+        TEQ     r0, #0
+        Pull    "r4,r12,pc",NE
+
+        MOV     r0, #PointerReason_Request
+        LDRB    r1, MouseType
+        MOV     r2, #0                  ; Default to no movement.
+        MOV     r3, #0
+        MOV     r4, #0                  ; They might fill this in
+        SavePSR r9                      ; Save current PSR.
+        WritePSRc SVC_mode+I_bit, r10   ; Call PointerV in SVC mode, no IRQs.
+        MOV     r10, #PointerV          ; Call PointerV to get movements & button states
+        Push    "lr"                    ; Save SVC lr.
+        BL      CallVector
+        Pull    "lr"                    ; Restore SVC lr.
+        RestPSR r9
+        BL      ProcessMouseXY
+
+        Pull    "r4,r12,pc"
+
+; *****************************************************************************
+;
+;       PointerVector - the default PointerV claimant
+;
+PointerVector   ROUT
+        CMP     r0, #PointerReason_Report
+        BNE     %FT50
+        Push    "r2,r3,r11"
+        LDR     r11, =ZeroPage+KeyWorkSpace
+        LDRB    lr, MouseType
+        TEQ     r1, lr
+        MOVEQ   lr, #1
+        STREQB  lr, MouseReporting
+        BL      ProcessMouseXY
+        Pull    "r2,r3,r11,pc"
+
+50
+        CMP     r0, #PointerReason_WheelChange
+        Pull    pc, NE
+
+        ; R1 = Y scroll, negative = up/away
+        ; R2 = extra buttons
+        ; R3 = X scroll
+        PHPSEI
+        Push    "r0-r3,r11,lr"
+        LDR     r11, =ZeroPage+KeyWorkSpace
+        ; Update extra buttons
+        AND     r2, r2, #&1F
+        LDRB    r0, MouseButtons
+        EORS    lr, r2, r0, LSR #3      ; Any change?
+        EORNE   r0, r0, lr, LSL #3
+        BLNE    MouseButtonChange2
+        ; Update scroll wheels
+        EORS    lr, r1, r3
+        BEQ     %FT90
+        MOV     r2, r3                  ; X delta
+        RSB     r3, r1, #0              ; Y delta, positive = up/away
+        MOV     r0, #Event_Expansion
+        MOV     r1, #Event_Expansion_PointerScroll
+        BL      OSEVEN                  ; May call PointerScrollApply via OS's default handler (to allow event claimints to suppress scroll updates)
+        BLCS    PointerScrollApply      ; Unless the event is disabled, in which case we must call direct
+90
+        Pull    "r0-r3,r11,lr"
+        PLP
+        Pull    "pc"
+
+
+; *****************************************************************************
+;
+;       PointerScrollApply - Update our scroll wheel data
+;
+;       in:     r2 = X delta
+;               r3 = Y delta
+;               Interrupts disabled
+;
+PointerScrollApply ROUT
+        Entry   "r0-r1,r11"
+        LDR     r11, =ZeroPage+KeyWorkSpace
+        ; Mimic RISCOS Ltd's funky wrap-to-zero logic
+        MOV     lr, #&80000000
+        LDR     r0, MouseAltX
+        ADDS    r1, r0, r2
+        EORVS   r0, lr, r0, ASR #31 ; &80000000 if originally positive, &7FFFFFFF if negative
+        SUBVS   r1, r1, r0          ; positive -> negative wrapping loses &80000000, negative -> positive loses &7FFFFFFF
+        STR     r1, MouseAltX
+        LDR     r0, MouseAltY
+        ADDS    r1, r0, r3
+        EORVS   r0, lr, r0, ASR #31
+        SUBVS   r1, r1, r0
+        STR     r1, MouseAltY
+        EXIT
+
+
+; *****************************************************************************
+;
+;       PointerSWI - Handle SWI OS_Pointer calls (read/set pointer type).
+;
+PointerSWI
+        LDR     r11, =ZeroPage+KeyWorkSpace
+        TEQ     r0, #OSPointer_GetPointerType
+        LDREQB  r0, MouseType
+        BEQ     SLVK
+
+        TEQ     r0, #OSPointer_ReadAltPosition
+        LDREQ   r0, MouseAltX
+        LDREQ   r1, MouseAltY
+        BEQ     SLVK
+
+        TEQ     r0, #OSPointer_SetPointerType
+        BNE     %FT10
+
+        Push    "r0,r10,r12,lr"
+        STRB    r1, MouseType
+        MOV     r0, #0
+        STRB    r0, MouseReporting
+        MOV     r0, #2
+        MOV     r10, #PointerV
+        BL      CallVector
+        Pull    "r0,r10,r12,lr"
+        B       SLVK
+
+10
+        ADRL    r0, ErrorBlock_BadParameters
+  [ International
+        Push    "lr"
+        BL      TranslateError
+        Pull    "lr"
+  ]
+        B       SLVK_SetV
+
+        END

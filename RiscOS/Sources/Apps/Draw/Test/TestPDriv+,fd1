@@ -1,0 +1,50 @@
+REM
+REM Copyright 1996 Acorn Computers Ltd
+REM
+REM Licensed under the Apache License, Version 2.0 (the "License");
+REM you may not use this file except in compliance with the License.
+REM You may obtain a copy of the License at
+REM
+REM     http://www.apache.org/licenses/LICENSE-2.0
+REM
+REM Unless required by applicable law or agreed to in writing, software
+REM distributed under the License is distributed on an "AS IS" BASIS,
+REM WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+REM See the License for the specific language governing permissions and
+REM limitations under the License.
+REM
+DIM rect% 16,trfm% 16,pos% 8
+
+rect%!0=0
+rect%!4=0
+rect%!8=100
+rect%!12=100
+
+trfm%!0=&10000
+trfm%!4=0
+trfm%!8=0
+trfm%!12=&10000
+
+pos%!0=0
+pos%!4=0
+
+job%=OPENOUT "printer:"
+ON ERROR PRINT REPORT$;"at line ";ERL: CLOSE#job%: END
+
+SYS "PDriver_SelectJob",job%,"Test print" TO oldjob%
+LOCAL ERROR
+ON ERROR PRINT REPORT$;"at line ";ERL: SYS "PDriver_AbortJob",job%: SYS "PDriver_SelectJob",oldjob%: END
+
+SYS "PDriver_GiveRectangle",42,rect%,trfm%,pos%,&FFFFFF00
+
+SYS "PDriver_DrawPage",1,rect%,0,0 TO more%
+WHILE more%<>0
+  PRINT "Printing rectangle ((";rect%!0;", ";rect%!4;"), (";rect%!8;", ";rect%!12;"))"
+  SYS "PDriver_GetRectangle",,rect% TO more%
+ENDWHILE
+
+SYS "PDriver_EndJob",job%
+RESTORE ERROR
+
+SYS "PDriver_SelectJob",oldjob%
+CLOSE#job%

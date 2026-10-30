@@ -1,0 +1,21 @@
+/* (2.97)
+ *
+ * This file is automatically maintained by srccommit, do not edit manually.
+ *
+ */
+#define Module_MajorVersion_CMHG        2.97
+#define Module_MinorVersion_CMHG
+#define Module_Date_CMHG                08 Jun 2026
+
+#define Module_MajorVersion             "2.97"
+#define Module_Version                  297
+#define Module_MinorVersion             ""
+#define Module_Date                     "08 Jun 2026"
+
+#define Module_ApplicationDate          "08-Jun-26"
+
+#define Module_ComponentName            "Alarm"
+
+#define Module_FullVersion              "2.97"
+#define Module_HelpVersion              "2.97 (08 Jun 2026)"
+#define Module_LibraryVersionInfo       "2:97"

@@ -1,0 +1,108 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* h.Cache_Wire - the interface through which the cache lists a directory.
+ *
+ * c.SMB2 lists a directory one QUERY_DIRECTORY reply at a time.  The cursor below holds the open directory handle and the position
+ * reached within the current reply, so a listing can stop part-way and be carried on by a later call; each entry the scan yields
+ * comes out as a record already in RISC OS terms.
+ *
+ * The cache (c.Cache) makes no SMB2 call itself: it drives a scan through the function pointers below, which c.SMB2 installs on each
+ * mount's cache.  That keeps the cache buildable on its own, so a test build on Linux can stand a scripted scan in for the server.
+ *
+ * Contract:
+ *   - first()  opens dir_path and fetches its first reply, seeding the cursor.
+ *   - next()   fetches the next reply into the same cursor.
+ *   - iter()   yields the next entry of the current reply and advances the cursor; false once the reply is used up.
+ *
+ * When iter() returns false the cache calls next(), unless the scan has already ended (LMCACHE_WIRE_NO_MORE_ENTRIES or a failure).
+ */
+
+#ifndef LMCACHE_WIRE_H
+#define LMCACHE_WIRE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+/* The two-QWORD file handle SMB2 returns from CREATE (MS-SMB2 2.2.14.1 SMB2_FILEID).  Defined beside the scan cursor that parks an open
+ * directory's FileId between calls; the SMB2 headers pick the type up from here.
+ */
+typedef struct {
+  uint64_t Persistent;
+  uint64_t Volatile;
+} SMB2_FILEID;
+
+/* All-ones marks an unset handle half (the value MS-SMB2 reserves as the compounding placeholder); the pair together means no
+ * handle is held.
+ */
+#define SMB2_FILEID_INVALID_PERSISTENT 0xFFFFFFFFFFFFFFFFULL
+#define SMB2_FILEID_INVALID_VOLATILE   0xFFFFFFFFFFFFFFFFULL
+
+/* Outcome of opening a directory or of one QUERY_DIRECTORY round trip, folded down from the NT status space: carry on, clean end of
+ * listing, directory not on the server, or a failure that has ended the scan.
+ */
+typedef enum {
+  LMCACHE_WIRE_OK,
+  LMCACHE_WIRE_NO_MORE_ENTRIES,
+  LMCACHE_WIRE_OBJECT_NOT_FOUND,
+  LMCACHE_WIRE_TRANSIENT_ERROR
+} LMCacheWireResult_t;
+
+/* One directory entry: the DOS leafname plus fully translated RISC OS metadata.  name points into scan scratch and is only valid until
+ * the next entry is fetched, so anything kept must be copied.
+ */
+typedef struct {
+  const char *name;         // DOS leafname, NUL-terminated Latin-1; borrowed from scan scratch
+  uint16_t name_len;        // strlen(name), saving the cache a re-scan
+  uint8_t obj_type;         // LMCACHE_OBJECT_FILE or LMCACHE_OBJECT_DIRECTORY
+  bool size_suspect;        // end-of-file exactly equalled allocation size: a length worth re-verifying before trusting
+  bool is_resolved_symlink; // entry is a symlink; the metadata below was adopted from its resolved target
+  bool is_inert_symlink;    // symlink whose target could not be resolved; presented as an empty placeholder
+  uint32_t load_addr;       // RISC OS load address (filetype and datestamp encoding)
+  uint32_t exec_addr;       // RISC OS exec address (datestamp low word)
+  uint64_t length;          // file length in bytes; directories report a nominal fixed size
+  uint32_t attrs;           // RISC OS attribute bits
+} LMCacheWireRecord_t;
+
+/* Cursor for one directory scan, seeded when the directory is opened and advanced as its entries are read.  The scan owns opaque[] and
+ * scratch[] outright; a scan the cache stops early is handed to discard_state to close its handle.
+ */
+typedef struct {
+  void *opaque[2];      // the share, and the position within the current reply
+  uint32_t scratch[4];  // the open directory's FileId, as plain words
+  const char *dir_path; // DOS path of the directory being scanned; borrowed from the caller
+  int error;            // the scan's own error code behind a TRANSIENT_ERROR result, or 0; the cache passes it on unread
+  uint32_t unlisted;    // entries the scan passed over without yielding (hidden, untranslatable, too long, or a link too long to resolve)
+} LMCacheWireState_t;
+
+/* Function pointers through which the cache drives a scan; c.SMB2 points these at its own, a Linux test build at scripted playback.
+ * Every callback receives ctx back as its first argument.
+ */
+typedef struct {
+  /* Start a fresh scan of dir_path (see the contract above). */
+  LMCacheWireResult_t (*first)(void *ctx, const char *dir_path, LMCacheWireState_t *state_out);
+
+  /* Fetch the next reply of an open scan. */
+  LMCacheWireResult_t (*next)(void *ctx, LMCacheWireState_t *state);
+
+  /* Yield one entry from the current reply; false once the reply is used up. */
+  bool (*iter)(void *ctx, LMCacheWireState_t *state, LMCacheWireRecord_t *rec_out);
+
+  /* Abandon a scan, closing whatever handle state still holds. */
+  void (*discard_state)(void *ctx, LMCacheWireState_t *state);
+
+  void *ctx; // passed verbatim to every callback
+} LMCacheWireVTable_t;
+
+#endif

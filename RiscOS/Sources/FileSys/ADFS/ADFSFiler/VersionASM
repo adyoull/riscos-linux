@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "1.16"
+Module_Version          SETA    116
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "22 Feb 2024"
+Module_ApplicationDate  SETS    "22-Feb-24"
+Module_ComponentName    SETS    "ADFSFiler"
+Module_FullVersion      SETS    "1.16"
+Module_HelpVersion      SETS    "1.16 (22 Feb 2024)"
+                        END

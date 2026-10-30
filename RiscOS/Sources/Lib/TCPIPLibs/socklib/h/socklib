@@ -1,0 +1,118 @@
+/* Copyright 1997 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/****************************************************************************
+ * This source file was written by Acorn Computers Limited. It is part of   *
+ * the Internet library for writing network applications in C. It may be    *
+ * used freely in the creation of programs for Archimedes or Risc PC. It    *
+ * should be used with Acorn's C Compiler Release 5 or later.               *
+ *                                                                          *
+ *                                                                          *
+ * Copyright © Acorn Computers Ltd, 1996                                    *
+ *                                                                          *
+ ***************************************************************************/
+
+/*
+ * File:    socklib.h
+ * Purpose: Socket library calls
+ * Author:  K Bracey
+ * History: 26-Nov-96: KJB: Internet 5 release
+ */
+
+#include "sys/types.h"
+#include "sys/socket.h"
+#include "sys/stat.h"
+#include "sys/time.h"
+#include "sys/uio.h"
+
+#include "kernel.h"
+
+/*
+ * variable declarations
+ */
+#ifndef errno
+#define errno __errno
+extern int errno;
+#endif
+extern _kernel_oserror _inet_error;
+
+struct sockaddr_in;
+struct nlist;
+
+#ifndef kvm_t
+#define kvm_t void
+#endif
+
+/*
+ * function prototypes
+ */
+extern int accept(int s, struct sockaddr *addr, socklen_t *addrlen);
+
+extern int bind(int s, const struct sockaddr *name, socklen_t namelen);
+
+extern int connect(int s, const struct sockaddr *name, socklen_t namelen);
+
+extern int getpeername(int s, struct sockaddr *name, socklen_t *namelen);
+extern int getsockname(int s, struct sockaddr *name, socklen_t *namelen);
+extern int getsockopt(int s, int level, int optname,
+		      void *optval, socklen_t *optlen);
+extern int getstablesize(void);
+
+extern int listen(int s, int backlog);
+
+extern int recv(int s, void *buf, size_t len, int flags);
+extern int recvfrom(int s, void *buf, size_t len, int flags,
+		    struct sockaddr *from, socklen_t *fromlenaddr);
+extern int recvmsg(int s, struct msghdr *msg, int flags);
+
+extern int select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
+		  struct timeval *tv);
+extern int send(int s, const void *msg, size_t len, int flags);
+extern int sendmsg(int s, const struct msghdr *msg, int flags);
+extern int sendto(int s, const void *msg, size_t len, int flags,
+		  const struct sockaddr *to, socklen_t tolen);
+extern int setsockopt(int s, int level, int optname, const void *optval, socklen_t optlen);
+extern int shutdown(int s, int how);
+extern int socketclose(int d);
+extern int socket(int domain, int type, int protocol);
+extern int socketstat(int s, struct stat *buf);
+extern int socketioctl(int s, unsigned long cmd, ...);
+extern int socketread(int s, void *buf, size_t len);
+extern int socketreadv(int s, const struct iovec *iov, int iovcnt);
+extern int socketwrite(int s, const void *buf, size_t len);
+extern int socketwritev(int s, const struct iovec *iov, int iovcnt);
+extern int socketversion(void);
+extern int sysctl(const int *name, unsigned int namelen, void *oldp, size_t *oldlenp,
+                  const void *newp, size_t newlen);
+
+#ifdef COMPAT_INET4
+#error "Internet 4 support has been retired. See https://www.riscosopen.org/content/documents/internet-4-migration for help."
+#endif
+
+/*
+ * auxiliary functions
+ */
+extern int _copyerror(_kernel_oserror *e);
+extern char *_inet_err(void);
+
+/*
+ * internal use only
+ * NB: since Internet 5.04 sendtosm has accepted either Internet 4 or 5
+ *     layout sockaddr_in, so the function signature now expects the latter.
+ */
+extern int sendtosm(int s, const void *buf, size_t len,
+                    const void *buf1, size_t len1, struct sockaddr_in *to);
+extern int kvm_nlist(kvm_t *kd, struct nlist *nl);
+
+/* EOF socklib.h */

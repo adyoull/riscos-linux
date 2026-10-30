@@ -1,0 +1,332 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include "swis.h"
+
+#include "Global/NewErrors.h"
+#include "Global/Services.h"
+#include "Interface/Internatio.h"
+#include "Interface/Territory.h"
+#include "DebugLib/DebugLib.h"
+
+#include "MsgCode.h"
+#include "TerrMgrInt.h"
+#include "Daylight.h"
+#include "Time.h"
+#include "TerritoryMgrHdr.h"
+
+/*!
+ * \brief  Call the client territory module
+ * \param  swi_offset Originating Territory_ SWI offset
+ * \param  r Original SWI register set
+ * \return Error block pointer
+ */
+static _kernel_oserror *territory_subcall(int swi_offset, _kernel_swi_regs *r)
+{
+	_kernel_oserror *err;
+	territory_t *t;
+	tanumber_t callee = (tanumber_t)r->r[0];
+	uint32_t   flags;
+	size_t     entry = swi_offset - (ENTRY_0TH_SWI - Territory_00);
+
+	if (callee == CURRENT_TERRITORY)
+	{
+		r->r[0] = callee = configured_territory;
+	}
+	dprintf(("subcall", "Sub call %u for territory %d\n", swi_offset, callee));
+
+	/* Find the territory in the list */
+	SLIST_FOREACH(t, &territories, list)
+	{
+		if (t->number == callee)
+		{
+			if (entry == (Territory_Collate - ENTRY_0TH_SWI))
+			{
+				/* Extra horrors from Territory_Collate which returns a result in
+				 * both R0 and the flags.
+				 */
+				err = subcall(r, t->entries[entry], t->pw, &flags);
+				dprintf(("subcall", "Sub collate returned flags = %c%c%c\n",
+				                    (flags & _N) ? 'N' : 'n',
+				                    (flags & _Z) ? 'Z' : 'z',
+				                    (flags & _C) ? 'C' : 'c'));
+				if (err == NULL)
+				{
+					/* No error, transfer flags over */
+					return swi_FLAG_RETURN(_N | _Z | _C, flags);
+				}
+			}
+			else
+			{
+				err = subcall(r, t->entries[entry], t->pw, NULL);
+				dprintf(("subcall", "Sub call returned\n"));
+			}
+			return err;
+		}
+	}
+	return messages_errorlookup(TerritoryError_NoTerritory, "NoTerr");
+}
+
+/*!
+ * \brief  Lookup an alphabet name
+ * \param  alphabet Number to lookup
+ * \param  buffer Pointer to buffer to copy the name into
+ * \param  buffersz Size of the buffer
+ * \return Error block pointer
+ */
+static _kernel_oserror *territory_alphabetnumbertoname(tanumber_t alphabet, char *buffer, size_t buffersz)
+{
+	char token[12];
+
+	sprintf(token, "A%u", alphabet); /* Get token */
+	if (messages_lookup(token, buffer, buffersz) == NULL)
+	{
+		return messages_errorlookup(TerritoryError_UnknownAlphabet, "UnkAlph");
+	}
+	return NULL;
+}
+
+/*!
+ * \brief  Lookup an territory name
+ * \param  territory Number to lookup
+ * \param  buffer Pointer to buffer to copy the name into
+ * \param  buffersz Size of the buffer
+ * \return Error block pointer
+ */
+static _kernel_oserror *territory_numbertoname(tanumber_t territory, char *buffer, size_t buffersz)
+{
+	char token[12];
+
+	sprintf(token, "T%u", territory); /* Get token */
+	if (messages_lookup(token, buffer, buffersz) == NULL)
+	{
+		return messages_errorlookup(TerritoryError_UnknownTerritory, "UnkTerr");
+	}
+	return NULL;
+}
+
+/*!
+ * \brief  Switch alphabet in a territory
+ * \param  territory Territory to select the alphabet from
+ * \return Error block pointer
+ */
+static _kernel_oserror *territory_selectalphabet(tanumber_t territory)
+{
+	uint32_t alphabet;
+	_kernel_oserror *err;
+
+	err = _swix(Territory_Alphabet, _IN(0) | _OUT(0), territory, &alphabet);
+	if (err == NULL)
+	{
+		_swix(OS_ServiceCall, _INR(1,5), Service_International,
+		      Inter_Define, alphabet, 0, 255); /* Defines 0-255 */
+	}
+	return err;
+}
+
+/*!
+ * \brief  Query whether the given territory is available
+ * \return Z=1 if the territory is loaded
+ */
+static _kernel_oserror *territory_exists(tanumber_t territory)
+{
+	territory_t *t;
+
+	SLIST_FOREACH(t, &territories, list)
+	{
+		if (t->number == territory) return swi_FLAG_SET(_Z);
+	}
+	return swi_FLAG_CLEAR(_Z);
+}
+
+/*!
+ * \brief  Switch territory
+ * \param  territory Territory to select
+ * \return Error block pointer
+ */
+static _kernel_oserror *territory_select(tanumber_t territory)
+{
+	territory_t *t;
+
+	SLIST_FOREACH(t, &territories, list)
+	{
+		if (t->number == territory)
+		{
+			configured_territory = territory;
+			territory_selected();
+			return NULL;
+		}
+	}
+	return messages_errorlookup(TerritoryError_NoTerritory, "NoTerr");
+}
+
+/*!
+ * \brief  Register a new client sub module
+ * \param  territory Territory number
+ * \param  entries Pointer to table of entry points this territory provides
+ * \param  pw Client's private word
+ * \return Error block pointer
+ */
+static _kernel_oserror *territory_register(tanumber_t territory, void *entries, void *pw)
+{
+	territory_t *t;
+
+	/* Check that the territory does not already exist */
+	SLIST_FOREACH(t, &territories, list)
+	{
+		if (t->number == territory)
+		{
+			return NULL; /* If it exists ignore new one */
+		}
+	}
+	dprintf(("", "Registering new territory %d\n", territory));
+
+	/* Allocate block */
+	t = malloc(sizeof(territory_t));
+	if (t == NULL)
+	{
+		return messages_errorlookup(ErrorNumber_MHNoRoom, "NoMem");
+	}
+
+	/* Add the territory to the list */
+	t->number = territory;
+	t->pw = pw;
+	memcpy(t->entries, entries, sizeof(void *) * ENTRY_POINTS);
+	dprintf(("", "Copied entry points\n"));
+	SLIST_INSERT_HEAD(&territories, t, list);
+	dprintf(("", "Linked to list\n"));
+
+	/* Check to see if we just registered the configured territory */
+	if (territory == configured_territory)
+	{
+		/* If so let everyone know */
+		territory_selected();
+	}
+	return NULL;
+}
+
+/*!
+ * \brief  Deregister a client sub module
+ * \param  territory Territory number
+ * \return Error block pointer
+ */
+static _kernel_oserror *territory_deregister(tanumber_t territory)
+{
+	territory_t *t;
+
+	SLIST_FOREACH(t, &territories, list)
+	{
+		if (t->number == territory)
+		{
+			/* Found, free block and unlink */
+			dprintf(("", "Deregistering territory %d\n", territory));
+			SLIST_REMOVE(&territories, t, territory, list);
+			free(t);
+			return NULL;
+		}
+	}
+	return NULL;
+}
+
+_kernel_oserror *territory_swis(int swi_offset, _kernel_swi_regs *r, void *pw)
+{
+	switch (swi_offset)
+	{
+		/* These SWIs are provided by this module */
+		case Territory_Number                      - Territory_00:
+			r->r[0] = configured_territory;
+			return NULL;
+
+		case Territory_NumberToName                - Territory_00:
+			return territory_numbertoname(r->r[0], (char *)r->r[1], r->r[2]);
+
+		case Territory_AlphabetNumberToName        - Territory_00:
+			return territory_alphabetnumbertoname(r->r[0], (char *)r->r[1], r->r[2]);
+
+		case Territory_SelectAlphabet              - Territory_00:
+			return territory_selectalphabet(r->r[0]);
+
+		case Territory_Exists                      - Territory_00:
+			return territory_exists(r->r[0]);
+
+		case Territory_Select                      - Territory_00:
+			return territory_select(r->r[0]);
+
+		case Territory_Register                    - Territory_00:
+			return territory_register(r->r[0], (void *)r->r[1], (void *)r->r[2]);
+
+		case Territory_Deregister                  - Territory_00:
+			return territory_deregister(r->r[0]);
+
+		case Territory_SetTime                     - Territory_00:
+			return time_set((const uint8_t *)r->r[0]);
+
+		case Territory_DaylightSaving              - Territory_00:
+			return daylight_saving_ops(r);
+
+		case Territory_ReadCurrentTimeZone         - Territory_00:
+			return time_currentzone(r->r[2],
+			                        (const char **)&r->r[0], (int32_t *)&r->r[1], (size_t *)&r->r[2]);
+
+		case Territory_ConvertTimeToUTCOrdinals    - Territory_00:
+			time_40b_ordinals((const uint8_t *)r->r[1], (ordfull_t *)r->r[2]);
+			return NULL;
+
+		case Territory_ConvertTimeFormats          - Territory_00:
+			return time_convertformats(r->r[0], (void *)r->r[1], (void *)r->r[2], r->r[3], r->r[4]);
+
+		/* These SWIs are passed on to the respective territory */
+		case Territory_ReadTimeZones               - Territory_00:
+		case Territory_ConvertDateAndTime          - Territory_00:
+		case Territory_ConvertStandardDateAndTime  - Territory_00:
+		case Territory_ConvertStandardDate         - Territory_00:
+		case Territory_ConvertStandardTime         - Territory_00:
+		case Territory_ConvertTimeToOrdinals       - Territory_00:
+		case Territory_ConvertTimeStringToOrdinals - Territory_00:
+		case Territory_ConvertOrdinalsToTime       - Territory_00:
+		case Territory_Alphabet                    - Territory_00:
+		case Territory_AlphabetIdentifier          - Territory_00:
+		case Territory_SelectKeyboardHandler       - Territory_00:
+		case Territory_WriteDirection              - Territory_00:
+		case Territory_CharacterPropertyTable      - Territory_00:
+		case Territory_LowerCaseTable              - Territory_00:
+		case Territory_UpperCaseTable              - Territory_00:
+		case Territory_ControlTable                - Territory_00:
+		case Territory_PlainTable                  - Territory_00:
+		case Territory_ValueTable                  - Territory_00:
+		case Territory_RepresentationTable         - Territory_00:
+		case Territory_Collate                     - Territory_00:
+		case Territory_ReadSymbols                 - Territory_00:
+		case Territory_ReadCalendarInformation     - Territory_00:
+		case Territory_NameToNumber                - Territory_00:
+		case Territory_TransformString             - Territory_00:
+		case Territory_IME                         - Territory_00:
+		case Territory_DaylightRules               - Territory_00:
+			return territory_subcall(swi_offset, r);
+
+		/* Not yet supported */
+		case Territory_ConvertTextToString         - Territory_00:
+		default:
+			return error_BAD_SWI;
+	}
+
+	UNUSED(pw);
+
+	return NULL;
+}

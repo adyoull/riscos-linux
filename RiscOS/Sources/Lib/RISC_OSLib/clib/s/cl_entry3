@@ -1,0 +1,95 @@
+; Copyright 2002 Pace Micro Technology plc
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+;-*- Mode: Assembler -*-
+;
+; Copyright (C) Acorn Computers Ltd., 1989.
+;
+; DO NOT ADD ENTRIES TO EXISTING CHUNKS WHICH HAVE BEEN RELEASED TO USERS!
+; Old versions of CLib will plant a ticking time bomb in apps by filling the
+; entries with garbage.
+;
+
+        ; C99 float+double math functions
+
+        ; Originally introduced in CLib 5.45
+        Entry   acosf, imported, , unveneered
+        Entry   asinf, imported, , unveneered
+        Entry   atanf, imported, , unveneered
+        Entry   atan2f, imported, , unveneered
+        Entry   cosf, imported, , unveneered
+        Entry   sinf, imported, , unveneered
+        Entry   tanf, imported, , unveneered
+        Entry   acosh, imported, , unveneered
+        Entry   acoshf, imported, , unveneered
+        Entry   asinh, imported, , unveneered
+        Entry   asinhf, imported, , unveneered
+        Entry   atanh, imported, , unveneered
+        Entry   atanhf, imported, , unveneered
+        Entry   expf, imported, , unveneered
+        Entry   exp2, , , unveneered
+        Entry   exp2f, , , unveneered
+        Entry   expm1, imported, , unveneered
+        Entry   expm1f, imported, , unveneered
+        Entry   frexpf, imported, , unveneered
+        Entry   ilogb, imported, , unveneered
+        Entry   ilogbf, imported, , unveneered
+        Entry   ldexpf, imported, , unveneered
+        Entry   logf, imported, , unveneered
+        Entry   log10f, imported, , unveneered
+        Entry   log1p, imported, , unveneered
+        Entry   log1pf, imported, , unveneered
+        Entry   log2, , , unveneered
+        Entry   log2f, , , unveneered
+        Entry   logb, imported, , unveneered
+        Entry   logbf, imported, , unveneered
+        Entry   modff, imported, , unveneered
+        Entry   fmodf, imported, , unveneered
+        Entry   scalbn, imported, , unveneered
+        Entry   scalbnf, imported, , unveneered
+        Entry   scalbln, imported, , unveneered
+        Entry   scalblnf, imported, , unveneered
+        Entry   cbrt, , , unveneered
+        Entry   cbrtf, , , unveneered
+        Entry   powf, , , unveneered
+        Entry   sqrtf, imported, , unveneered
+        Entry   erf, imported, , unveneered
+        Entry   erff, imported, , unveneered
+        Entry   erfc, imported, , unveneered
+        Entry   erfcf, imported, , unveneered
+        Entry   lgamma, imported, , unveneered
+        Entry   lgammaf, imported, , unveneered
+        Entry   tgamma, imported, , unveneered
+        Entry   tgammaf, imported, , unveneered
+        Entry   nexttoward, , , unveneered
+        Entry   nexttowardf, , , unveneered
+        Entry   fmaf, imported, , unveneered
+
+        ; Originally introduced in CLib 5.49
+        Entry   copysign, , , unveneered
+        Entry   copysignf, , , unveneered
+        Entry   fma, imported, , unveneered
+        Entry   remquo, imported, , unveneered
+        Entry   remquof, imported, , unveneered
+        Entry   llrint, imported, , unveneered
+        Entry   llrintf, imported, , unveneered
+        Entry   llround, imported, , unveneered
+        Entry   llroundf, imported, , unveneered
+
+        ; Originally introduced in CLib 6.09
+        Entry   coshf, imported, , unveneered
+        Entry   sinhf, imported, , unveneered
+        Entry   tanhf, imported, , unveneered
+
+        END

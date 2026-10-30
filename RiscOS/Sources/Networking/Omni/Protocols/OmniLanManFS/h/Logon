@@ -1,0 +1,74 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+*  Lan Manager client
+*
+*  Logon.H - Header for Logon.C exports
+*
+*/
+
+/* Set the default credential to user GUEST in workgroup WORKGROUP, with no password.
+ *
+ * The caller in c/LanMan then replaces the workgroup with the file server name configured in CMOS, if one is set.
+ *
+ * Returns: OK always.
+ */
+extern err_t Lgn_Init(void);
+
+/* Set the default credential, then look up the user's home directory and mount it as "Home".
+ *
+ * The credential is stored in LM_Vars and the user name published in Omni$UserLanMan.  The home directory comes from the
+ * workgroup's domain controller by a NetLogon RPC; having no domain controller, a server that does not support the call,
+ * or no home directory set all count as success.  A failure after the credential is set leaves it set.  Mounting the home
+ * directory can run its boot file, which may itself contain *LMLogon, so this function can be re-entered.
+ *
+ * Parameters:
+ *   workgroup  workgroup or domain name, or NULL or empty to keep the current one
+ *   userid     user name; must not be NULL or empty
+ *   password   password, or NULL for none
+ *
+ * Returns: OK; EUSERUNKNOWN for an empty user name; EHOMEDIRCONN if the home directory was found but could not be
+ * mounted; or the error from the RPC or from parsing the home directory name.
+ */
+extern err_t Lgn_Logon(char *workgroup, char *userid, char *password);
+
+/* Forget the default credential, and the known servers, shares and printers other than those of active mounts.
+ *
+ * Omni$UserLanMan and LanMan$HomeDir are unset.  Existing mounts stay; only later mounts lose the credential.
+ *
+ * Returns: OK always.
+ */
+extern err_t Lgn_Logoff(void);
+
+/* Handle the LanMan_LogonOp SWI, which OmniClient calls for the logon client.
+ *
+ * Reason 0 logs on (Lgn_Logon), 3 lists the one pseudo-server the logon client shows, 9 reports no mount, and 17 logs
+ * off; any other reason gives ENOTPRESENT.  For reason 0, R1 returns 1 when the credential was stored, even if the home
+ * directory then failed with EHOMEDIRCONN or EHOMEDIRNAME, and 0 otherwise.
+ *
+ * Parameters:
+ *   R  registers; R0 is the reason code, the rest depend on the reason
+ *
+ * Returns: NULL, or the error as an OS error block.
+ */
+extern _kernel_oserror *Lgn_LogonOp_SWI(_kernel_swi_regs *R);
+
+/* Register this module's logon icon with OmniClient. */
+extern void Lgn_Register(void);
+
+extern char Lgn_PrimaryDCName[];
+extern char Lgn_HomeDirName[];
+extern char Lgn_HomeServerName[];
+extern char Lgn_HomeShareName[];

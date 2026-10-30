@@ -1,0 +1,765 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* h.SMB2Defs - SMB2/3 protocol constants per MS-SMB2
+ *
+ * Wire-format constants for the SMB 2.x and 3.x protocol family.
+ * See https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2
+ */
+
+#ifndef SMB2DEFS_H
+#define SMB2DEFS_H
+
+/* ProtocolId bytes of the SMB2 packet header (MS-SMB2 2.2.1); an SMB1 frame instead leads with SMB1_MAGIC_0, which is how
+ * received frames are told apart during multi-protocol negotiation.
+ */
+#define SMB2_MAGIC_0 0xFE
+#define SMB2_MAGIC_1 'S'
+#define SMB2_MAGIC_2 'M'
+#define SMB2_MAGIC_3 'B'
+
+#define SMB1_MAGIC_0 0xFF
+
+/* Fixed length of the packet header that precedes every command body (MS-SMB2 2.2.1). */
+#define SMB2_HEADER_SIZE 64
+
+/* Dialect revision numbers (MS-SMB2 2.2.3).  WILD is the "SMB 2.???" wildcard a server answers with when the client offered
+ * SMB2 from an SMB1 multi-protocol negotiate.
+ */
+#define SMB2_DIALECT_0202 0x0202
+#define SMB2_DIALECT_0210 0x0210
+#define SMB2_DIALECT_0300 0x0300
+#define SMB2_DIALECT_0302 0x0302
+#define SMB2_DIALECT_0311 0x0311
+#define SMB2_DIALECT_WILD 0x02FF
+
+/* Command codes for the packet header's Command field (MS-SMB2 2.2.1). */
+#define SMB2_NEGOTIATE       0x0000
+#define SMB2_SESSION_SETUP   0x0001
+#define SMB2_LOGOFF          0x0002
+#define SMB2_TREE_CONNECT    0x0003
+#define SMB2_TREE_DISCONNECT 0x0004
+#define SMB2_CREATE          0x0005
+#define SMB2_CLOSE           0x0006
+#define SMB2_FLUSH           0x0007
+#define SMB2_READ            0x0008
+#define SMB2_WRITE           0x0009
+#define SMB2_LOCK            0x000A
+#define SMB2_IOCTL           0x000B
+#define SMB2_CANCEL          0x000C
+#define SMB2_ECHO            0x000D
+#define SMB2_QUERY_DIRECTORY 0x000E
+#define SMB2_CHANGE_NOTIFY   0x000F
+#define SMB2_QUERY_INFO      0x0010
+#define SMB2_SET_INFO        0x0011
+#define SMB2_OPLOCK_BREAK    0x0012
+
+/* Packet header Flags bits (MS-SMB2 2.2.1). */
+#define SMB2_FLAGS_SERVER_TO_REDIR  0x00000001
+#define SMB2_FLAGS_ASYNC_COMMAND    0x00000002
+#define SMB2_FLAGS_RELATED_OPS      0x00000004
+#define SMB2_FLAGS_SIGNED           0x00000008
+#define SMB2_FLAGS_PRIORITY_MASK    0x00000070
+#define SMB2_FLAGS_DFS_OPERATIONS   0x10000000
+#define SMB2_FLAGS_REPLAY_OPERATION 0x20000000
+
+/* MessageId of a message the server sends unprompted, such as an oplock break (MS-SMB2 2.2.1). */
+#define SMB2_UNSOLICITED_MESSAGE_ID 0xFFFFFFFFFFFFFFFFULL
+
+/* SecurityMode bits (MS-SMB2 2.2.3), exchanged in NEGOTIATE and echoed in SESSION_SETUP. */
+#define SMB2_NEGOTIATE_SIGNING_ENABLED  0x0001
+#define SMB2_NEGOTIATE_SIGNING_REQUIRED 0x0002
+
+/* NEGOTIATE Capabilities bits (MS-SMB2 2.2.3). */
+#define SMB2_GLOBAL_CAP_DFS                0x00000001
+#define SMB2_GLOBAL_CAP_LARGE_MTU          0x00000004
+#define SMB2_GLOBAL_CAP_MULTI_CHANNEL      0x00000008
+#define SMB2_GLOBAL_CAP_PERSISTENT_HANDLES 0x00000010
+#define SMB2_GLOBAL_CAP_ENCRYPTION         0x00000040
+
+/* TREE_CONNECT response ShareType values (MS-SMB2 2.2.10). */
+#define SMB2_SHARE_TYPE_DISK  0x01
+#define SMB2_SHARE_TYPE_PIPE  0x02
+#define SMB2_SHARE_TYPE_PRINT 0x03
+
+/* TREE_CONNECT response ShareFlags (MS-SMB2 2.2.10).  The four *_CACHING values are an enumeration occupying a two-bit field,
+ * not independent bits.
+ */
+#define SMB2_SHAREFLAG_MANUAL_CACHING           0x00000000
+#define SMB2_SHAREFLAG_AUTO_CACHING             0x00000010
+#define SMB2_SHAREFLAG_VDO_CACHING              0x00000020
+#define SMB2_SHAREFLAG_NO_CACHING               0x00000030
+#define SMB2_SHAREFLAG_DFS                      0x00000001
+#define SMB2_SHAREFLAG_DFS_ROOT                 0x00000002
+#define SMB2_SHAREFLAG_RESTRICT_EXCLUSIVE_OPENS 0x00000100
+#define SMB2_SHAREFLAG_FORCE_SHARED_DELETE      0x00000200
+#define SMB2_SHAREFLAG_ALLOW_NAMESPACE_CACHING  0x00000400
+#define SMB2_SHAREFLAG_ACCESS_BASED_DIR_ENUM    0x00000800
+#define SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK     0x00001000
+#define SMB2_SHAREFLAG_ENABLE_HASH_V1           0x00002000
+#define SMB2_SHAREFLAG_ENABLE_HASH_V2           0x00004000
+#define SMB2_SHAREFLAG_ENCRYPT_DATA             0x00008000
+
+/* TREE_CONNECT response Capabilities bits (MS-SMB2 2.2.10). */
+#define SMB2_SHARE_CAP_DFS                     0x00000008
+#define SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY 0x00000010
+#define SMB2_SHARE_CAP_SCALEOUT                0x00000020
+#define SMB2_SHARE_CAP_CLUSTER                 0x00000040
+
+/* CREATE DesiredAccess mask for files and directories (MS-SMB2 2.2.13.1, built on the MS-DTYP ACCESS_MASK).  The low bits are
+ * the object-specific FILE_* rights; the standard rights above them carry an SMB2_ prefix locally to keep generic names like
+ * DELETE out of the shared namespace.
+ */
+#define FILE_READ_DATA              0x00000001
+#define FILE_WRITE_DATA             0x00000002
+#define FILE_APPEND_DATA            0x00000004
+#define FILE_READ_EA                0x00000008
+#define FILE_WRITE_EA               0x00000010
+#define FILE_EXECUTE                0x00000020
+#define FILE_DELETE_CHILD           0x00000040
+#define FILE_READ_ATTRIBUTES        0x00000080
+#define FILE_WRITE_ATTRIBUTES       0x00000100
+#define SMB2_DELETE                 0x00010000
+#define SMB2_READ_CONTROL           0x00020000
+#define SMB2_WRITE_DAC              0x00040000
+#define SMB2_WRITE_OWNER            0x00080000
+#define SMB2_SYNCHRONIZE            0x00100000
+#define SMB2_ACCESS_SYSTEM_SECURITY 0x01000000
+
+/* Generic rights, which the server maps to specific rights at open time, plus MAXIMAL_ACCESS (MS-DTYP MAXIMUM_ALLOWED), which
+ * asks for the widest access the server will grant.
+ */
+#define SMB2_GENERIC_READ    0x80000000
+#define SMB2_GENERIC_WRITE   0x40000000
+#define SMB2_GENERIC_EXECUTE 0x20000000
+#define SMB2_GENERIC_ALL     0x10000000
+#define SMB2_MAXIMAL_ACCESS  0x02000000
+
+/* The conventional desired-access bundles this client requests for read-only and writable opens. */
+#define SMB2_ACCESS_READ (FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | SMB2_READ_CONTROL | SMB2_SYNCHRONIZE)
+#define SMB2_ACCESS_WRITE \
+  (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | SMB2_READ_CONTROL | SMB2_SYNCHRONIZE)
+
+/* File attribute bits (MS-FSCC 2.6). */
+#define FILE_ATTRIBUTE_READONLY            0x00000001
+#define FILE_ATTRIBUTE_HIDDEN              0x00000002
+#define FILE_ATTRIBUTE_SYSTEM              0x00000004
+#define FILE_ATTRIBUTE_DIRECTORY           0x00000010
+#define FILE_ATTRIBUTE_ARCHIVE             0x00000020
+#define FILE_ATTRIBUTE_NORMAL              0x00000080
+#define FILE_ATTRIBUTE_TEMPORARY           0x00000100
+#define FILE_ATTRIBUTE_SPARSE_FILE         0x00000200
+#define FILE_ATTRIBUTE_REPARSE_POINT       0x00000400
+#define FILE_ATTRIBUTE_COMPRESSED          0x00000800
+#define FILE_ATTRIBUTE_OFFLINE             0x00001000
+#define FILE_ATTRIBUTE_NOT_CONTENT_INDEXED 0x00002000
+#define FILE_ATTRIBUTE_ENCRYPTED           0x00004000
+
+/* CREATE CreateDisposition values (MS-SMB2 2.2.13): an enumeration, not bits. */
+#define FILE_SUPERSEDE    0x00000000
+#define FILE_OPEN         0x00000001
+#define FILE_CREATE       0x00000002
+#define FILE_OPEN_IF      0x00000003
+#define FILE_OVERWRITE    0x00000004
+#define FILE_OVERWRITE_IF 0x00000005
+
+/* CREATE CreateOptions bits (MS-SMB2 2.2.13). */
+#define FILE_DIRECTORY_FILE            0x00000001
+#define FILE_WRITE_THROUGH             0x00000002
+#define FILE_SEQUENTIAL_ONLY           0x00000004
+#define FILE_NO_INTERMEDIATE_BUFFERING 0x00000008
+#define FILE_NON_DIRECTORY_FILE        0x00000040
+#define FILE_NO_EA_KNOWLEDGE           0x00000200
+#define FILE_RANDOM_ACCESS             0x00000800
+#define FILE_DELETE_ON_CLOSE           0x00001000
+#define FILE_OPEN_BY_FILE_ID           0x00002000
+#define FILE_OPEN_FOR_BACKUP_INTENT    0x00004000
+#define FILE_NO_COMPRESSION            0x00008000
+#define FILE_OPEN_REPARSE_POINT        0x00200000
+
+/* CREATE ShareAccess bits (MS-SMB2 2.2.13). */
+#define FILE_SHARE_READ   0x00000001
+#define FILE_SHARE_WRITE  0x00000002
+#define FILE_SHARE_DELETE 0x00000004
+
+/* RequestedOplockLevel values (MS-SMB2 2.2.13). */
+#define SMB2_OPLOCK_LEVEL_NONE      0x00
+#define SMB2_OPLOCK_LEVEL_II        0x01
+#define SMB2_OPLOCK_LEVEL_EXCLUSIVE 0x08
+#define SMB2_OPLOCK_LEVEL_BATCH     0x09
+
+/* CREATE ImpersonationLevel values (MS-SMB2 2.2.13). */
+#define SMB2_IMPERSONATION_ANONYMOUS      0x00000000
+#define SMB2_IMPERSONATION_IDENTIFICATION 0x00000001
+#define SMB2_IMPERSONATION_IMPERSONATION  0x00000002
+#define SMB2_IMPERSONATION_DELEGATE       0x00000003
+
+/* CLOSE Flags bit (MS-SMB2 2.2.15): asks the server to return the file's final attributes in the close response. */
+#define SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB 0x0001
+
+/* QUERY_DIRECTORY Flags bits (MS-SMB2 2.2.33). */
+#define SMB2_RESTART_SCANS       0x01
+#define SMB2_RETURN_SINGLE_ENTRY 0x02
+#define SMB2_INDEX_SPECIFIED     0x04
+#define SMB2_REOPEN              0x10
+
+/* QUERY_INFO / SET_INFO InfoType values (MS-SMB2 2.2.37). */
+#define SMB2_0_INFO_FILE       0x01
+#define SMB2_0_INFO_FILESYSTEM 0x02
+#define SMB2_0_INFO_SECURITY   0x03
+#define SMB2_0_INFO_QUOTA      0x04
+
+/* File information class numbers (MS-FSCC 2.4); the mixed-case names deliberately match the specification's class names. */
+#define FileBasicInformation           4
+#define FileStandardInformation        5
+#define FileRenameInformation          10
+#define FileDispositionInformation     13
+#define FileAllInformation             18
+#define FileEndOfFileInformation       20
+#define FileAttributeTagInformation    35
+#define FileIdBothDirectoryInformation 37
+#define FileIdFullDirectoryInformation 38
+
+/* Filesystem information class numbers (MS-FSCC 2.5): a separate namespace from the file classes above, hence reused values. */
+#define FileFsSizeInformation      3
+#define FileFsFullSizeInformation  7
+#define FileFsAttributeInformation 5
+
+/* FSCTL control codes (MS-FSCC 2.3, MS-SMB2 2.2.31): named-pipe transceive carries the DCE/RPC traffic for share enumeration,
+ * reparse-point retrieval reads a symlink's target, and validate-negotiate has the server confirm what NEGOTIATE agreed.
+ */
+#define FSCTL_PIPE_TRANSCEIVE         0x0011C017
+#define FSCTL_GET_REPARSE_POINT       0x000900A8
+#define FSCTL_VALIDATE_NEGOTIATE_INFO 0x00140204
+
+/* IOCTL request Flags bit (MS-SMB2 2.2.31): the control code is a filesystem control rather than a device control. */
+#define SMB2_0_IOCTL_IS_FSCTL 0x00000001
+
+/* Session flags: BINDING is a SESSION_SETUP request Flags bit (MS-SMB2 2.2.5); the rest are response SessionFlags (2.2.6).
+ * Two different wire fields, hence the coincident values.
+ */
+#define SMB2_SESSION_FLAG_BINDING      0x01
+#define SMB2_SESSION_FLAG_IS_GUEST     0x0001
+#define SMB2_SESSION_FLAG_IS_NULL      0x0002
+#define SMB2_SESSION_FLAG_ENCRYPT_DATA 0x0004
+
+/* CHANGE_NOTIFY request Flags bit (MS-SMB2 2.2.35): monitor the whole subtree, not only the directory itself. */
+#define SMB2_WATCH_TREE 0x0001
+
+/* CHANGE_NOTIFY CompletionFilter bits (MS-SMB2 2.2.35) selecting which change classes the server reports. */
+#define FILE_NOTIFY_CHANGE_FILE_NAME    0x00000001
+#define FILE_NOTIFY_CHANGE_DIR_NAME     0x00000002
+#define FILE_NOTIFY_CHANGE_ATTRIBUTES   0x00000004
+#define FILE_NOTIFY_CHANGE_SIZE         0x00000008
+#define FILE_NOTIFY_CHANGE_LAST_WRITE   0x00000010
+#define FILE_NOTIFY_CHANGE_CREATION     0x00000040
+#define FILE_NOTIFY_CHANGE_EA           0x00000080
+#define FILE_NOTIFY_CHANGE_SECURITY     0x00000100
+#define FILE_NOTIFY_CHANGE_STREAM_NAME  0x00000200
+#define FILE_NOTIFY_CHANGE_STREAM_SIZE  0x00000400
+#define FILE_NOTIFY_CHANGE_STREAM_WRITE 0x00000800
+
+/* FILE_NOTIFY_INFORMATION Action values (MS-FSCC 2.7.1) saying what happened to each name a CHANGE_NOTIFY reports. */
+#define FILE_ACTION_ADDED            0x00000001
+#define FILE_ACTION_REMOVED          0x00000002
+#define FILE_ACTION_MODIFIED         0x00000003
+#define FILE_ACTION_RENAMED_OLD_NAME 0x00000004
+#define FILE_ACTION_RENAMED_NEW_NAME 0x00000005
+
+/* The NT status codes (MS-ERREF 2.3) this client generates or specifically interprets; anything else off the wire is mapped to
+ * a generic RISC OS error.
+ */
+#define STATUS_SUCCESS                  0x00000000
+#define STATUS_PENDING                  0x00000103
+#define STATUS_NOTIFY_ENUM_DIR          0x0000010C
+#define STATUS_BUFFER_OVERFLOW          0x80000005
+#define STATUS_NO_MORE_FILES            0x80000006
+#define STATUS_STOPPED_ON_SYMLINK       0x8000002D
+#define STATUS_INVALID_PARAMETER        0xC000000D
+#define STATUS_NO_SUCH_FILE             0xC000000F
+#define STATUS_INVALID_DEVICE_REQUEST   0xC0000010
+#define STATUS_END_OF_FILE              0xC0000011
+#define STATUS_MORE_PROCESSING_REQUIRED 0xC0000016
+#define STATUS_ACCESS_DENIED            0xC0000022
+#define STATUS_OBJECT_NAME_INVALID      0xC0000033
+#define STATUS_OBJECT_NAME_NOT_FOUND    0xC0000034
+#define STATUS_OBJECT_NAME_COLLISION    0xC0000035
+#define STATUS_OBJECT_PATH_INVALID      0xC0000039
+#define STATUS_OBJECT_PATH_NOT_FOUND    0xC000003A
+#define STATUS_OBJECT_PATH_SYNTAX_BAD   0xC000003B
+#define STATUS_SHARING_VIOLATION        0xC0000043
+#define STATUS_FILE_LOCK_CONFLICT       0xC0000054
+#define STATUS_DELETE_PENDING           0xC0000056
+#define STATUS_LOGON_FAILURE            0xC000006D
+#define STATUS_ACCOUNT_DISABLED         0xC0000072
+#define STATUS_DISK_FULL                0xC000007F
+#define STATUS_MEDIA_WRITE_PROTECTED    0xC00000A2
+#define STATUS_FILE_IS_A_DIRECTORY      0xC00000BA
+#define STATUS_NOT_SUPPORTED            0xC00000BB
+#define STATUS_NETWORK_NAME_DELETED     0xC00000C9
+#define STATUS_BAD_NETWORK_NAME         0xC00000CC
+#define STATUS_DIRECTORY_NOT_EMPTY      0xC0000101
+#define STATUS_NOT_A_DIRECTORY          0xC0000103
+#define STATUS_CANCELLED                0xC0000120
+#define STATUS_CANNOT_DELETE            0xC0000121
+#define STATUS_FILE_CLOSED              0xC0000128
+#define STATUS_USER_SESSION_DELETED     0xC0000203
+#define STATUS_NETWORK_SESSION_EXPIRED  0xC000035C
+#define STATUS_NOT_FOUND                0xC0000225
+
+/* An NT status carries its severity in the top two bits; only both-set is an error, so warnings (0x8...) and informational
+ * codes such as STATUS_PENDING pass the error test.
+ */
+#define NT_STATUS_IS_ERROR(s)   (((s)&0xC0000000) == 0xC0000000)
+#define NT_STATUS_IS_SUCCESS(s) ((s) == STATUS_SUCCESS)
+
+/* Byte offsets of the packet header fields (MS-SMB2 2.2.1).  In the async header form the eight bytes at the Reserved/TreeId
+ * offsets carry AsyncId instead.
+ */
+#define SMB2_HEADER_PROTOCOL_OFFSET      0
+#define SMB2_HEADER_STRUCT_SIZE_OFFSET   4
+#define SMB2_HEADER_CREDIT_CHARGE_OFFSET 6
+#define SMB2_HEADER_STATUS_OFFSET        8
+#define SMB2_HEADER_COMMAND_OFFSET       12
+#define SMB2_HEADER_CREDIT_OFFSET        14
+#define SMB2_HEADER_FLAGS_OFFSET         16
+#define SMB2_HEADER_NEXT_COMMAND_OFFSET  20
+#define SMB2_HEADER_MESSAGE_ID_OFFSET    24
+#define SMB2_HEADER_RESERVED_OFFSET      32
+#define SMB2_HEADER_TREE_ID_OFFSET       36
+#define SMB2_HEADER_SESSION_ID_OFFSET    40
+#define SMB2_HEADER_SIGNATURE_OFFSET     48
+
+/* Signing geometry: the header's signature field length, the HMAC-SHA256 output length used by SMB 2.x signing, and the AES key
+ * width for the SMB 3.x CMAC scheme.
+ */
+#define SMB2_SIGNATURE_SIZE   16
+#define SMB2_HMAC_SHA256_SIZE 32
+#define SMB2_AES128_KEY_BITS  128
+
+/* Saturation limits for squeezing 64-bit wire quantities through the 32-bit FileSwitch API: anything above QWORD_OVERFLOW_32 is
+ * clamped to the unsigned 32-bit maximum.
+ */
+#define UINT32_CLAMP      0xFFFFFFFFu
+#define QWORD_OVERFLOW_32 0xFFFFFFFFULL
+
+/* NTLMSSP fixed digest and response lengths per MS-NLMP, plus local ceilings for the variable-length authentication messages
+ * and their SPNEGO wrapping.  The NT response carries the server's target info, which a domain member with long DNS names
+ * makes large, so the ceilings leave room for the target info real servers send.
+ */
+#define NTLMSSP_NTOWFV2_SIZE       16
+#define NTLMSSP_NTPROOFSTR_SIZE    16
+#define NTLMSSP_LMV2_RESPONSE_SIZE 24
+#define NTLMSSP_MAX_NT_RESPONSE    2048
+#define NTLMSSP_MAX_MSG_SIZE       2560
+#define NTLMSSP_MAX_SPNEGO_SIZE    3072
+
+/* Credit charge stamped on ordinary requests; READ, WRITE and QUERY_DIRECTORY override it with ceil(payload / SMB2_CREDIT_UNIT). */
+#define SMB2_CREDIT_CHARGE_NORMAL 1
+
+/* Balance the client keeps topped up: each request's CreditRequest asks for the shortfall below this, giving multi-credit I/O
+ * headroom under the additive accounting of MS-SMB2 3.2.4.1.5.
+ */
+#define SMB2_CREDIT_TARGET 128
+
+/* MS-SMB2 counts the first byte of a trailing variable-length buffer in a request's StructureSize (which is why those sizes are
+ * odd); add this to the fixed body size when writing StructureSize for a command that carries a variable part.
+ */
+#define SMB2_VARIABLE_TRAILER 1
+
+/* Per-command body layouts.  Each group below gives the byte offsets of one request or response body's fields, counted from the
+ * end of the packet header, mirroring the corresponding MS-SMB2 section 2.2 structure.  For requests, _SIZE is the fixed body
+ * length (senders add SMB2_VARIABLE_TRAILER to it when writing StructureSize for a command with a variable buffer).  For
+ * responses, _SIZE is the StructureSize value the server is expected to quote and _MIN is the smallest body accepted when
+ * validating a reply.
+ */
+
+/* NEGOTIATE request (MS-SMB2 2.2.3). */
+#define SMB2_NEGOTIATE_REQ_STRUCT_SIZE_OFFSET   0
+#define SMB2_NEGOTIATE_REQ_DIALECT_COUNT_OFFSET 2
+#define SMB2_NEGOTIATE_REQ_SECURITY_MODE_OFFSET 4
+#define SMB2_NEGOTIATE_REQ_RESERVED_OFFSET      6
+#define SMB2_NEGOTIATE_REQ_CAPABILITIES_OFFSET  8
+#define SMB2_NEGOTIATE_REQ_CLIENT_GUID_OFFSET   12
+#define SMB2_NEGOTIATE_REQ_CLIENT_START_OFFSET  28
+#define SMB2_NEGOTIATE_REQ_DIALECTS_OFFSET      36
+
+#define SMB2_NEGOTIATE_REQ_SIZE 36
+
+/* NEGOTIATE response (MS-SMB2 2.2.4). */
+#define SMB2_NEGOTIATE_RESP_STRUCT_SIZE_OFFSET   0
+#define SMB2_NEGOTIATE_RESP_SECURITY_MODE_OFFSET 2
+#define SMB2_NEGOTIATE_RESP_DIALECT_OFFSET       4
+#define SMB2_NEGOTIATE_RESP_SERVER_GUID_OFFSET   8
+#define SMB2_NEGOTIATE_RESP_CAPABILITIES_OFFSET  24
+#define SMB2_NEGOTIATE_RESP_MAX_TRANSACT_OFFSET  28
+#define SMB2_NEGOTIATE_RESP_MAX_READ_OFFSET      32
+#define SMB2_NEGOTIATE_RESP_MAX_WRITE_OFFSET     36
+
+#define SMB2_NEGOTIATE_RESP_SIZE 65
+#define SMB2_NEGOTIATE_RESP_MIN  64
+
+/* SESSION_SETUP request (MS-SMB2 2.2.5). */
+#define SMB2_SESSION_SETUP_REQ_STRUCT_SIZE_OFFSET   0
+#define SMB2_SESSION_SETUP_REQ_FLAGS_OFFSET         2
+#define SMB2_SESSION_SETUP_REQ_SECURITY_MODE_OFFSET 3
+#define SMB2_SESSION_SETUP_REQ_CAPABILITIES_OFFSET  4
+#define SMB2_SESSION_SETUP_REQ_CHANNEL_OFFSET       8
+#define SMB2_SESSION_SETUP_REQ_SEC_BUF_POS_OFFSET   12
+#define SMB2_SESSION_SETUP_REQ_SEC_BUF_LEN_OFFSET   14
+#define SMB2_SESSION_SETUP_REQ_PREV_SESSION_OFFSET  16
+
+#define SMB2_SESSION_SETUP_REQ_SIZE 24
+
+/* SESSION_SETUP response (MS-SMB2 2.2.6). */
+#define SMB2_SESSION_SETUP_RESP_STRUCT_SIZE_OFFSET   0
+#define SMB2_SESSION_SETUP_RESP_SESSION_FLAGS_OFFSET 2
+#define SMB2_SESSION_SETUP_RESP_SEC_BUF_POS_OFFSET   4
+#define SMB2_SESSION_SETUP_RESP_SEC_BUF_LEN_OFFSET   6
+
+#define SMB2_SESSION_SETUP_RESP_SIZE 9
+#define SMB2_SESSION_SETUP_RESP_MIN  8
+
+/* TREE_CONNECT request (MS-SMB2 2.2.9). */
+#define SMB2_TREE_CONNECT_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_TREE_CONNECT_REQ_FLAGS_OFFSET       2
+#define SMB2_TREE_CONNECT_REQ_PATH_POS_OFFSET    4
+#define SMB2_TREE_CONNECT_REQ_PATH_LEN_OFFSET    6
+
+#define SMB2_TREE_CONNECT_REQ_SIZE 8
+
+/* TREE_CONNECT response (MS-SMB2 2.2.10). */
+#define SMB2_TREE_CONNECT_RESP_STRUCT_SIZE_OFFSET    0
+#define SMB2_TREE_CONNECT_RESP_SHARE_TYPE_OFFSET     2
+#define SMB2_TREE_CONNECT_RESP_SHARE_FLAGS_OFFSET    4
+#define SMB2_TREE_CONNECT_RESP_CAPABILITIES_OFFSET   8
+#define SMB2_TREE_CONNECT_RESP_MAXIMAL_ACCESS_OFFSET 12
+
+#define SMB2_TREE_CONNECT_RESP_SIZE 16
+#define SMB2_TREE_CONNECT_RESP_MIN  16
+
+/* TREE_DISCONNECT request (MS-SMB2 2.2.11). */
+#define SMB2_TREE_DISCONNECT_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_TREE_DISCONNECT_REQ_RESERVED_OFFSET    2
+
+#define SMB2_TREE_DISCONNECT_REQ_SIZE 4
+
+/* CREATE request (MS-SMB2 2.2.13). */
+#define SMB2_CREATE_REQ_STRUCT_SIZE_OFFSET   0
+#define SMB2_CREATE_REQ_OPLOCK_OFFSET        3
+#define SMB2_CREATE_REQ_IMPERSONATION_OFFSET 4
+#define SMB2_CREATE_REQ_ACCESS_OFFSET        24
+#define SMB2_CREATE_REQ_ATTRS_OFFSET         28
+#define SMB2_CREATE_REQ_SHARE_ACCESS_OFFSET  32
+#define SMB2_CREATE_REQ_DISPOSITION_OFFSET   36
+#define SMB2_CREATE_REQ_OPTIONS_OFFSET       40
+#define SMB2_CREATE_REQ_NAME_POS_OFFSET      44
+#define SMB2_CREATE_REQ_NAME_LEN_OFFSET      46
+#define SMB2_CREATE_REQ_CONTEXT_POS_OFFSET   48
+#define SMB2_CREATE_REQ_CONTEXT_LEN_OFFSET   52
+
+#define SMB2_CREATE_REQ_SIZE 56
+
+/* CREATE response (MS-SMB2 2.2.14). */
+#define SMB2_CREATE_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_CREATE_RESP_WRITE_TIME_OFFSET  24
+#define SMB2_CREATE_RESP_ALLOC_SIZE_OFFSET  40
+#define SMB2_CREATE_RESP_END_OF_FILE_OFFSET 48
+#define SMB2_CREATE_RESP_FILE_ATTRS_OFFSET  56
+#define SMB2_CREATE_RESP_FILEID_OFFSET      64
+#define SMB2_CREATE_RESP_FILEID_VOL_OFFSET  72
+#define SMB2_CREATE_RESP_CONTEXT_POS_OFFSET 80
+#define SMB2_CREATE_RESP_CONTEXT_LEN_OFFSET 84
+
+#define SMB2_CREATE_RESP_SIZE 89
+#define SMB2_CREATE_RESP_MIN  88
+
+/* Header of one entry in a CREATE context chain (MS-SMB2 2.2.13.2); context names are padded out to an 8-byte boundary. */
+#define SMB2_CREATE_CTX_NEXT_OFFSET      0
+#define SMB2_CREATE_CTX_NAME_POS_OFFSET  4
+#define SMB2_CREATE_CTX_NAME_LEN_OFFSET  6
+#define SMB2_CREATE_CTX_DATA_POS_OFFSET  10
+#define SMB2_CREATE_CTX_DATA_LEN_OFFSET  12
+#define SMB2_CREATE_CTX_HEADER_SIZE      16
+#define SMB2_CREATE_CTX_NAME_PADDED_SIZE 8
+
+/* CLOSE request (MS-SMB2 2.2.15). */
+#define SMB2_CLOSE_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_CLOSE_REQ_FLAGS_OFFSET       2
+#define SMB2_CLOSE_REQ_FILEID_OFFSET      8
+#define SMB2_CLOSE_REQ_FILEID_VOL_OFFSET  16
+
+#define SMB2_CLOSE_REQ_SIZE 24
+
+/* CLOSE response (MS-SMB2 2.2.16). */
+#define SMB2_CLOSE_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_CLOSE_RESP_FLAGS_OFFSET       2
+#define SMB2_CLOSE_RESP_CREATION_OFFSET    8
+#define SMB2_CLOSE_RESP_LAST_ACCESS_OFFSET 16
+#define SMB2_CLOSE_RESP_LAST_WRITE_OFFSET  24
+#define SMB2_CLOSE_RESP_CHANGE_OFFSET      32
+#define SMB2_CLOSE_RESP_ALLOC_SIZE_OFFSET  40
+#define SMB2_CLOSE_RESP_EOF_OFFSET         48
+#define SMB2_CLOSE_RESP_ATTRIBS_OFFSET     56
+#define SMB2_CLOSE_RESP_SIZE               60
+
+/* FLUSH request (MS-SMB2 2.2.17). */
+#define SMB2_FLUSH_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_FLUSH_REQ_FILEID_OFFSET      8
+#define SMB2_FLUSH_REQ_FILEID_VOL_OFFSET  16
+
+#define SMB2_FLUSH_REQ_SIZE 24
+
+/* READ request (MS-SMB2 2.2.19). */
+#define SMB2_READ_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_READ_REQ_PADDING_OFFSET     2
+#define SMB2_READ_REQ_FLAGS_OFFSET       3
+#define SMB2_READ_REQ_LENGTH_OFFSET      4
+#define SMB2_READ_REQ_FILE_POS_OFFSET    8
+#define SMB2_READ_REQ_FILEID_OFFSET      16
+#define SMB2_READ_REQ_FILEID_VOL_OFFSET  24
+#define SMB2_READ_REQ_MIN_COUNT_OFFSET   32
+
+#define SMB2_READ_REQ_SIZE 48
+/* Value for the request's Padding field: the offset within the response at which the server should place the data, i.e. the
+ * packet header plus the fixed READ response, keeping the data 8-byte aligned.
+ */
+#define SMB2_READ_REQ_PADDING 0x50
+#define SMB2_READ_RESP_SIZE   17
+#define SMB2_READ_RESP_MIN    16
+
+/* READ response (MS-SMB2 2.2.20). */
+#define SMB2_READ_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_READ_RESP_DATA_POS_OFFSET    2
+#define SMB2_READ_RESP_DATA_LEN_OFFSET    4
+
+/* WRITE request (MS-SMB2 2.2.21). */
+#define SMB2_WRITE_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_WRITE_REQ_DATA_POS_OFFSET    2
+#define SMB2_WRITE_REQ_LENGTH_OFFSET      4
+#define SMB2_WRITE_REQ_FILE_POS_OFFSET    8
+#define SMB2_WRITE_REQ_FILEID_OFFSET      16
+#define SMB2_WRITE_REQ_FILEID_VOL_OFFSET  24
+
+#define SMB2_WRITE_REQ_SIZE 48
+
+/* WRITE response (MS-SMB2 2.2.22). */
+#define SMB2_WRITE_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_WRITE_RESP_COUNT_OFFSET       4
+#define SMB2_WRITE_RESP_SIZE               17
+#define SMB2_WRITE_RESP_MIN                16
+
+/* QUERY_INFO request (MS-SMB2 2.2.37). */
+#define SMB2_QUERY_INFO_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_QUERY_INFO_REQ_INFO_TYPE_OFFSET   2
+#define SMB2_QUERY_INFO_REQ_FILE_CLASS_OFFSET  3
+#define SMB2_QUERY_INFO_REQ_OUTPUT_LEN_OFFSET  4
+#define SMB2_QUERY_INFO_REQ_FILEID_OFFSET      24
+#define SMB2_QUERY_INFO_REQ_FILEID_VOL_OFFSET  32
+
+#define SMB2_QUERY_INFO_REQ_SIZE 40
+
+/* QUERY_INFO response (MS-SMB2 2.2.38). */
+#define SMB2_QUERY_INFO_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_QUERY_INFO_RESP_OUTPUT_POS_OFFSET  2
+#define SMB2_QUERY_INFO_RESP_OUTPUT_LEN_OFFSET  4
+
+#define SMB2_QUERY_INFO_RESP_SIZE 9
+#define SMB2_QUERY_INFO_RESP_MIN  8
+
+/* SET_INFO request (MS-SMB2 2.2.39). */
+#define SMB2_SET_INFO_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_SET_INFO_REQ_INFO_TYPE_OFFSET   2
+#define SMB2_SET_INFO_REQ_FILE_CLASS_OFFSET  3
+#define SMB2_SET_INFO_REQ_BUFFER_LEN_OFFSET  4
+#define SMB2_SET_INFO_REQ_BUFFER_POS_OFFSET  8
+#define SMB2_SET_INFO_REQ_FILEID_OFFSET      16
+#define SMB2_SET_INFO_REQ_FILEID_VOL_OFFSET  24
+
+#define SMB2_SET_INFO_REQ_SIZE 32
+
+/* QUERY_DIRECTORY request (MS-SMB2 2.2.33). */
+#define SMB2_QUERY_DIR_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_QUERY_DIR_REQ_FILE_CLASS_OFFSET  2
+#define SMB2_QUERY_DIR_REQ_FLAGS_OFFSET       3
+#define SMB2_QUERY_DIR_REQ_FILEID_OFFSET      8
+#define SMB2_QUERY_DIR_REQ_FILEID_VOL_OFFSET  16
+#define SMB2_QUERY_DIR_REQ_NAME_POS_OFFSET    24
+#define SMB2_QUERY_DIR_REQ_NAME_LEN_OFFSET    26
+#define SMB2_QUERY_DIR_REQ_OUTPUT_LEN_OFFSET  28
+
+#define SMB2_QUERY_DIR_REQ_SIZE 32
+
+/* QUERY_DIRECTORY response (MS-SMB2 2.2.34); the output buffer holds FileIdBothDirectoryInformation entries (see FILEBOTH_ below). */
+#define SMB2_QUERY_DIR_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_QUERY_DIR_RESP_OUTPUT_POS_OFFSET  2
+#define SMB2_QUERY_DIR_RESP_OUTPUT_LEN_OFFSET  4
+
+#define SMB2_QUERY_DIR_RESP_SIZE 9
+
+/* IOCTL request (MS-SMB2 2.2.31). */
+#define SMB2_IOCTL_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_IOCTL_REQ_CTL_CODE_OFFSET    4
+#define SMB2_IOCTL_REQ_FILEID_OFFSET      8
+#define SMB2_IOCTL_REQ_FILEID_VOL_OFFSET  16
+#define SMB2_IOCTL_REQ_INPUT_POS_OFFSET   24
+#define SMB2_IOCTL_REQ_INPUT_LEN_OFFSET   28
+#define SMB2_IOCTL_REQ_MAX_INPUT_OFFSET   32
+#define SMB2_IOCTL_REQ_OUTPUT_POS_OFFSET  36
+#define SMB2_IOCTL_REQ_OUTPUT_LEN_OFFSET  40
+#define SMB2_IOCTL_REQ_MAX_OUTPUT_OFFSET  44
+#define SMB2_IOCTL_REQ_FLAGS_OFFSET       48
+
+#define SMB2_IOCTL_REQ_SIZE 56
+
+/* IOCTL response (MS-SMB2 2.2.32). */
+#define SMB2_IOCTL_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_IOCTL_RESP_OUTPUT_POS_OFFSET  32
+#define SMB2_IOCTL_RESP_OUTPUT_LEN_OFFSET  36
+
+#define SMB2_IOCTL_RESP_SIZE 49
+#define SMB2_IOCTL_RESP_MIN  48
+
+/* VALIDATE_NEGOTIATE_INFO input and output (MS-SMB2 2.2.31.4, 2.2.32.6), carried in an IOCTL addressed to no file. */
+#define VNEG_REQ_CAPABILITIES_OFFSET   0
+#define VNEG_REQ_GUID_OFFSET           4
+#define VNEG_REQ_SECURITY_MODE_OFFSET  20
+#define VNEG_REQ_DIALECT_COUNT_OFFSET  22
+#define VNEG_REQ_DIALECTS_OFFSET       24
+#define VNEG_RESP_CAPABILITIES_OFFSET  0
+#define VNEG_RESP_GUID_OFFSET          4
+#define VNEG_RESP_SECURITY_MODE_OFFSET 20
+#define VNEG_RESP_DIALECT_OFFSET       22
+#define VNEG_RESP_SIZE                 24
+
+/* ECHO request (MS-SMB2 2.2.28), the keep-alive probe; the response carries no fields worth naming beyond its status. */
+#define SMB2_ECHO_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_ECHO_REQ_RESERVED_OFFSET    2
+
+#define SMB2_ECHO_REQ_SIZE 4
+
+/* CHANGE_NOTIFY request (MS-SMB2 2.2.35). */
+#define SMB2_CHANGE_NOTIFY_REQ_STRUCT_SIZE_OFFSET 0
+#define SMB2_CHANGE_NOTIFY_REQ_FLAGS_OFFSET       2
+#define SMB2_CHANGE_NOTIFY_REQ_OUTPUT_LEN_OFFSET  4
+#define SMB2_CHANGE_NOTIFY_REQ_FILEID_OFFSET      8
+#define SMB2_CHANGE_NOTIFY_REQ_FILEID_VOL_OFFSET  16
+#define SMB2_CHANGE_NOTIFY_REQ_FILTER_OFFSET      24
+
+#define SMB2_CHANGE_NOTIFY_REQ_SIZE 32
+
+/* CHANGE_NOTIFY response (MS-SMB2 2.2.36); the output buffer holds FILE_NOTIFY_INFORMATION entries (see NOTIFY_ below). */
+#define SMB2_CHANGE_NOTIFY_RESP_STRUCT_SIZE_OFFSET 0
+#define SMB2_CHANGE_NOTIFY_RESP_OUTPUT_POS_OFFSET  2
+#define SMB2_CHANGE_NOTIFY_RESP_OUTPUT_LEN_OFFSET  4
+
+#define SMB2_CHANGE_NOTIFY_RESP_SIZE 9
+#define SMB2_CHANGE_NOTIFY_RESP_MIN  8
+
+/* Where the symbolic link error payload starts within an ERROR response body (MS-SMB2 2.2.2), and the smallest payload accepted;
+ * a server returns it with STATUS_STOPPED_ON_SYMLINK when a path crosses a symlink it declines to follow.
+ */
+#define SMB2_SYMLINK_ERR_DATA_OFFSET 8
+#define SMB2_SYMLINK_ERR_MIN_LEN     28
+
+/* FileBasicInformation layout (MS-FSCC 2.4): four NT FILETIME timestamps then the attribute DWORD.  SET_INFO sends it to change a
+ * file's last-write time and attributes.
+ */
+#define FILEBASIC_LAST_WRITE_TIME_OFFSET 16
+#define FILEBASIC_FILE_ATTRIBUTES_OFFSET 32
+
+#define FILEBASIC_SIZE 40
+
+/* FileStandardInformation layout (MS-FSCC 2.4); only the two size QWORDs are consumed. */
+#define FILESTD_ALLOCATION_SIZE_OFFSET 0
+#define FILESTD_END_OF_FILE_OFFSET     8
+
+#define FILESTD_SIZE 24
+
+/* FileAttributeTagInformation layout (MS-FSCC 2.4.6): the attributes, then the reparse tag saying what kind of reparse point the
+ * object is.
+ */
+#define FILEATTRTAG_REPARSE_TAG_OFFSET 4
+
+#define FILEATTRTAG_SIZE 8
+
+/* FileEndOfFileInformation (MS-FSCC 2.4) is a single QWORD, set to extend or truncate a file. */
+#define FILEEOF_SIZE 8
+
+/* FileRenameInformation layout (MS-FSCC 2.4): a fixed header followed by the UTF-16LE target name.  MAX_BUFFER is this client's
+ * ceiling on header plus name, with room for the longest path a DOS name buffer can hold.
+ */
+#define FILERENAME_NAME_LEN_OFFSET 16
+#define FILERENAME_NAME_OFFSET     20
+
+#define FILERENAME_HDR_SIZE   20
+#define FILERENAME_MAX_BUFFER 532
+
+/* FileIdBothDirectoryInformation entry layout (MS-FSCC 2.4), the record format QUERY_DIRECTORY output is parsed as; entries
+ * chain via NextEntryOffset with the variable-length name last.
+ */
+#define FILEBOTH_NEXT_ENTRY_OFFSET       0
+#define FILEBOTH_FILE_INDEX_OFFSET       4
+#define FILEBOTH_CREATION_TIME_OFFSET    8
+#define FILEBOTH_LAST_ACCESS_TIME_OFFSET 16
+#define FILEBOTH_WRITE_TIME_OFFSET       24
+#define FILEBOTH_CHANGE_TIME_OFFSET      32
+#define FILEBOTH_END_OF_FILE_OFFSET      40
+#define FILEBOTH_ALLOC_SIZE_OFFSET       48
+#define FILEBOTH_FILE_ATTRIBUTES_OFFSET  56
+#define FILEBOTH_FILE_NAME_LEN_OFFSET    60
+#define FILEBOTH_EA_SIZE_OFFSET          64 // the reparse tag instead, when the entry is a reparse point (MS-FSCC 2.4.17)
+#define FILEBOTH_SHORT_NAME_LEN_OFFSET   68
+#define FILEBOTH_SHORT_NAME_OFFSET       70
+#define FILEBOTH_FILE_NAME_OFFSET        104
+
+/* FileFsFullSizeInformation layout (MS-FSCC 2.5), the source of the share's total and free space figures. */
+#define FSFULLSIZE_TOTAL_UNITS_OFFSET      0
+#define FSFULLSIZE_AVAIL_UNITS_OFFSET      8
+#define FSFULLSIZE_SECTORS_PER_UNIT_OFFSET 24
+#define FSFULLSIZE_BYTES_PER_SECTOR_OFFSET 28
+
+#define FSFULLSIZE_SIZE 32
+
+/* FILE_NOTIFY_INFORMATION entry layout (MS-FSCC 2.7.1), chained via NextEntryOffset in a CHANGE_NOTIFY output buffer. */
+#define NOTIFY_NEXT_ENTRY_OFFSET    0
+#define NOTIFY_ACTION_OFFSET        4
+#define NOTIFY_FILE_NAME_LEN_OFFSET 8
+#define NOTIFY_FILE_NAME_OFFSET     12
+
+/* Field offsets within the symbolic link error payload (MS-SMB2 2.2.2.2.1).  The substitute name in the trailing path buffer is
+ * the target actually followed; FLAG_RELATIVE marks it as relative to the link's parent rather than absolute.
+ */
+#define SYMLINK_UNPARSED_PATH_LEN_OFFSET   14
+#define SYMLINK_SUBSTITUTE_NAME_OFFSET     16
+#define SYMLINK_SUBSTITUTE_NAME_LEN_OFFSET 18
+#define SYMLINK_FLAGS_OFFSET               24
+#define SYMLINK_PATH_BUFFER_OFFSET         28
+
+#define SYMLINK_FLAG_RELATIVE 0x00000001
+
+/* Symlink reparse data buffer layout (MS-FSCC 2.1.2.4), as returned by FSCTL_GET_REPARSE_POINT; the tag below must identify the
+ * buffer as a symlink before this layout can be trusted.
+ */
+#define REPARSE_DATA_TAG_OFFSET          0
+#define REPARSE_DATA_SUB_NAME_OFF_OFFSET 8
+#define REPARSE_DATA_SUB_NAME_LEN_OFFSET 10
+#define REPARSE_DATA_FLAGS_OFFSET        16
+#define REPARSE_DATA_PATH_BUFFER_OFFSET  20
+
+#define REPARSE_DATA_MIN_LEN 20
+
+#define IO_REPARSE_TAG_SYMLINK 0xA000000C
+
+#endif

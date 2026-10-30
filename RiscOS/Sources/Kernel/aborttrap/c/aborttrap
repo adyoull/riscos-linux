@@ -1,0 +1,229 @@
+/*
+ * Copyright (c) 2021, RISC OS Open Ltd
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#include <stdlib.h>
+
+#include "aborttrap.h"
+#include "aterrors.h"
+
+#include "Global/RISCOS.h"
+
+#ifdef ABORTTRAP_DEBUG
+/* Note: Not re-entrant! */
+#define DOPROCESS(FUNC,OPCODE)\
+	logentry *l = &logbuf[logidx];\
+	aborttrap_reg_read_current(ctx,15,&l->pc);\
+	l->pc -= 8;\
+	l->psr = aborttrap_cpsr_read(ctx);\
+	l->opcode = OPCODE;\
+	l->result = FUNC(ctx,OPCODE);\
+	if(logbuf[(logidx-1)&(LOG_SIZE-1)].opcode != l->opcode)\
+		logidx = (logidx+1)&(LOG_SIZE-1);\
+	return l->result;
+#else
+#define DOPROCESS(FUNC,OPCODE)\
+	return FUNC(ctx,OPCODE);
+#endif
+
+edfsr_type dfsr_type;
+bool loadwritepc_interworking;
+
+#ifndef RISCOS_KERNEL
+#include "swis.h"
+
+uint32_t g_ProcessorFlags;
+extern void veneer(void);
+#endif
+
+static inline edfsr_type get_dfsr_type(void)
+{
+	uint32_t id;
+	/* Check the main ID register */
+	__asm
+	{
+	mrc p15,0,id,c0,c0,0
+	}
+	if ((id & 0xf0000) > 0x70000)
+		return dfsr_v6;
+	if ((id & ~0x8ff) == 0x69052400)
+		return dfsr_xscale;
+	return dfsr_v3;
+}
+
+static inline bool get_loadwritepc_interworking(void)
+{
+	uint32_t id;
+	/* Check the main ID register */
+	__asm
+	{
+	mrc p15,0,id,c0,c0,0
+	}
+	return (id & 0xf0000) >= 0x50000;
+}
+
+void aborttrap_init(void)
+{
+#ifdef MACHINE_LINUX
+	/* Linux port: RISC OS runs in user mode, where reading CP15 raises
+	   SIGILL. Linux hosts are ARMv7 or later. */
+	dfsr_type = dfsr_v6;
+	loadwritepc_interworking = true;
+	return;
+#endif
+	dfsr_type = get_dfsr_type();
+#ifndef RISCOS_KERNEL
+	_swix(OS_PlatformFeatures,_IN(0)|_OUT(0),OSPlatformFeatures_ReadCodeFeatures,&g_ProcessorFlags);
+#endif
+	loadwritepc_interworking = get_loadwritepc_interworking();
+}
+
+static inline _kernel_oserror *handler_arm(abtcontext_t *ctx)
+{
+	/* Load and process the instruction */
+	uint32_t pc;
+	aborttrap_reg_read_current(ctx,15,&pc);
+	DOPROCESS(aborttrap_arm,((uint32_t *)pc)[-2]);
+}
+
+static bool is_relevant_abort_v3(abtcontext_t *ctx)
+{
+	uint32_t dfsr = aborttrap_dfsr_read(ctx);
+	switch(dfsr & DFSRv3_FS)
+	{
+//	case DFSRv3_FS_ALIGNMENT0:
+//	case DFSRv3_FS_ALIGNMENT1:
+	case DFSRv3_FS_TRANSLATION_SECTION:
+	case DFSRv3_FS_TRANSLATION_PAGE:
+	case DFSRv3_FS_DOMAIN_SECTION:
+	case DFSRv3_FS_DOMAIN_PAGE:
+	case DFSRv3_FS_PERMISSION_SECTION:
+	case DFSRv3_FS_PERMISSION_PAGE:
+		return true;
+	}
+	return false;
+}
+
+static bool is_relevant_abort_xscale(abtcontext_t *ctx)
+{
+	uint32_t dfsr = aborttrap_dfsr_read(ctx);
+	if (dfsr & DFSRvX_D)
+		return false;
+	switch(dfsr & DFSRv3_FS)
+	{
+//	case DFSRv3_FS_ALIGNMENT0:
+//	case DFSRv3_FS_ALIGNMENT1:
+	case DFSRv3_FS_TRANSLATION_SECTION:
+	case DFSRv3_FS_TRANSLATION_PAGE:
+	case DFSRv3_FS_DOMAIN_SECTION:
+	case DFSRv3_FS_DOMAIN_PAGE:
+	case DFSRv3_FS_PERMISSION_SECTION:
+	case DFSRv3_FS_PERMISSION_PAGE:
+		return true;
+	}
+	return false;
+}
+
+static bool is_relevant_abort_v6(abtcontext_t *ctx)
+{
+	uint32_t dfsr = aborttrap_dfsr_read(ctx);
+	if (dfsr & DFSRv6_LPAE)
+	{
+		/* L1 should be irrelevant */
+		switch(dfsr & DFSRv6_STATUS)
+		{
+		case DFSRv6_STATUS_TRANSLATION_L2:
+		case DFSRv6_STATUS_TRANSLATION_L3:
+		case DFSRv6_STATUS_PERMISSION_L2:
+		case DFSRv6_STATUS_PERMISSION_L3:
+//		case DFSRv6_STATUS_ALIGNMENT:
+		case DFSRv6_STATUS_DOMAIN_L2:
+		case DFSRv6_STATUS_DOMAIN_L3:
+			return true;
+		}
+	}
+	else
+	{
+		switch(dfsr & DFSRv6_FS)
+		{
+//		case DFSRv6_FS_ALIGNMENT:
+		case DFSRv6_FS_TRANSLATION_L1:
+		case DFSRv6_FS_TRANSLATION_L2:
+		case DFSRv6_FS_DOMAIN_L1:
+		case DFSRv6_FS_DOMAIN_L2:
+		case DFSRv6_FS_PERMISSION_L1:
+		case DFSRv6_FS_PERMISSION_L2:
+			return true;
+		}
+	}
+	return false;
+}
+
+_kernel_oserror *aborttrap_handler(abtcontext_t *ctx)
+{
+	/* Must be a suitable abort type */
+	bool relevant = false;
+	switch(dfsr_type)
+	{
+	case dfsr_v3:
+		relevant = is_relevant_abort_v3(ctx);
+		break;
+	case dfsr_xscale:
+		relevant = is_relevant_abort_xscale(ctx);
+		break;
+	case dfsr_v6:
+		relevant = is_relevant_abort_v6(ctx);
+		break;
+	}
+	if (!relevant)
+		return aborttrap_ERROR_UNHANDLED;
+	/* Must be ARM instruction set & LE memory accesses */
+	uint32_t psr = aborttrap_cpsr_read(ctx);
+	if((psr & (PSR_E + PSR_ISET)) != PSR_ISET_ARM)
+		return aborttrap_ERROR_UNHANDLED;
+	/* Else we can probably do something about it */
+	return handler_arm(ctx);
+}
+
+/* Load-acquire/store-release, load/store exclusive, and execute access */
+_kernel_oserror *aborttrap_MemMap(abtcontext_t *ctx,uint32_t addr,int len,int align,int flags)
+{
+	/* All accesses need to be aligned */
+	if (addr & align)
+		return aborttrap_ERROR(Alignment);
+	/* Supplied flags are for unprivileged access; bump up to privileged if needed */
+	if (aborttrap_cpsr_read(ctx) & 0xf)
+		flags *= AbortTrap_MemMap_PrivX/AbortTrap_MemMap_UserX;
+	_kernel_oserror *e = aborttrap_mem_access(NULL,addr,len,flags | AbortTrap_Reason_MemMap);
+	if (e)
+		return e;
+	/* Wind back PC 8 bytes so that the instruction is retried */
+	uint32_t pc;
+	aborttrap_reg_read_current(ctx, 15, &pc);
+	pc -= 8;
+	aborttrap_reg_write_current(ctx, 15, pc);
+	return NULL;
+}

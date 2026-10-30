@@ -1,0 +1,78 @@
+| BuildROM: build the ROM image for RISC OS on Linux (RISCOS.IMG) on a
+| Raspberry Pi running RISC OS, with RISC OS Open's DDE.
+|
+| Before running it:
+|  - the DDE installed as its ReadMe says (AcornC/C++ beside !Boot, and
+|    Developer.!SysMerge run), and AcornC/C++.!SetPaths seen by the Filer
+|    (or run), so that cc, objasm, link and amu are on Run$Path;
+|  - this folder (ROLSrc) on a hard disc or SD card (not RAM:), with about
+|    1GB free for the build.
+|
+| Run it from a task window (Ctrl-F12) or the command line (F12):
+|    *Obey <path>.ROLSrc.BuildROM
+| That does all the phases. To redo only some of them, list them, e.g.
+|    *Obey <path>.ROLSrc.BuildROM rom install_rom join
+|
+| The result is ROLSrc.RiscOS.Images.rom: copy it to the Linux card as
+| /opt/riscos/RISCOS.IMG (keep the old one). The log is ROLSrc.BuildLog.
+|
+| Adapted from Unix.LinuxSupport.Build (Timothy Baldwin, Apache 2.0),
+| which does the same inside RISC OS for Linux.
+
+Set ROLSrc$Dir <Obey$Dir>
+If "<SetPaths$Dir>" = "" Then Error Let the Filer see AcornC/C++.!SetPaths (or run it) first: the DDE's tools must be on Run$Path
+RMEnsure UtilityModule 5.00 Error RISC OS 5 is needed
+IfThere <ROLSrc$Dir>.RiscOS.BuildSys.Components.ROOL.Linux Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Error BuildROM must be in ROLSrc, beside the RiscOS and mixed folders
+
+| Files that have gone missing in unzipping before now
+IfThere <ROLSrc$Dir>.RiscOS.Sources.Programmer.HdrSrc.hdr.IO.IOMD Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Error ROLSrc.RiscOS.Sources.Programmer.HdrSrc.hdr.IO.IOMD is missing: unzip ROLSrc again
+IfThere <ROLSrc$Dir>.RiscOS.Sources.Lib.CLXLite.c.wildcard Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Error ROLSrc.RiscOS.Sources.Lib.CLXLite.c.wildcard is missing: unzip ROLSrc again
+IfThere <ROLSrc$Dir>.RiscOS.Sources.Lib.CLXLite.h.wildcard Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Error ROLSrc.RiscOS.Sources.Lib.CLXLite.h.wildcard is missing: unzip ROLSrc again
+
+
+WimpSlot 32M
+Set Wimp$ScrapDir <ROLSrc$Dir>.Scrap
+CDir <Wimp$ScrapDir>
+
+Dir <ROLSrc$Dir>.RiscOS
+
+Set Alias$IconSprites ||
+Set Alias$egrep grep -E %%*0
+Set Alias$Unix.egrep grep -E %%*0
+Set Build$Image rom
+Set Build$Imagename rom
+SetEval SOURCE_DATE_EPOCH 0
+X Do SetEval ROOL$MaxJobs 1
+
+Set ROLSrc$DDECLib <CLIB$Path>
+Obey <ROLSrc$Dir>.RiscOS.Env.ROOL.Linux
+| Host tools (built and run on this machine during the build) link with
+| Build$HostLibs. RISC OS Open's build fills Library.Acorn.HostLibs from a
+| separate BuildHost build; without that, use the DDE's own libraries.
+| (ROLSrc$DDECLib is the DDE's CLIB$Path, saved before Env.ROOL.Linux
+| replaced it.)
+IfThere <Build$HostLibs>.CLib.o.stubs Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Set Build$HostLibs <ROLSrc$DDECLib>^
+IfThere <Build$HostLibs>.CLib.o.stubs Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Set Build$HostLibs <C/C++$Dir>.Export.APCS-32.Lib
+IfThere <Build$HostLibs>.CLib.o.stubs Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Set Build$HostLibs <SetPaths$Dir>.^.Export.APCS-32.Lib
+IfThere <Build$HostLibs>.CLib.o.stubs Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Set Build$HostLibs <SetPaths$Dir>.^.Libraries
+IfThere <Build$HostLibs>.CLib.o.stubs Then Set ROLSrc$OK 1 Else Set ROLSrc$OK 0
+If ROLSrc$OK = 0 Then Error Can't find the DDE's C library (CLib.o.stubs). Tried <ROLSrc$DDECLib>^ and under <SetPaths$Dir>.^ (Export.APCS-32.Lib, Libraries)
+Echo Host tools use <Build$HostLibs>
+| RISC OS Open's srcbuild itself (not any srcbuild wrapper earlier on the path).
+| The phases are written out in full: srcbuild doesn't expand <variables>
+| in its arguments.
+Spool <ROLSrc$Dir>.BuildLog
+If "%*0" = "" Then /<ROLSrc$Dir>.RiscOS.Library.Build.srcbuild -s export_hdrs export_libs resources rom install_rom join
+If "%*0" <> "" Then /<ROLSrc$Dir>.RiscOS.Library.Build.srcbuild -s %*0
+Spool
+Echo
+Echo Finished. If there were no errors (see <ROLSrc$Dir>.BuildLog)
+Echo the ROM is <ROLSrc$Dir>.RiscOS.Images.rom

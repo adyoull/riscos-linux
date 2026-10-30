@@ -1,0 +1,90 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+*  Lan Manager client
+*
+*  Printers.H - Header for Printers.c exports
+*
+*/
+
+struct JobStatus {
+  int lclstatus;
+  int lclcount;
+  int lclerror;
+  int rmtstatus;
+  int rmtcount;
+  int rmterror;
+};
+
+/* Start a print job: connect to the printer share, or reuse a connection to it, and open a spool file there. */
+extern err_t Prn_CreateJob(char *servname, char *prnname, char *userid, char *passwd, int *jobid_out);
+
+/* Write data to a print job's spool file, adding its length to the count Prn_GetJobStatus reports.
+ *
+ * Parameters:
+ *   jobid    job handle from Prn_CreateJob
+ *   data     data to write
+ *   datalen  number of bytes to write
+ *
+ * Returns: OK, EBADPARAM if the job is not valid or not open, or the error from the server.
+ */
+extern err_t Prn_WriteData(int jobid, char *data, int datalen);
+
+/* Close a print job's spool file, letting the server print it; the job keeps its share until Prn_ClearJob.
+ *
+ * Closing a spool file cannot abort the job on the server, so `abort` changes only the status Prn_GetJobStatus reports.
+ *
+ * Parameters:
+ *   jobid  job handle from Prn_CreateJob
+ *   abort  true to report the job as aborted rather than complete
+ *
+ * Returns: OK, EBADPARAM if the job is not valid or not open, or the error from the server.
+ */
+extern err_t Prn_CloseJob(int jobid, bool abort);
+
+/* Report a print job's status and the number of bytes written to it.
+ *
+ * The status is OmniClient's code: 3 open and empty, 5 open with data, 7 complete, 11 aborted.  The remote fields are
+ * zero, because the server is not asked about the job.
+ *
+ * Parameters:
+ *   jobid  job handle from Prn_CreateJob
+ *   pJS    receives the status
+ *
+ * Returns: OK, or EBADPARAM if the job is not valid.
+ */
+extern err_t Prn_GetJobStatus(int jobid, struct JobStatus *pJS);
+
+/* Release a print job, closing its spool file first if it is still open, and disconnect its share if no other job uses it.
+ *
+ * Parameters:
+ *   jobid  job handle from Prn_CreateJob, or 0 to release every job that is no longer open
+ *
+ * Returns: OK, or EBADPARAM if the job is not valid.
+ */
+extern err_t Prn_ClearJob(int jobid);
+
+/* Empty the job list and reset the job serial number.
+ *
+ * Returns: true always.
+ */
+extern bool Prn_Init(void);
+
+/* Free the job list when the module is finalised, leaving the shares alone.
+ *
+ * Every job handle is made invalid before its memory is freed, but a handle used afterwards still points at freed
+ * memory.  The list is left empty, so a second call frees nothing.
+ */
+extern void Prn_Shutdown(void);

@@ -1,0 +1,67 @@
+; Copyright 2002 Pace Micro Technology plc
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+;-*- Mode: Assembler -*-
+;
+; Copyright (C) Acorn Computers Ltd., 1989.
+;
+; DO NOT ADD ENTRIES TO EXISTING CHUNKS WHICH HAVE BEEN RELEASED TO USERS!
+; Old versions of CLib will plant a ticking time bomb in apps by filling the
+; entries with garbage.
+;
+
+        ; Originally introduced in CLib 5.45
+        Entry   atoll, imported, , unveneered
+        Entry   strtoll, imported, , unveneered
+        Entry   strtoull, imported, , unveneered
+        Entry   imaxabs, , , unveneered
+        Entry   imaxdiv, , , unveneered
+        Entry   strtoimax, imported, , unveneered
+        Entry   strtoumax, imported, , unveneered
+
+        ; Originally introduced in CLib 5.46
+        Entry   __assert2, imported, , unveneered
+        Entry   _Exit, imported, , unveneered
+
+        ; Originally introduced in CLib 5.49
+        Entry   isblank, imported, , unveneered
+        Entry   strtof, imported, , unveneered
+
+        ; Large file 64b offsets, originally introduced in CLib 5.64
+        ;       RISC OS 5.18; DDE 23
+        Entry   _fgetpos64, imported, , unveneered
+        Entry   _fopen64, imported, , unveneered
+        Entry   _freopen64, imported, , unveneered
+        Entry   _fseeko64, imported, , unveneered
+        Entry   _fsetpos64, imported, , unveneered
+        Entry   _ftello64, imported, , unveneered
+        Entry   _tmpfile64, imported, , unveneered
+
+        ; C11, originally introduced in CLib 6.05
+        ;       RISC OS 5.28; DDE 29c
+        Entry   aligned_alloc, imported, , unveneered
+        Entry   at_quick_exit, imported, , unveneered
+        Entry   quick_exit, imported, , unveneered
+        Entry   timespec_get, imported, , unveneered
+
+        ; Originally introduced in CLib 6.13
+        ;       RISC OS > 5.29; DDE 31a
+        Entry   _vswi, imported, , unveneered
+        Entry   _vswix, imported, , unveneered
+
+        ; Originally introduced in CLib 6.20
+        ;       RISC OS > 5.29; DDE > 31b
+        Entry   _clib_at_destruction, imported, , unveneered
+
+        END

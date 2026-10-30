@@ -1,0 +1,28 @@
+# Makefile fragment for C and assembler transient utilties
+
+INCLUDED_CUTIL = YES
+
+# This makefile provides the following phony targets:
+#
+#    all  install  debug
+#
+# It inherits most of its properties from the CApp makefile.
+
+CUSTOMLINK = custom
+
+# Include StdTools first so we can override the suffix on the
+# dependency of 'all' and 'standalone' before they are defined
+include StdTools
+SUFFIX_ABSOLUTE = ${SUFFIX_UTILITY}
+
+include CApp
+
+# You can't currently use the shared C library from a transient
+UTIL_LIBS := $(filter-out ${CLIB},${APP_LIBS}) ${ANSILIB}
+
+CFLAGS  += ${C_NO_ZI} ${C_NO_STKCHK}
+LDFLAGS += -util
+${TARGET}${SUFFIX_UTILITY}: ${APP_OBJS_} ${UTIL_LIBS} ${DIRS}
+	${LD} ${LDFLAGS} -o ${TARGET}${SUFFIX_UTILITY} ${APP_OBJS_} ${UTIL_LIBS}
+
+# EOF

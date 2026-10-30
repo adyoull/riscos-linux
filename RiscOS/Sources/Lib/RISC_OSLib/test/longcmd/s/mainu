@@ -1,0 +1,68 @@
+; Copyright 2023 RISC OS Open Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+
+        ; You'll often see these prefixed with Hdr: for historic reasons.
+        ; This is no longer necessary, and in fact omitting them makes it
+        ; possible to cross-compile your source code.
+        GET     ListOpts
+        GET     Macros
+        GET     System
+        GET     DDEUtils
+
+        AREA    |!!!|, CODE, READONLY, PIC
+
+        IMPORT  __RelocCode
+        IMPORT  mainu
+
+        EXPORT  __main
+        EXPORT  ddeutils_setclsize
+        EXPORT  ddeutils_setcl
+        EXPORT  ddeutils_flushcl
+
+        ENTRY
+
+__main
+        ; Main entry point
+        ; Called with:
+        ; R0 = command line
+        ; R1 = command line tail
+        ; R12 = 1K workspace
+        ; R13 = workspace end & SP
+        ; R14 = return address
+        STMFD   R13!,{R0,R1,R14}
+        BL      __RelocCode ; Corrupts fp
+        LDMFD   R13!,{R0,R1}
+        MOV     R11,#0
+        BL      mainu
+        CMP     R0,#0
+        SETV    NE
+        LDR     PC,[R13],#4
+
+ddeutils_setclsize
+        SWI     XDDEUtils_SetCLSize
+        MOVVC   r0, #0
+        MOV     pc, lr
+
+ddeutils_setcl
+        SWI     XDDEUtils_SetCL
+        MOVVC   r0, #0
+        MOV     pc, lr
+
+ddeutils_flushcl
+        SWI     XDDEUtils_FlushCL
+        MOVVC   r0, #0
+        MOV     pc, lr
+
+        END

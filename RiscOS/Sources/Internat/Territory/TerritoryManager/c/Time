@@ -1,0 +1,537 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <ctype.h>
+#include "swis.h"
+
+#include "Global/NewErrors.h"
+#include "Global/CMOS.h"
+#include "Global/OsBytes.h"
+#include "Global/OsWords.h"
+#include "Interface/Territory.h"
+#include "DebugLib/DebugLib.h"
+
+#include "MsgCode.h"
+#include "TerrMgrInt.h"
+#include "Daylight.h"
+#include "Time.h"
+
+/*!
+ * \brief  Set the time from an OS_Word block
+ * \param  block Pointer to OS_Word 15,5 parameter block
+ * \return Error block pointer
+ */
+_kernel_oserror *time_setthehardway(const uint8_t *block)
+{
+	_kernel_oserror *err;
+	char convert[100];
+
+	/* Get string into a scratch buffer */
+	err = _swix(Territory_ConvertDateAndTime, _INR(0,4), CURRENT_TERRITORY,
+	            &block[1], &convert[1], sizeof(convert) - 1,
+	            "%W3,%DY %M3 %CE%YR.%24:%MI:%SE");
+	if (err == NULL)
+	{
+		dprintf(("", "Time string is %s\n", &convert[1]));
+
+		/* Now set the clock */
+		convert[0] = OWWriteRTC_TimeDate;
+		err = _swix(OS_Word, _INR(0,1), OsWord_WriteRealTimeClock, convert);
+	}
+	return err;
+}
+
+/*!
+ * \brief  Find which timezone within the territory is current
+ * \param  utcoffset Returns the centisecond offset of the zone
+ * \return The timezone within the current territory, or -1 if custom
+ */
+size_t which_timezone(int32_t *offset)
+{
+	_kernel_oserror *err;
+	uint32_t extended;
+	int32_t  setting;
+	size_t   tz = 0;
+
+	*offset = 0; /* In case of error */
+
+	err = _swix(OS_Byte, _INR(0,1) | _OUT(2), OsByte_ReadCMOS,
+	            TimeZoneCMOS, &setting);
+	if (err != NULL) return UNKNOWN_INDEX;
+
+	/* Sign extend, units are quarter hours */
+	setting = 15 * 60 * 100 * ((setting << 24) >> 24);
+
+	/* Loop over all timezones in this territory */
+	while (1)
+	{
+		err = _swix(Territory_ReadTimeZones, _INR(0,1) | _IN(4) | _OUT(2) | _OUT(4),
+		            CURRENT_TERRITORY, tz, ReadTimeZones_Extension,
+		            offset, &extended);
+		if (err != NULL) break;
+
+		if (*offset == setting)
+		{
+			/* The centiseconds match, take it */
+			return tz;
+		}
+
+		/* Loop if the extended API is supported */
+		if (extended != 0) break;
+		tz++;
+	}
+
+	*offset = setting; /* No match, assume custom */
+
+	return UNKNOWN_INDEX;
+}
+
+/*!
+ * \brief  Set the 5 byte time
+ * \param  block Pointer to 5 byte centisecond time
+ * \return Error block pointer
+ */
+_kernel_oserror *time_set(const uint8_t *time5)
+{
+	_kernel_oserror *err;
+	uint8_t block[1 + 5];
+
+	/* Store reason code and copy time block in */
+	block[0] = OWWriteRTC_5ByteInt;
+	memcpy(&block[1], time5, 5);
+
+	/* We call OS_Word 15,5 to set the time, as it allows greater accuracy.
+	 * If the kernel doesn't support it, it'll bounce to the unknown OS_Word
+	 * service call and end up at time_setthehardway() instead.
+	 */
+	err = _swix(OS_Word, _INR(0,1), OsWord_WriteRealTimeClock, block);
+	if (err == NULL)
+	{
+		err = daylight_switch_check();
+	}
+	return err;
+}
+
+/*!
+ * \brief  Case insensitively compare timezone names, which may not be zero terminated
+ * \param  s1 First name
+ * \param  s2 Second name
+ * \return True if the names match
+ */
+static bool cmp_tz_names(const char *s1, const char *s2)
+{
+	while ((*s1 > ' ') && (*s2 > ' '))
+	{
+		int ch1 = *s1, ch2 = *s2;
+
+		if (tolower(ch1) == tolower(ch2))
+		{
+			s1++;
+			s2++;
+			continue;
+		}
+		break;
+	}
+
+	/* Mismatch, or reached a control character. Consider names equal
+	 * if both characters were a terminating character.
+	 */
+	return ((*s1 <= ' ') && (*s2 <= ' '));
+}
+
+/*!
+ * \brief  Ask the territory if the timezone is one it knows about
+ * \param  arg Pointer to timezone text, may not be zero terminated
+ * \return True if matched in the current territory
+ */
+bool time_configtimezone(const char *arg)
+{
+	_kernel_oserror *err;
+	const char *stdname, *dstname;
+	int32_t  stdoffset;
+	uint32_t extended;
+	uint8_t  setting;
+	size_t   tz = 0;
+
+	if (arg == NULL) return false; /* No syntax to print */
+
+	/* Loop over all timezones in this territory */
+	while (1)
+	{
+		err = _swix(Territory_ReadTimeZones, _INR(0,1) | _IN(4) | _OUTR(0,2) | _OUT(4),
+		            CURRENT_TERRITORY, tz, ReadTimeZones_Extension,
+		            &stdname, &dstname, &stdoffset, &extended);
+		if (err != NULL) return false;
+
+		if (cmp_tz_names(arg, stdname))
+		{
+			/* Match on standard timezone => NoDST and not auto */
+			setting = 0;
+			break;
+		}
+		if (cmp_tz_names(arg, dstname))
+		{
+			/* Match on daylight saving timezone => DST and not auto */
+			setting = DSTCMOSBit;
+			break;
+		}
+
+		/* Loop if the extended API is supported */
+		if (extended != 0) return false;
+		tz++;
+	}
+
+	/* Since this command has matched on the territory specific timezone
+	 * name this writes the timezone CMOS too.
+	 * It also sets/clears the DST flag, and turns off auto DST adjustments.
+	 */
+	daylight_modify_cmos(0, setting);
+
+	/* Write back timezone in 15 minute units */
+	_swix(OS_Byte, _INR(0,2), OsByte_WriteCMOS, TimeZoneCMOS, stdoffset / 15);
+
+	return (daylight_switch_check() == NULL);
+}
+
+/*!
+ * \brief  Read the current timezone
+ * \param  key Possible extended API key
+ * \param  name Pointer to return name of the timezone in
+ * \param  offset Variable filled with the signed offset in centiseconds
+ * \param  tz Variable possibly filled with the timezone within territory
+ * \return Error block pointer
+ */
+_kernel_oserror *time_currentzone(uint32_t key, const char **name, int32_t *offset, size_t *tz)
+{
+	_kernel_oserror *err;
+	const char *dstname;
+	int32_t dstoffset;
+	size_t  which;
+	bool    dst;
+
+	which = which_timezone(offset);
+	dst = (daylight_modify_cmos(DSTCMOSBit | AutoDSTCMOSBit, 0) & DSTCMOSBit) != 0;
+	if (key == ReadTimeZones_Extension) *tz = which;
+
+	if (which == UNKNOWN_INDEX)
+	{
+		/* Can't comment further than 'custom' */
+		*name = message_custom;
+		if (dst) *offset += ticksperhour; /* Assume DST is fixed +1h */
+		return NULL;
+	}
+	err = _swix(Territory_ReadTimeZones, _INR(0,1) | _IN(4) | _OUTR(0,1) | _OUT(3),
+	            CURRENT_TERRITORY, which, ReadTimeZones_Extension,
+	            name, &dstname, &dstoffset);
+	if (err == NULL)
+	{
+		if (dst)
+		{
+			/* Summer time */
+			*name = dstname;
+			*offset = dstoffset;
+		}
+	}
+	return err;
+}
+
+/*!
+ * \brief  General purpose time block converter
+ * \param  territory Territory to apply rules to if taking daylight and timezone into account
+ * \param  in Input block
+ * \param  out Output block
+ * \param  option Flags and option selection
+ *                b0-7: Input block is
+ *                       0 = local ordinals
+ *                       1 = local 5 byte time
+ *                       2 = UTC ordinals
+ *                       3 = UTC 5 byte time
+ *                       4-  reserved
+ *                b8-15: Output block format (see b0-7)
+ *                b16:   Convert as though DST was in use
+ *                b17:   If DST calculation (b18) is unavailable, use "NoDST" instead of erroring
+ *                b18:   Calculate if DST was in use and adjust b16 automatically
+ *                b19:   Treat R4 as a signed time adjust in centiseconds
+ *                b20-31:Reserved
+ * \param  tz Timezone within the current territory for local times (or adjustment if b19 set)
+ * \return Error block pointer
+ */
+_kernel_oserror *time_convertformats(tanumber_t territory, void *in, void *out, uint32_t option, size_t tz)
+{
+	uint8_t inoption, outoption;
+	int64_t t = 0;
+	int32_t offset;
+
+	/* Reject bad flags */
+	if (option & 0xFCFC) return messages_errorlookup(ErrorNumber_OutOfRange, "UnkSub");
+	inoption = (uint8_t)(option >> TimeFormats_InFormatShift);
+	outoption = (uint8_t)(option >> TimeFormats_OutFormatShift);
+
+	/* All conversions go via 5 byte (even ordinals to ordinals since
+	 * the user may be finding the missing d-o-w or d-o-y values).
+	 */
+	if ((inoption == TimeFormats_LocalOrdinals) || (inoption == TimeFormats_UTCOrdinals))
+	{
+		/* At present, only Gregorian ordinals are understood. If a territory
+		 * turns up that doesn't use this the local ordinal <-> 5 byte calcs
+		 * will need to go via the territory module in a new ordinal translating SWI.
+		 */
+		if (!time_ordinals_40b(in, (uint8_t *)&t))
+		{
+			return messages_errorlookup(TerritoryError_BadTimeBlock, "BadTime");
+		}
+	}
+	else
+	{
+		/* Import the 5 byte time directly */
+		IMPORT40b(t, in);
+	}
+
+	/* Mix %0000ooii (definitely range checked as 2 bits), except by this
+	 * point the input format is always a 5 byte time reducing to %00000ooi.
+	 */
+	switch ((outoption << 1) | (inoption >> 1))
+	{
+		case 0: /* %000x Local -> Local ordinals */
+		case 5: /* %101x UTC   -> UTC ordinals */
+			time_40b_ordinals((uint8_t *)&t, out);
+			return NULL;
+
+		case 1: /* %001x UTC   -> Local ordinals */
+		case 3: /* %011x UTC   -> Local 5 byte */
+		case 4: /* %100x Local -> UTC ordinals */
+		case 6: /* %110x Local -> UTC 5 byte */
+			break;
+
+		case 2: /* %010x Local -> Local 5 byte */
+		case 7: /* %111x UTC   -> UTC 5 byte */
+			memcpy(out, &t, 5);
+			return NULL;
+	}
+
+	/* Sign extend */
+	t = (t << 24) >> 24;
+
+	/* Some kind of localisation needed */
+	if (option & TimeFormats_Flag_SpecifyOffset)
+	{
+		if (option & (TimeFormats_Flag_UseAutoDST | TimeFormats_Flag_UseStdIfNoAuto))
+		{
+			/* Can't have those flags when offset is supplied */
+			return messages_errorlookup(ErrorNumber_OutOfRange, "UnkSub");
+		}
+		offset = (int32_t)tz;
+		if (option & TimeFormats_Flag_DST)
+		{
+			offset += ticksperhour; /* Assume DST is fixed +1h */
+		}
+	}
+	else
+	{
+		_kernel_oserror *err;
+		uint32_t dston = 0; /* Pretend it's standard time */
+		int32_t  stdoffset, dstoffset;
+
+		/* Given a timezone-within-territory */
+		if (option & TimeFormats_Flag_UseAutoDST)
+		{
+			/* Attempt auto DST correction */
+			err = _swix(Territory_DaylightSaving, _INR(0,3) | _OUT(0),
+			            DaylightSaving_ApplyRuleToTime, territory, tz, &t,
+			            &dston);
+			if ((err != NULL) && !(option & TimeFormats_Flag_UseStdIfNoAuto))
+			{
+				return err; /* Propagate the error */
+			}
+			if (dston)
+			{
+				option |= TimeFormats_Flag_DST;
+			}
+			else
+			{
+				option &= ~TimeFormats_Flag_DST;
+			}
+		}
+
+		/* Lookup the timezone offset */
+		err = _swix(Territory_ReadTimeZones, _INR(0,1) | _IN(4) | _OUTR(2,3),
+		            territory, tz, ReadTimeZones_Extension, &stdoffset, &dstoffset);
+		if (err != NULL) return err;
+
+		/* Select daylight saving or standard time and adjust */
+		offset = (option & TimeFormats_Flag_DST) ? dstoffset : stdoffset;
+	}
+
+	/* Apply the localisation */
+	if ((outoption == TimeFormats_UTCOrdinals) || (outoption == TimeFormats_UTC5Byte))
+	{
+		offset = -offset; /* Local -> UTC subtracts the offset */
+	}
+	t = t + offset;
+
+	/* Final output stage */
+	if ((outoption == TimeFormats_UTCOrdinals) || (outoption == TimeFormats_LocalOrdinals))
+	{
+		time_40b_ordinals((uint8_t *)&t, out);
+	}
+	else
+	{
+		memcpy(out, &t, 5);
+	}
+	return NULL;
+}
+
+#define DAYS_IN_20thC     ((100 * 365) + 24)
+#define LEAP_DAYS_UPTO(y) ((y / 4) - (y / 100) + (y / 400))
+                                    /*  J  F  M  A  M  J  J  A  S  O  N  D */
+static const uint8_t monthlen[13] = { 0,31,28,31,30,31,30,31,31,30,31,30,31 };
+
+/*!
+ * \brief  Convert ordinals to 5 byte time
+ * \param  ordinals Pointer to ordinals
+ * \param  block Block to return equivalent 40 bit centisecond time since 1900
+ * \return True if conversion succeeded
+ */
+bool time_ordinals_40b(const ordmin_t *ordinals, uint8_t *block)
+{
+	int64_t   t;
+	int32_t   year, month, days, time;
+	uint32_t *words;
+
+	/* Accumulate the easy part (time of day) */
+	time = (ordinals->hours * ticksperhour) +
+	       (ordinals->mins  * ticksperminute) +
+	       (ordinals->secs  * tickspersecond) +
+	       ordinals->centis;
+	t = time;
+
+	/* Fault grossly invalid dates */
+	year = ordinals->year;
+	if (((unsigned)ordinals->day > 31) ||
+	    ((unsigned)ordinals->month > 12) ||
+	    (year < 1900) || (year > 2300))
+	{
+		return false;
+	}
+
+	/* Whole years of days since the epoch */
+	days = (year - 1900) * 365;
+	if (ordinals->month <= 2)
+	{
+		/* Exclude this year since can't possibly have had a leap day yet */
+		year--;
+	}
+	days += (LEAP_DAYS_UPTO(year) - LEAP_DAYS_UPTO(1900));
+
+	/* Completed months */
+	for (month = ordinals->month - 1; month > 0; month--)
+	{
+		days += monthlen[month];
+	}
+	days += (ordinals->day - 1);
+
+	/* Accumulate */
+	t += ((int64_t)days * ticksperday);
+
+	/* Final check for 40b overflow, else copy the result */
+	words = (uint32_t *)&t;
+	if (words[1] >> 8) return false;
+	memcpy(block, &t, 5);
+
+	return true;
+}
+
+/*!
+ * \brief  Convert a 5 byte time to ordinals
+ * \param  block Pointer to a 40 bit centisecond time since 1900
+ * \param  ordinals Block to update with ordinals
+ * \return Nothing
+ */
+void time_40b_ordinals(const uint8_t *block, ordfull_t *ordinals)
+{
+	int64_t  t;
+	uint32_t i, f; /* Integer and fractional days */
+	int32_t  dow, century, year, month, len;
+	bool     isleap;
+
+	/* Assume input block may be misaligned */
+	IMPORT40b(t, block);
+
+	/* Split */
+	i = (uint32_t)(t / ticksperday);
+	f = (uint32_t)(t % ticksperday);
+
+	ordinals->hours  = f / ticksperhour;   f = f % ticksperhour;
+	ordinals->mins   = f / ticksperminute; f = f % ticksperminute;
+	ordinals->secs   = f / tickspersecond; f = f % tickspersecond;
+	ordinals->centis = f;
+
+	/* A lot of times coming here will be after 2000 now, so move the epoch along */
+	if (i >= DAYS_IN_20thC)
+	{
+		dow = 6, century = 20, year = 00; /* Saturday 01-Jan-2000 */
+		i -= DAYS_IN_20thC;
+	}
+	else
+	{
+		dow = 1, century = 19, year = 00; /* Monday 01-Jan-1900 */
+	}
+
+	/* Deduct whole years */
+	while (1)
+	{
+		if (year == 0)
+		{
+			isleap = (century & 3) == 0; /* Multiple of 400 */
+		}
+		else
+		{
+			isleap = (year & 3) == 0; /* Multiple of 4 */
+		}
+		len = isleap ? 366 : 365;
+		if (i >= len)
+		{
+			i -= len;
+			year++;
+			if (year == 100) century++, year = 0;
+
+			/* Slip day of week by 1 (or 2) per complete year */
+			dow = (dow + isleap + 1) % 7;
+			continue;
+		}
+		break; /* Incomplete year reached */
+	}
+	ordinals->dayofyear = i + 1;
+	ordinals->year = (century * 100) + year;
+
+	/* Deduct whole months */
+	for (month = 1; month <= 12; month++)
+	{
+		len = monthlen[month];
+		if (isleap && (month == 2))
+		{
+			len = 29;
+		}
+		if (i < len) break;
+		i -= len;
+		dow += len;
+	}
+	ordinals->day = i + 1; /* 1's based */
+	ordinals->month = month;
+	ordinals->dayofweek = ((dow + i) % 7) + 1; /* 1's based */
+}

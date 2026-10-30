@@ -1,0 +1,93 @@
+#------------------------------------------------------------------------------
+# Components file for web browser
+#------------------------------------------------------------------------------
+%BaseAddress   0x00000000
+%Image         Build$ImageName
+%Log           Build$ImageName
+%Messages      Sources.Internat.Messages
+%Joiner        BigSplit2
+%JoinerFormat  BigSplit
+%sigstr        Univ
+
+#
+# Fundamental components for header export...
+#
+HdrSrc                  -type HDR
+Kernel                  -type HDR
+
+#
+# Required for Hdr:SWIs (and swis.h) generation...
+#
+ColourPicker            -type HDR
+ColourTrans             -type HDR
+DDEUtils                -type HDR
+Dialler                 -type HDR
+DragAnObj               -type HDR
+DragASprite             -type HDR
+FileSwitch              -type HDR
+FontManager             -type HDR
+FPEmulator              -type HDR
+Hourglass               -type HDR
+MessageTrans            -type HDR
+PDriver                 -type HDR
+ResourceFS              -type HDR
+TaskManager             -type HDR
+TaskWindow              -type HDR
+TerritoryManager        -type HDR
+WindowManager           -type HDR
+
+#
+# RISC_OSLib, or the Shared C Library...
+#
+SharedCLibrary          -type EXP
+
+#
+# Internet and other networking libraries...
+#
+TCPIPheaders            -type HDR
+socklib                 -type EXP
+inetlib                 -type EXP
+unixlib                 -type EXP
+mbedTLS                 -type EXP
+
+#
+# Toolbox libraries...
+#
+ToolboxLib              -type EXP
+
+#
+# Most of the other common libraries (namely Desk and DebugLib)...
+#
+UnicodeLib              -type EXP
+DebugLib                -type HDR
+AsmUtils                -type EXP
+zlib                    -type EXP
+
+#
+# Key libraries for Browse
+#
+JSLib                   -type EXP
+Fetchers                -type EXP
+BrowseHTMLLib           -type EXP
+ImageLibPNG             -type EXP
+ImageLibJPEG            -type EXP
+ImageLib                -type EXP
+NSPRLib                 -type EXP
+
+#
+# Modules which Browse depends upon
+#
+AcornSSL                -options INSTDIR=<Install$Dir>.HardDisc4.!Boot.Resources.!System.350.Modules.Network.URL
+AcornURI                -options INSTDIR=<Install$Dir>.HardDisc4.!Boot.Resources.!System.310.Modules.Network
+URL                     -options INSTDIR=<Install$Dir>.HardDisc4.!Boot.Resources.!System.310.Modules.Network.URL
+AcornHTTP               -options INSTDIR=<Install$Dir>.HardDisc4.!Boot.Resources.!System.310.Modules.Network.URL
+FileFetcher             -options INSTDIR=<Install$Dir>.HardDisc4.!Boot.Resources.!System.310.Modules.Network.URL
+FTP                     -options INSTDIR=<Install$Dir>.HardDisc4.!Boot.Resources.!System.310.Modules.Network.URL
+MimeMap                 -options INSTDIR=<Install$Dir>.HardDisc4.!Boot.Resources.!System.310.Modules.Network.URL
+
+#
+# The application itself
+#
+Browse                  -options INSTDIR=<Install$Dir>.HardDisc4.Apps.!Browse SYSTEM=Ursula SUFFIX=ju TARGET=abs.!RIju
+#Browse                  -options INSTDIR=<Install$Dir>.HardDisc4.Apps.!Phoenix SYSTEM=Phoenix SUFFIX=ju TARGET=abs.!RIju
+#WebServe                -options INSTDIR=<Install$Dir>.HardDisc4.Apps

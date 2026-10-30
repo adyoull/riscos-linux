@@ -1,0 +1,68 @@
+# Makefile fragment for defining standard debug rules for various tools
+
+INCLUDED_DBGRULES = YES
+
+ifeq (GNU,${TOOLCHAIN})
+CDFLAGS   += -g -O0
+C++DFLAGS += -g -O0
+ASDFLAGS  +=
+F77DFLAGS += -g -O0
+LDDFLAGS  +=
+else
+CDFLAGS   += -gflv
+C++DFLAGS += +g
+ASDFLAGS  += -G
+F77DFLAGS += -gflv
+LDDFLAGS  += -d
+endif
+
+.SUFFIXES: .i .od .odz .s .c .h .c++ .cpp .f
+
+# C source files -> object files
+.c.od:
+	${CC} $(filter-out ${C_NO_FNAMES},${CFLAGS}) ${CDFLAGS} ${CAPPFLAGS} -o $@ $<
+	$(call make-depend,$<,$@,$(subst .od,.dd,$@))
+.c.odz:
+	${CC} $(filter-out ${C_NO_FNAMES},${CFLAGS}) ${CDFLAGS} ${CMODFLAGS} ${C_MODULE} -o $@ $<
+	$(call make-depend,$<,$@,$(subst .odz,.ddz,$@))
+.c.i:
+	${CPREPRO} ${CFLAGS} -C $< > $@
+
+# C++ source files -> object files
+.c++.od:
+	${C++} $(filter-out ${C_NO_FNAMES},${C++FLAGS}) ${C++DFLAGS} -o $@ $<
+	$(call make-depend,$<,$@,$(subst .od,.dd,$@))
+.cpp.od:
+	${C++} $(filter-out ${C_NO_FNAMES},${C++FLAGS}) ${C++DFLAGS} -o $@ $<
+	$(call make-depend,$<,$@,$(subst .od,.dd,$@))
+.c++.odz:
+	${C++} $(filter-out ${C_NO_FNAMES},${C++FLAGS}) ${C++DFLAGS} ${C_MODULE} -o $@ $<
+	$(call make-depend,$<,$@,$(subst .odz,.ddz,$@))
+.cpp.odz:
+	${C++} $(filter-out ${C_NO_FNAMES},${C++FLAGS}) ${C++DFLAGS} ${C_MODULE} -o $@ $<
+	$(call make-depend,$<,$(subst .odz,.ddz,$@))
+.c++.i:
+	${CPREPRO} ${C++FLAGS} -C $< > $@
+.cpp.i:
+	${CPREPRO} ${C++FLAGS} -C $< > $@
+
+# Fortran source files -> object files
+.f.od:
+	${FC} $(filter-out ${C_NO_FNAMES},${FCFLAGS}) ${FCDFLAGS} -o $@ $<
+	$(call make-fc-depend,$<,$@,$(subst .od,.dd,$@))
+.f.odz:
+	${FC} $(filter-out ${C_NO_FNAMES},${FCFLAGS}) ${FCDFLAGS} ${C_MODULE} -o $@ $<
+	$(call make-fc-depend,$<,$(subst .odz,.ddz,$@))
+.f.i:
+	${CPREPRO} ${FCFLAGS} -C $< > $@
+
+# Assembler source files -> object files
+.s.od:
+	${AS} ${ASFLAGS} ${ASDFLAGS} -depend $(subst .od,.dd,$@) -o $@ $<
+.s.odz:
+	${AS} ${ASFLAGS} ${ASDFLAGS} -depend $(subst .odz,.ddz,$@) ${ASMODFLAGS} -o $@ $<
+.s.i:
+	@${NOP}
+
+
+# EOF

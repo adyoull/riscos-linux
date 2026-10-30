@@ -1,0 +1,399 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* h.Xlate - DOS to RISC OS name and attribute mapping for the LanManFS client. */
+
+#include "SMB.h"
+
+/* Compare two strings without regard to case, following the strcmp contract.
+ *
+ * The conversions to unsigned int stop the compiler emitting shift sequences while trying to promote the chars to int with sign
+ * retention.  The ordering when strings differ is by character number after tolower folding, rather than alphabetic sort.
+ *
+ * Parameters:
+ *   s1  first NUL-terminated string
+ *   s2  second NUL-terminated string
+ *
+ * Returns: 0 if the strings match, positive if s1 > s2, negative if s1 < s2.
+ */
+extern int stricmp(const char *s1, const char *s2);
+
+/* Copy at most n-1 characters from s to d and NUL-terminate.
+ *
+ * Unlike strncpy() the destination is always NUL-terminated and is not zero-padded beyond the terminator; n is the destination
+ * buffer size including the terminator.
+ *
+ * Parameters:
+ *   d  destination buffer
+ *   s  source NUL-terminated string
+ *   n  destination buffer size
+ */
+extern void strcpyn(char *d, const char *s, int n);
+
+/* As strcpyn but folds each copied character to upper case.
+ *
+ * Parameters:
+ *   d  destination buffer
+ *   s  source NUL-terminated string
+ *   n  destination buffer size
+ */
+extern void strcpyn_upper(char *d, const char *s, int n);
+
+/* As strcpyn but folds each copied character to lower case.
+ *
+ * Parameters:
+ *   d  destination buffer
+ *   s  source NUL-terminated string
+ *   n  destination buffer size
+ */
+extern void strcpyn_lower(char *d, const char *s, int n);
+
+/* Scramble and unscramble in-place a PASSWORD_LIMIT-length buffer.
+ *
+ * Used to avoid keeping passwords in plain text in memory, so that a casual memory dump does not expose them.  It is not
+ * cryptography: the key derives from the buffer's address, so anyone with access to the module's internals can reverse it, and
+ * Xlt_Unjumble must be given the same buffer that Xlt_Jumble scrambled.  Both work in-place on a buffer of exactly
+ * PASSWORD_LIMIT bytes.
+ *
+ * Parameters:
+ *   str  buffer of exactly PASSWORD_LIMIT bytes to transform in-place
+ */
+extern void Xlt_Jumble(char *str);
+extern void Xlt_Unjumble(char *str);
+
+#define CNV_DEFAULT_TYPE FileType_Text
+#define CNV_DATETIME     1
+#define CNV_ATTRIBS      2
+
+/* ---- SMB1 Trans2 FindFirst "X2" entry format (SMB_INFO_STANDARD, info level 260) ----
+ *
+ * Parsed by Xlt_ExpandSearchEntryX2.  SMB1 receives these directly from the server; the SMB2 path (c.SMB2 smb2_build_x2_entry)
+ * synthesises them from FileIdBothDirectoryInformation so the same Xlate code can handle both.
+ *
+ *  0-1:   CreationDate        2-3:  CreationTime
+ *  4-5:   LastAccessDate      6-7:  LastAccessTime
+ *  8-9:   LastWriteDate       10-11: LastWriteTime
+ *  12-15: DataSize (32-bit)
+ *  16-19: AllocationSize (32-bit)
+ *  20:    Attributes          21:    Reserved
+ *  22:    FilenameLength
+ *  23+:   Filename (ASCII, NUL-terminated)
+ */
+#define X2_CREATION_DATE_OFFSET    0
+#define X2_CREATION_TIME_OFFSET    2
+#define X2_LAST_ACCESS_DATE_OFFSET 4
+#define X2_LAST_ACCESS_TIME_OFFSET 6
+#define X2_LAST_WRITE_DATE_OFFSET  8
+#define X2_LAST_WRITE_TIME_OFFSET  10
+#define X2_DATA_SIZE_OFFSET        12
+#define X2_ALLOC_SIZE_OFFSET       16
+#define X2_ATTRIBUTES_OFFSET       20
+#define X2_FILENAME_LEN_OFFSET     22
+#define X2_FILENAME_OFFSET         23
+#define X2_HEADER_SIZE             23
+
+/* Translate DOS attributes into RISC OS attributes.
+ *
+ * The RISC OS load address layout is 0xFFFtttdd where ttt is a 12-bit file type and dd is
+ * bits 32..39 of the timestamp (centiseconds since 01-Jan-1900).  DOS uses Utime (seconds since 01-Jan-1970, which is RISC OS time
+ * 0x336E996A00), so the conversion is: RISCOS time = 0x336E996A00 + 100 * Utime.  The file type written into the load address is
+ * a default; if the precise type matters, call Attr_GetInfo() afterwards.  CNV_ATTRIBS maps the DOS read-only and directory
+ * bits to RISC OS permissions.  Fields that `flags` does not select are left untouched, so callers can compose conversions.
+ *
+ * Parameters:
+ *   pInAttr   DOS attributes to read from
+ *   pOutAttr  RISC OS attributes to write to
+ *   flags     CNV_DATETIME, CNV_ATTRIBS or both to select which fields convert
+ *   hS        share handle (provides the server time-zone offset)
+ */
+extern void Xlt_CnvDOStoRO(DOS_ATTRIBS *pInAttr, RISCOS_ATTRIBS *pOutAttr, int flags, hSHARE);
+
+/* Translate RISC OS attributes into DOS attributes.
+ *
+ * Inverse of Xlt_CnvDOStoRO: Utime = (RISCOStime - 0x336E996A00) / 100.  Usually called immediately before a set-attributes wire
+ * call.  Out-of-range RISC OS times clip to the DOS-representable range rather than wrap.  A load address with no filetype
+ * carries no date, so it gives a utime of 0, which callers take as "leave the server's time alone".  CNV_ATTRIBS always sets
+ * ATTR_ARC, and ATTR_RO for an object that is locked and not writable.
+ *
+ * Parameters:
+ *   pInAttr   RISC OS attributes to read from
+ *   pOutAttr  DOS attributes to write to
+ *   flags     CNV_DATETIME, CNV_ATTRIBS or both to select which fields convert
+ *   hS        share handle (provides the server time-zone offset)
+ */
+extern void Xlt_CnvROtoDOS(RISCOS_ATTRIBS *pInAttr, DOS_ATTRIBS *pOutAttr, int flags, hSHARE);
+
+/* Round a RISC OS attribute word to its wire-canonical form.
+ *
+ * The wire form of an SMB attribute set carries only the RO bit; the dir/file split is implicit in the object's type rather than
+ * the flags word.  A subsequent server stat reconstructs the full RISC OS attribute word from those two pieces via
+ * Xlt_CnvDOStoRO, so anything richer the caller supplied is lost the moment it goes to the wire.  Pass cache-bound attribute words
+ * through here first so the stored value matches the wire's canonical reconstruction; a file, for example, always comes back
+ * readable even if the caller passed ROA_LOCKED alone.
+ *
+ * Parameters:
+ *   flags   RISC OS attribute flags as supplied by the caller
+ *   is_dir  true if the object is a directory
+ *   hS      share handle
+ *
+ * Returns: the canonical RISC OS attribute word the wire would reproduce.
+ */
+extern uint32_t Xlt_NormaliseAttribs(uint32_t flags, bool is_dir, hSHARE hS);
+
+/* Return a pointer to the leaf component of a RISC OS pathname (the substring after the final '.').
+ *
+ * The pointer is into the caller's buffer; the string is not modified or copied.  If there is no '.' in the input the entire
+ * string is its own leaf.
+ *
+ * Parameters:
+ *   name  NUL-terminated RISC OS pathname
+ *
+ * Returns: pointer into name at the start of the leaf component.
+ */
+extern char *Xlt_GetRISCOSLeafName(char *name);
+
+/* Convert a DOS 8.3 filename into a RISC OS name applying the current namemode.
+ *
+ * Walks up to 12 source characters through the DOS-to-RO character table; the "." before the extension becomes "/".  Honours
+ * LM_Vars.namemode: NM_LOWERCASE forces lower case, NM_FIRSTCAPS capitalises the first letter and lowers the rest, NM_PRESERVED
+ * leaves the source case alone.  The ".~" two-byte sequence that nameROtoDOS inserts to escape an over-long name segment is
+ * consumed silently on the return trip.
+ *
+ * Parameters:
+ *   riscos_dst  destination buffer (caller-provided; at least 13 bytes)
+ *   dos_src     DOS 8.3 NUL-terminated source name
+ */
+extern void Xlt_NameDOStoRO(char *riscos_dst, const char *dos_src);
+
+/* Name mode */
+#define NM_PRESERVED   0
+#define NM_LOWERCASE   1
+#define NM_FIRSTCAPS   2
+#define NM_MODE        (NM_LOWERCASE | NM_FIRSTCAPS)
+#define NM_HIDDEN      4
+#define NM_LEGACYCHARS 8 // An SMB2 server's '$', '&', '@', '^' and '%' are always shown as '<', '+', '=', ',' and '>', as on SMB1
+
+/* Character mapping table for long names: maps each DOS character to its RISC OS form.  c/Xlate keeps the inverse table, which
+ * maps each RISC OS character to its DOS form.
+ *
+ * Both are encoded as `unsigned char` arrays so the source stays pure ASCII and survives round-trips through editors, clang-format and
+ * diff tools.  The [257] length is 256 mapped characters plus one byte of trailing padding; only the first 256 entries are
+ * indexed.
+ */
+extern const unsigned char lanmanfs_lookup_table[257];
+
+/* Decode a legacy SMBsearch directory entry into RISC OS form.
+ *
+ * The 22-byte entry holds a 1-byte attribute, 2-byte time, 2-byte date, 4-byte size and a 13-byte NUL-terminated 8.3 leafname.
+ * Attr_GetInfo overlays any locally saved load address onto the RISC OS attributes.
+ *
+ * Parameters:
+ *   entry         22-byte SMBsearch entry
+ *   DOS_pathname  parent DOS path; used by Attr_GetInfo() to resolve filetypes
+ *   name_out      destination for the RISC OS leafname (NULL skips the conversion)
+ *   pOutDA        DOS attribute output (NULL to skip)
+ *   pOutRA        RISC OS attribute output (NULL to skip)
+ *   hS            share handle
+ *
+ * Returns: OK on success; EBADPARAM if entry is NULL.
+ */
+extern err_t Xlt_ExpandSearchEntry(uint8_t *entry, char *DOS_pathname, char *name_out, DOS_ATTRIBS *pOutDA, RISCOS_ATTRIBS *pOutRA,
+                                   hSHARE hS);
+
+/* Decode a TRANSACT2/FINDFIRST X2 directory entry into RISC OS form.
+ *
+ * SMB1 receives X2 entries directly from the server, and SMB2_ReadDirEntries synthesises them from SMB2 metadata so the same
+ * decoder serves its callback.  The entry's fields are unpacked and passed to Xlt_FillAttribsFromMeta.  The X2 date and time
+ * have 2-second resolution, so the other SMB2 paths call Xlt_FillAttribsFromMeta directly to keep full precision.
+ *
+ * Parameters:
+ *   entry         X2 directory entry
+ *   DOS_pathname  unused (kept for signature symmetry with Xlt_ExpandSearchEntry)
+ *   name_out      destination for the RISC OS leafname (NULL skips the conversion)
+ *   pOutDA        DOS attribute output (NULL to skip)
+ *   pOutRA        RISC OS attribute output (NULL to skip)
+ *   hS            share handle
+ *
+ * Returns: OK on success; EBADPARAM if entry is NULL.
+ */
+extern err_t Xlt_ExpandSearchEntryX2(uint8_t *entry, char *DOS_pathname, char *name_out, DOS_ATTRIBS *pOutDA, RISCOS_ATTRIBS *pOutRA,
+                                     hSHARE hS);
+
+/* Decode a directory entry into RISC OS form from metadata already extracted from the wire.
+ *
+ * Xlt_ExpandSearchEntryX2 unpacks an X2 entry and calls this; SMB2 callers call it directly with a utime derived from FILETIME
+ * via smb2_filetime_to_utime, which avoids the 2-second resolution of the X2 date and time.  The filetype comes from the name's
+ * extension or comma suffix and is merged into the load address built from `utime`.  When the name instead gives load and exec
+ * addresses with no filetype (",lxa", ",xxx" or ",llll-xxxx"), those replace the date-derived ones.
+ *
+ * Parameters:
+ *   name      DOS-form leaf name (NUL-terminated); not modified; an internal scratch copy is made if
+ *             Xlt needs to truncate the leaf at a comma-suffix
+ *   utime     Unix timestamp (seconds since 1970) of LastWriteTime
+ *   length    object length in bytes (assigned to DOS_ATTRIBS.length as-is)
+ *   attr      DOS attribute byte (FILE_ATTRIBUTE_* compressed; see smb2_attribs_to_dos)
+ *   name_out  optional RISC OS-form leaf name output buffer (NULL skips name conversion)
+ *   da_out    optional DOS attributes output
+ *   ra_out    optional RISC OS attributes output
+ *   hS        share handle, for the server's time-zone offset
+ *
+ * Returns: OK on success; EBADPARAM if `name` is NULL.
+ */
+extern err_t Xlt_FillAttribsFromMeta(const char *name, uint utime, uint length, uint attr, char *name_out, DOS_ATTRIBS *da_out,
+                                     RISCOS_ATTRIBS *ra_out, hSHARE hS);
+
+/* Update the cached default drive letter from the leading character of a DOS path.
+ *
+ * Called by FSEntry_Func reason 0 (SetCurrentDirectory) so that subsequent paths arriving without a ":Mount." prefix get
+ * dispatched to the right share.
+ *
+ * Parameters:
+ *   path  DOS-form path whose first character is the drive letter
+ *
+ * Returns: OK.
+ */
+extern err_t Xlt_SetDefaultDrv(const char *path);
+
+/* Convert a RISC OS FileSwitch-style path into DOS form, dispatching long-name resolution if the share supports it. */
+extern err_t Xlt_ConvertPath(const char *RO_name_in, char *DOS_name_out);
+
+/* The current default drive letter, set by Xlt_SetDefaultDrv on FSEntry_Func reason 0 (SetCurrentDirectory).  Used to
+ * identify the share when a path arrives without a ":Mount." prefix.
+ */
+extern char Xlt_DefaultDrv;
+
+/* Forget the one RISC OS path whose DOS form is remembered from the last conversion.
+ *
+ * On an SMB2 mount, Xlt_ConvertPath remembers the last path it resolved against the server, so a run of calls naming the same
+ * object search its parent directory once rather than every time.  This is called before and after any operation that may create, delete
+ * or rename something, since such a call must see the server's current names and may change them; and when a drive letter changes
+ * hands or hidden files are shown or hidden, since the remembered spelling may then name something else.
+ */
+extern void Xlt_ForgetTranslation(void);
+
+/* Find the RISC OS file type MimeMap gives a file name extension, remembering recent answers.
+ *
+ * A listing asks for the same few extensions over and over, and MimeMap compares an extension it lacks against every one it knows, so
+ * each answer, a miss included, is kept until Xlt_ForgetTypes.
+ *
+ * Parameters:
+ *   ext   extension, with or without its leading dot; case does not matter
+ *   type  receives the file type when there is one
+ *
+ * Returns: true if MimeMap has a type for the extension.
+ */
+extern bool Xlt_TypeForExtension(const char *ext, uint32_t *type);
+
+/* Forget the file types Xlt_TypeForExtension remembers, so a change to the MimeMap file is seen.  Called from the background tick. */
+extern void Xlt_ForgetTypes(void);
+
+/* Test whether the most recent Xlt_ConvertPath answered from the remembered path instead of asking the server.
+ *
+ * A remembered spelling can be out of date if another machine has renamed or retyped the object.  The sign of that is the
+ * server reporting the object as not found, so a caller that gets that result for a path this function reports as remembered should
+ * call Xlt_ForgetTranslation, convert again and repeat the operation before accepting the result.
+ *
+ * Returns: true if the last conversion was served from memory.
+ */
+extern bool Xlt_PathWasRemembered(void);
+
+/* Decode an optional filetype suffix on the end of a leaf or full pathname.
+ *
+ * Recognises four explicit forms: ",ttt" (three hex digits, setting the filetype in loadaddr), ",lxa" (untyped: load and exec
+ * become LM_Vars.untyped_address), ",xxx" (incomplete file: load and exec become 0xDEADDEAD) and ",llll-xxxx" (a load/exec
+ * pair of 1-8 hex digits each).  On one of those, *terminator receives the address of the comma so the caller can truncate the
+ * suffix by writing a NUL there.  Otherwise a MimeMap lookup on the extension (after the last '.' in a DOS path with a drive
+ * prefix, after the last '/' in any other name) sets the filetype and *terminator points at the trailing NUL, since the extension
+ * stays part of the leaf.  If that fails too, the configured default filetype is stamped.  The input string itself is not
+ * modified - the parameter is declared as char* only because *terminator needs to be a writable pointer into the same storage.
+ *
+ * Parameters:
+ *   leafname    NUL-terminated leaf or full pathname; may be NULL (synthesises a plain text load address)
+ *   pRA         RISC OS attributes to update with the decoded load/exec
+ *   terminator  output: address at which to truncate to strip the suffix; NULL if no suffix is found
+ *
+ * Returns: OK if a suffix or MimeMap-derived type was decoded; ENOTPRESENT otherwise.
+ */
+extern err_t Xlt_SplitLeafnameX2(char *leafname, RISCOS_ATTRIBS *pRA, char **terminator);
+
+/* Convert a full DOS path (with `\` separators) to RISC OS canonical form (with `.` separators), stripping any `,xxx` filetype
+ * suffix from the leaf.
+ *
+ * The output is used as the path passed to the Filer via OS_UpCall, e.g. "Documents\Project\thing,faf" becomes "Documents.Project.thing".
+ * The conversion goes through lanmanfs_lookup_table and does not probe for character pairs that have two spellings (such as '<' and '$').
+ *
+ * Parameters:
+ *   ro_dst    destination buffer
+ *   dst_size  capacity of ro_dst in bytes
+ *   dos_src   DOS source path
+ *
+ * Returns: OK on success; EBADPARAM for a NULL pointer or zero size; EBADNAME if the result does not fit, in which case
+ * ro_dst is left empty.
+ */
+extern err_t Xlt_PathDOStoROX2(char *ro_dst, size_t dst_size, const char *dos_src);
+
+/* Trim an optional filetype suffix (",ttt", ",lxa", ",xxx" or ",llll-xxxx") from `name` in place.
+ *
+ * The rename path uses it so the destination leaf does not carry the source's suffix before Xlt_AddROType stamps the right one.
+ *
+ * Parameters:
+ *   name  leaf name to truncate
+ *
+ * Returns: OK.
+ */
+extern err_t Xlt_RemoveROType(char *name);
+
+/* Append (or replace) the RISC OS filetype suffix on leafname to match the given load/exec address.
+ *
+ * Long-name shares carry the filetype in the leaf, so the suffix is ",xxx" for a DEADDEAD load address, ",llll-xxxx" (the load
+ * and exec addresses in hex) for an untyped one, and ",ttt" otherwise.  Existing ",ttt" / ",llll-xxxx" / ",lxa" suffixes are
+ * stripped first.  If the leaf has a ".ext" extension whose MimeMap mapping already represents the filetype, no explicit suffix
+ * is added; likewise when the type matches LM_Vars.default_type, MimeMap has no type for the extension and the leaf does not end
+ * in a dot.
+ *
+ * Parameters:
+ *   leafname  DOS-form path whose leaf is mutated in place
+ *   cap       size of the buffer holding leafname; the suffix is left off rather than overrun it
+ *   loadaddr  RISC OS load address (carries the 12-bit filetype when IS_FILETYPED)
+ *   execaddr  RISC OS exec address (used only for the load/exec form when unstamped)
+ *
+ * Returns: 1 when a suffix was stripped or appended, or the extension carries the type (the leaf may then read as it did before);
+ * 0 when the leaf is unchanged.
+ */
+extern int Xlt_AddROType(char *leafname, size_t cap, uint loadaddr, uint execaddr);
+
+/* Fold a leafname to the hash a cached directory listing files it under (installed with Cache_SetLeafFold).
+ *
+ * Two names that the leafname matching used by path conversion accepts as the same must fold alike, or a cached listing would answer that a
+ * name it holds is absent.  So letter case and the two sides of each pair of characters with two spellings (such as '<' and '$') fold
+ * together, and everything from the first comma on is left out, since a filetype suffix may be on either name or neither.
+ *
+ * Parameters:
+ *   leaf  NUL-terminated leafname, in either server or RISC OS form
+ *
+ * Returns: the hash.
+ */
+extern uint32_t Xlt_LeafFold(const char *leaf);
+
+/* Report whether a name the server listed answers for a RISC OS name converted to DOS form, by the comparison Xlate's own path
+ * resolution uses: ignoring case, and allowing for characters with two spellings and filetype suffixes as described at
+ * xlt_leafnames_equivalent in c/Xlate.
+ *
+ * Parameters:
+ *   server_leaf  name as the server lists it
+ *   ro_leaf      name converted from RISC OS form
+ *
+ * Returns: true if they name the same object.
+ */
+extern bool Xlt_LeafnamesEquivalent(const char *server_leaf, const char *ro_leaf);

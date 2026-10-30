@@ -1,0 +1,843 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* h.SMB2 - SMB2/3 header structures and session state
+ *
+ * Wire-format structures and per-connection state for the SMB 2.x/3.x protocol implementation.
+ * Uses constants from SMB2Defs.h.
+ */
+
+#ifndef SMB2_H
+#define SMB2_H
+
+#include "stdtypes.h"
+#include "SMB.h"
+#include "SMB2Defs.h"
+#include "Cache.h"
+
+/* Sizing for name and path scratch buffers throughout the SMB2 layer; DOS paths and share names are clamped to these. */
+#define SMB2_NAME_LIMIT    256
+#define SMB2_SHARENAME_LEN 256
+
+/*
+ * The SMB2 packet header (MS-SMB2 section 2.2.1) in host-order fields.  Marshalling to and from the little-endian wire bytes is always
+ * explicit, so the struct's own layout never touches the wire.
+ */
+typedef struct {
+  uint8_t ProtocolId[4]; // 0xFE 'S' 'M' 'B'
+  uint16_t StructureSize;
+  uint16_t CreditCharge; // credits this message consumes; debited from the running balance on send
+  uint32_t Status;       // NT STATUS in responses; reserved in requests
+  uint16_t Command;
+  uint16_t CreditReqResp; // request: credits asked for; response: credits granted
+  uint32_t Flags;
+  uint32_t NextCommand; // offset to the next header in a compound message, zero when uncompounded
+  uint64_t MessageId;   // matches a response to its request; multi-credit messages own a run of consecutive ids
+  uint32_t Reserved;
+  uint32_t TreeId;
+  uint64_t SessionId;
+  uint8_t Signature[16]; // AES-CMAC over the whole message when signing is active
+} SMB2_HEADER;
+
+#define SMB2_SIGNING_KEY_SIZE 16 // AES-128 key length, fixed by the protocol
+#define SMB2_GUID_SIZE        16
+#define SMB2_MAX_SERVERS      8 // concurrent server connections; each may carry several shares
+
+/*
+ * SMB2_Server.flags bits: the slot is in use, NEGOTIATE has completed, and every message on the session is signed.  DEAD marks a slot
+ * released while a caller part-way through an exchange may still hold it, so anything that caller sends fails at once.  NON_WINDOWS
+ * (classified from the NTLM version exchange, or from a .DS_Store in a share root) makes SMB2_RmDir check the removal by re-opening the
+ * directory, makes a directory open that reports not found be tried a second time, and has the caches of mounts made on it afterwards given
+ * the aggressive-refresh quirk, since such servers do not deliver CHANGE_NOTIFY reliably; MACOS marks a server classified by its .DS_Store,
+ * so the share root is not searched for one again.  PATTERN_OK and PATTERN_BAD record what SMB2_FindLeaf has learned about the server's
+ * handling of a search pattern: neither set means not yet known.  GUEST marks a guest or anonymous session, which has no key to sign
+ * with.
+ */
+#define SMB2_SRV_ALLOCATED   0x01
+#define SMB2_SRV_CONNECTED   0x02
+#define SMB2_SRV_SIGNED      0x04
+#define SMB2_SRV_DEAD        0x08
+#define SMB2_SRV_NON_WINDOWS 0x10
+#define SMB2_SRV_MACOS       0x20
+#define SMB2_SRV_PATTERN_OK  0x40
+#define SMB2_SRV_PATTERN_BAD 0x80
+#define SMB2_SRV_GUEST       0x100
+
+/* One TCP connection to a server: negotiated limits, session identity, signing keys and the credit/message-id bookkeeping. */
+typedef struct SMB2_Server {
+  int flags;      // SMB2_SRV_* bits
+  int raw_socket; // TCP socket to port 445, negative when closed
+
+  uint16_t dialect;           // dialect revision the server chose at NEGOTIATE
+  uint16_t security_mode;     // server's security-mode word from NEGOTIATE
+  uint32_t capabilities;      // server capability bits from NEGOTIATE
+  uint32_t max_transact_size; // server-imposed I/O ceilings; listing, READ and WRITE sizes clamp to these in turn
+  uint32_t max_read_size;
+  uint32_t max_write_size;
+
+  uint64_t session_id;        // stamped into every header once SESSION_SETUP completes
+  uint16_t credits_available; // running balance per MS-SMB2 3.2.4.1.5: down by CreditCharge on send, up by the grant on receive
+  uint64_t next_message_id;   // next id to stamp; a multi-credit message steps it by its whole charge
+  uint32_t last_reply;        // LM_Tick() when the server last answered one of this client's requests, so the keep-alive can wait for quiet
+
+  bool signing_required; // server demands signed messages (NEGOTIATE security mode)
+
+  uint8_t signing_key[SMB2_SIGNING_KEY_SIZE];      // AES-CMAC key: SP800-108 derivation for 3.x, the session base key for 2.x
+  uint8_t session_base_key[SMB2_SIGNING_KEY_SIZE]; // NTLMv2 session key the signing key derives from
+
+  uint8_t server_guid[SMB2_GUID_SIZE]; // server identity from NEGOTIATE
+  uint8_t client_guid[SMB2_GUID_SIZE]; // this client's identity as sent in NEGOTIATE, which VALIDATE_NEGOTIATE repeats
+  char servname[SMB2_NAME_LIMIT];      // server name as given at connect time
+} SMB2_Server;
+
+#define SMB2_MAX_SHARES 8 // tree-connect slots across all servers
+
+/* One tree connection to a share, including its CHANGE_NOTIFY registration. */
+typedef struct SMB2_Share {
+  int flags;           // reserved; slot occupancy is signalled by a non-NULL server
+  SMB2_Server *server; // owning connection; NULL marks a free slot
+  uint32_t tree_id;    // stamped into every header addressed to this share
+  uint8_t share_type;  // disk, pipe or printer, from TREE_CONNECT
+  char sharename[SMB2_SHARENAME_LEN];
+  char drvletter; // internal A-Z handle the SMB layer addresses this share by
+
+  bool notify_pending;       // a CHANGE_NOTIFY request is outstanding on the server
+  bool notify_changed;       // the watch completed or failed; a later poll re-arms it
+  uint8_t notify_failures;   // consecutive failed watches (open or completion), setting how long the next re-arm waits
+  uint32_t notify_retry_at;  // tick before which a failed watch is not re-armed
+  uint64_t notify_msg_id;    // MessageId of the outstanding notify, for matching its async completion
+  SMB2_FILEID notify_dir_id; // open handle on the watched directory; invalid sentinels when none is held
+
+  bool root_enum_in_progress; // true while the share root is being listed, so the listing can look for a .DS_Store
+} SMB2_Share;
+
+/* Matches the FileSwitch 255-handle ceiling (as does CoreFn's table) so this table can never be the first to run out of handles. */
+#define SMB2_MAX_OPEN_FILES 255
+
+/* A handle value holds its slot's index in bits 0 to 15 and the slot's generation in bits 16 to 29, below the bit the SMB layer uses to
+ * mark an SMB2 handle.
+ */
+#define SMB2_FH_INDEX_MASK       0xFFFFu
+#define SMB2_FH_GENERATION_SHIFT 16
+#define SMB2_FH_GENERATION_MASK  0x3FFFu
+
+/* One open server handle, indexed by the small integer callers pass around as the file handle. */
+typedef struct {
+  bool in_use;
+  uint16_t generation; // bumped each time the slot is claimed, so a handle left over from an earlier claim is refused
+  SMB2_FILEID file_id; // server's persistent/volatile handle pair
+  SMB2_Share *share;
+  char dos_path[260];    // DOS-form path for diagnostics and the lookup's open-file test, updated by a rename; Windows MAX_PATH long
+  uint64_t print_offset; // running append offset for printer shares, which write sequentially with no caller file pointer
+} SMB2_FileEntry;
+
+/*
+ * Populate the Latin-1 to UCS lookup table from the running RISC OS alphabet.
+ *
+ * The 0x80-0x9F region of the RISC OS Latin-1 alphabet does not follow ISO 8859-1, so the true code points must be read from the live
+ * alphabet via Service_International rather than assumed to be an identity mapping; the resulting table drives every Latin-1 to UTF-16LE
+ * wire conversion. If the service call is unavailable the table is left as it stands. Any byte the alphabet reports as unmapped is recorded
+ * as U+FFFD.
+ */
+extern void smb2_unicode_init(void);
+
+/*
+ * Convert a Windows FILETIME to whole seconds in the local utime epoch.
+ *
+ * FILETIME counts 100-nanosecond ticks from 1601; the value is scaled to seconds and rebased onto the utime epoch.
+ *
+ * Parameters:
+ *   ft  the 64-bit FILETIME tick count from a wire field
+ *
+ * Returns: seconds since the epoch, 0 when ft is zero or predates the epoch, and the 32-bit ceiling when the value would overflow.
+ */
+extern uint smb2_filetime_to_utime(uint64_t ft);
+
+/*
+ * Translate the internal DOS attribute bits into an SMB2 FILE_ATTRIBUTE_* mask.
+ *
+ * Parameters:
+ *   dos_attr  internal DOS attribute bits (ATTR_RO/HID/SYS/DIR/ARC)
+ *
+ * Returns: the equivalent FILE_ATTRIBUTE_* mask, or FILE_ATTRIBUTE_NORMAL when no bits are set, because a zero attribute field in
+ * FileBasicInformation means "leave unchanged", so clearing every bit would otherwise do nothing.
+ */
+extern uint32_t dos_attribs_to_smb2(int dos_attr);
+
+/*
+ * Encode a RISC OS Latin-1 string as UTF-16LE for an SMB2 wire field.
+ *
+ * A '<' followed by four hex digits is treated as the reversible escape produced by smb2_utf16le_to_latin1 and is decoded straight
+ * back to its original code point, so a name that function produced goes back as it came. Output stops early rather than
+ * overrun the destination.
+ *
+ * Parameters:
+ *   dst      buffer to receive the UTF-16LE bytes
+ *   dstsize  size of dst in bytes
+ *   src      Latin-1 source string
+ *   srclen   length of src in bytes
+ *
+ * Returns: the number of bytes written to dst.
+ */
+extern int smb2_latin1_to_utf16le(uint8_t *dst, int dstsize, const char *src, int srclen);
+
+/*
+ * Decode a UTF-16LE wire string into a NUL-terminated RISC OS Latin-1 string.
+ *
+ * Code points with no Latin-1 equivalent, the C1 controls U+0080..U+009F (whose bytes alphabet 101 gives to other characters) and lone
+ * surrogate halves are emitted as the reversible '<xxxx' escape (angle bracket plus four hex digits, deliberately with no closing bracket
+ * so FileSwitch does not expand it as a system variable), letting smb2_latin1_to_utf16le reproduce the original bytes. A name too
+ * long for dst is cut at the last character that fits whole, so what is written is always a prefix of it. The result is terminated
+ * whenever room remains.
+ *
+ * A name that will be shown to RISC OS asks for '&', '@', '^', '%', '<' and '>' to be escaped too, since shown as themselves they would be
+ * read as parts of a path.  c/Xlate shows '$' as '<', so a '$' that four hex digits follow is escaped as well, or it would be read back
+ * as an escape.  A path the server hands back, such as a symbolic link's target, keeps them as they are.
+ *
+ * Parameters:
+ *   dst              buffer to receive the Latin-1 string
+ *   dstsize          size of dst in bytes, including the terminator
+ *   src              UTF-16LE source bytes
+ *   srclen           length of src in bytes
+ *   escape_reserved  true to escape '&', '@', '^', '%', '<', '>' and a '$' that four hex digits follow
+ *
+ * Returns: the number of bytes written, excluding the terminator, or -1 when the name did not fit.
+ */
+extern int smb2_utf16le_to_latin1(char *dst, int dstsize, const uint8_t *src, int srclen, bool escape_reserved);
+
+/*
+ * Run SMB2 NEGOTIATE, the opening step of the connection handshake.
+ *
+ * Offers dialects 0x0202 to 0x0302 with signing enabled and no capabilities, then records the server's choice: the agreed dialect,
+ * capabilities, maximum transact/read/write sizes, and whether signing is mandatory. Marks the server connected on success so later
+ * steps may proceed.
+ *
+ * Parameters:
+ *   srv  server connection state to negotiate on and populate
+ *
+ * Returns: OK on success, or an err_t translated from the server status or a protocol violation.
+ */
+extern err_t SMB2_Negotiate(SMB2_Server *srv);
+
+/*
+ * Authenticate the connection with NTLMv2 over SPNEGO and derive the signing key.
+ *
+ * Runs the two SESSION_SETUP rounds on a negotiated connection. When the server demands signing, the key derived from the session is
+ * latched so that every later request is signed.
+ *
+ * Parameters:
+ *   srv       negotiated server connection to log on to
+ *   username  account name; a DOMAIN\user form is split when no domain is given
+ *   password  the account's password
+ *   domain    logon domain, or NULL or empty to take it from the user name
+ *
+ * Returns: OK on success, EPROTOCOLERR for a malformed or unexpected reply, or the error mapped from the server's status (such as
+ * a refused logon).
+ */
+extern err_t SMB2_SessionSetup(SMB2_Server *srv, const char *username, const char *password, const char *domain);
+
+/*
+ * Connect to a share on an authenticated session and allocate its share record.
+ *
+ * Parameters:
+ *   srv        authenticated server connection
+ *   sharename  name of the share, without the server part
+ *   sharetype  ignored; the type the server reports is recorded instead
+ *   share_out  receives the new share record on success
+ *
+ * On SMB 3.0 and 3.0.2 the server is then asked to confirm what NEGOTIATE agreed (FSCTL_VALIDATE_NEGOTIATE_INFO); a tree whose server
+ * does not is disconnected again.
+ *
+ * Returns: OK on success, ENOHANDLES when the share table is full, EPROTOCOLERR for a malformed reply, EBADNEGOTIATE when the server's
+ * confirmation is unsigned, wrongly signed or differs from NEGOTIATE, otherwise the error mapped from the server's status.
+ */
+extern err_t SMB2_TreeConnect(SMB2_Server *srv, const char *sharename, int sharetype, SMB2_Share **share_out);
+
+/*
+ * Tear down the tree connection to a share and release its client-side state.
+ *
+ * The watch on the share root is closed first and its pending flag cleared, so its completion is not matched to a share that is about to
+ * be freed. The share is freed regardless of whether the TREE_DISCONNECT itself succeeds, so the pointer must
+ * not be used after this call.
+ *
+ * Parameters:
+ *   share  the connected share to disconnect; must have a live server
+ *
+ * Returns: OK on success, EBADPARAM for a NULL share or server, otherwise the mapped error from the server's status.
+ */
+extern err_t SMB2_TreeDisconnect(SMB2_Share *share);
+
+/*
+ * Open an existing file for reading, writing or both and return a local file handle.
+ *
+ * The open uses FILE_OPEN disposition, so the file must already exist. The access mask is derived from mode (MODE_WR, MODE_RDWR, or
+ * otherwise read-only). A slot in the open-file table is allocated and stamped with the DOS path; if the table is full the server
+ * handle is closed again to avoid a leak.
+ *
+ * Parameters:
+ *   share           the connected share holding the file
+ *   filename        DOS path of the file to open
+ *   mode            open mode selecting the access rights
+ *   fh_out          receives the local handle index
+ *   size_out        optional, receives the file size
+ *   attribs_out     optional, receives the file attributes
+ *   write_time_out  optional, receives the last-write FILETIME
+ *
+ * Returns: OK on success, ENOFHANDLES when the handle table is full, otherwise the error from the underlying create.
+ */
+extern err_t SMB2_OpenFile(SMB2_Share *share, const char *filename, int mode, int *fh_out, uint64_t *size_out, uint32_t *attribs_out,
+                           uint64_t *write_time_out);
+
+/*
+ * Create or truncate a file and return a local read/write handle.
+ *
+ * Uses FILE_OVERWRITE_IF, so an existing file is truncated and a missing one is created. A trailing dot in the leafname is rejected because
+ * DOS/NTFS silently strip it, which would open a different name from the one the caller gave.
+ *
+ * Parameters:
+ *   share            the connected share to create on
+ *   filename         DOS path of the file to create
+ *   file_attributes  attributes to apply to the new file
+ *   fh_out           receives the local handle index
+ *
+ * Returns: OK on success, EBADNAME for a trailing-dot name, ENOFHANDLES when the handle table is full, otherwise the error from the
+ * underlying create.
+ */
+extern err_t SMB2_CreateFile(SMB2_Share *share, const char *filename, uint32_t file_attributes, int *fh_out);
+
+/*
+ * Re-resolve a cached symlink that was previously left inert and heal its cache node with the target's metadata.
+ *
+ * An inert symlink is one whose target could not be resolved when the directory was first enumerated, so it was cached as a placeholder
+ * file. This retries the resolution and, on success, rewrites the node's length, load/exec addresses, attributes, and flags to those of the
+ * real target and issues a Filer UpCall so the desktop redraws it. If resolving would flip the object between file and directory the heal
+ * is deferred to the next enumeration, since changing a node's kind in place is unsafe here.  Resolving goes to the server, so the node is
+ * looked up again afterwards if the cache changed meanwhile.
+ *
+ * Parameters:
+ *   share      the connected share holding the link
+ *   cnode      the cache node to heal; must be a file-typed inert symlink
+ *   link_path  DOS path of the symlink, in the form the cache keys it by
+ *
+ * Returns: EOBJECTCHANGED when the node was healed, so the caller re-reads it; OK if the cache no longer holds the link as an inert symlink
+ * once the target has resolved, so the caller asks the server; ESYMLINKFAILED if the target is still unresolvable or its kind would flip;
+ * EBADPARAM if the node is not an inert-symlink file.
+ */
+extern err_t SMB2_RetryInertSymlink(SMB2_Share *share, LMCacheNode_t *cnode, const char *link_path);
+
+/*
+ * Close an open file handle, optionally flushing a write time and returning the server's final metadata.
+ *
+ * When pAttr carries a non-zero write time it is pushed to the server with SET_INFO before the close, so a client-set timestamp survives.
+ * The close request sets the post-query flag so the response returns the final size, attributes, and write time, which are written back
+ * into pAttr. The local handle slot is freed even if the close fails, so the handle is never usable after this call.
+ *
+ * Parameters:
+ *   fh     the local handle index to close
+ *   pAttr  optional; on entry may carry a write time to set, on return receives the server's final attributes
+ *
+ * Returns: OK on success, EFILEHANDLE for a handle that is not open, otherwise the mapped error from the server's status.
+ */
+extern err_t SMB2_Close(int fh, DOS_ATTRIBS *pAttr);
+
+/*
+ * Read up to len bytes from an open file into where, in chunks sized to the credits in hand.
+ *
+ * Reads until the request is satisfied or the server returns a short read or the end of the file, so a short count is not an error.
+ *
+ * Parameters:
+ *   fh          the local handle index to read from
+ *   offset      file offset to start reading at
+ *   len         number of bytes wanted
+ *   where       buffer that receives the bytes
+ *   actual_out  optional, receives the number of bytes read
+ *
+ * Returns: OK on success, EFILEHANDLE for a handle that is not open, EPROTOCOLERR for a malformed reply, otherwise the error mapped
+ * from the server's status.
+ */
+extern err_t SMB2_Read(int fh, uint64_t offset, uint32_t len, uint8_t *where, uint32_t *actual_out);
+
+/*
+ * Write len bytes from where to an open file, in chunks sized to the credits in hand.
+ *
+ * Stops early if the server accepts fewer bytes than sent, so a short count is reported to the caller rather than retried.
+ *
+ * Parameters:
+ *   fh          the local handle index to write to
+ *   offset      file offset to start writing at
+ *   len         number of bytes to write
+ *   where       the bytes to write
+ *   actual_out  optional, receives the number of bytes the server accepted
+ *
+ * Returns: OK on success, EFILEHANDLE for a handle that is not open, EPROTOCOLERR for a malformed reply, otherwise the error mapped
+ * from the server's status.
+ */
+extern err_t SMB2_Write(int fh, uint64_t offset, uint32_t len, const uint8_t *where, uint32_t *actual_out);
+
+/*
+ * Force the server to commit buffered writes for an open file to stable storage.
+ *
+ * Parameters:
+ *   fh  SMB2 file handle from a prior open
+ *
+ * Returns: OK on success, or an err_t mapped from the SMB2 status.
+ */
+extern err_t SMB2_Flush(int fh);
+
+/*
+ * Fetch an object's length, timestamp and DOS attributes by name.
+ *
+ * The directory lookup made just before, if it found this name, answers for a directory, and for a file once SMB2_LengthNotNeeded has
+ * been called; otherwise the object is opened with only FILE_READ_ATTRIBUTES, its metadata taken from the CREATE reply, and the handle
+ * closed again. The length is clamped to 4 GiB because the RISC OS FileSwitch interface is 32-bit. When the caller is not in hidden-file
+ * mode and the object carries the hidden or system attribute, it is reported as EFILENOTFOUND so it stays invisible to the Filer.
+ *
+ * Parameters:
+ *   share     connected share the object lives on
+ *   filename  DOS-form path within the share
+ *   pAttr     receives the RISC OS time, attribute byte and clamped length
+ *
+ * Returns: OK, EFILENOTFOUND for a suppressed hidden or system object, or an err_t from the create.
+ */
+extern err_t SMB2_GetAttribs(SMB2_Share *share, const char *filename, DOS_ATTRIBS *pAttr);
+
+/*
+ * Fetch a symbolic link's own length, timestamp and DOS attributes, as SMB2_GetAttribs does for the object it points to.
+ *
+ * A path that does not end in a link gives the same result as SMB2_GetAttribs.  A link whose target is missing, absolute or outside the
+ * share can still be read this way, so it can be deleted or renamed, and its own directory attribute determines how it is deleted.
+ *
+ * Parameters:
+ *   share     connected share the link lives on
+ *   filename  DOS-form path within the share
+ *   pAttr     receives the RISC OS time, attribute byte and clamped length
+ *
+ * Returns: OK, EFILENOTFOUND for a suppressed hidden/system object, or an err_t from the create.
+ */
+extern err_t SMB2_GetLinkAttribs(SMB2_Share *share, const char *filename, DOS_ATTRIBS *pAttr);
+
+/*
+ * Set a file's last-write time and DOS attributes by name.
+ *
+ * Opens with FILE_WRITE_ATTRIBUTES and applies a FileBasicInformation set-info. A zero utime is left as the wire's "do not change" sentinel
+ * so only the attribute byte is updated; a non-zero utime is converted to a FILETIME and written alongside.
+ *
+ * Parameters:
+ *   share     connected share the file lives on
+ *   filename  DOS-form path within the share
+ *   pAttr     supplies the RISC OS time (0 to leave unchanged) and attribute byte
+ *
+ * Returns: OK on success, or an err_t from the create or set-info.
+ */
+extern err_t SMB2_SetAttribs(SMB2_Share *share, const char *filename, DOS_ATTRIBS *pAttr);
+
+/*
+ * Query the current length of an already-open file.
+ *
+ * Uses FileStandardInformation rather than the size captured at open time, so it reflects writes made since. The full 64-bit end-of-file
+ * value is returned; callers narrow it to the FileSwitch 32-bit range.
+ *
+ * Parameters:
+ *   fh        SMB2 file handle from a prior open
+ *   size_out  receives the file's current length in bytes
+ *
+ * Returns: OK on success, EPROTOCOLERR on a short reply, or an err_t from the query.
+ */
+extern err_t SMB2_GetLength(int fh, uint64_t *size_out);
+
+/*
+ * Set an open file's length, extending with zeros or discarding the tail.
+ *
+ * Applies a FileEndOfFileInformation set-info.
+ *
+ * Parameters:
+ *   fh      SMB2 file handle from a prior open
+ *   length  new file length in bytes
+ *
+ * Returns: OK on success, EFILEHANDLE for a handle that is not open or one whose share has gone, or an err_t from the set-info.
+ */
+extern err_t SMB2_Truncate(int fh, uint64_t length);
+
+/*
+ * Create a directory, treating an already-existing directory as success.
+ *
+ * A trailing dot is rejected outright, since Windows would silently strip it and make the directory under another name. The create asks
+ * for FILE_CREATE, so a name already in use returns EFILEEXISTS; when that happens the path is re-opened as a directory.  If that
+ * succeeds the call reports success, so it is idempotent for directories and still fails when the name is an existing file.
+ *
+ * Parameters:
+ *   share    connected share to create within
+ *   path     DOS-form path of the directory to create
+ *   created  receives true only if this call made the directory, so the caller can tell whether it is empty
+ *
+ * Returns: OK if the directory now exists, EBADNAME for a trailing dot, or an err_t from the create.
+ */
+extern err_t SMB2_MkDir(SMB2_Share *share, const char *path, bool *created);
+
+/*
+ * Remove a directory by opening it with delete-on-close and immediately closing the handle.
+ *
+ * Windows deletes the directory when the last handle closes, and reports the failure up front if it is non-empty; a refusal at the CLOSE
+ * is reported too. Some non-Windows servers (SMB2_SRV_NON_WINDOWS) instead accept the delete-on-close CREATE and only refuse the removal
+ * silently, leaving the directory in place; for those a follow-up existence probe re-opens the path and, if it still exists, returns
+ * EDIRNOTEMPTY.  A symbolic link at the end of the path is removed itself, leaving the directory it
+ * points to alone.
+ *
+ * Parameters:
+ *   share  connected SMB2 share
+ *   path   DOS-form path of the directory relative to the share root
+ *
+ * Returns: OK on removal, EDIRNOTEMPTY if the server accepted the delete but left the directory in place, or the error from the CREATE, the
+ * CLOSE or the probe.
+ */
+extern err_t SMB2_RmDir(SMB2_Share *share, const char *path);
+
+/*
+ * Delete a file by opening it with delete-on-close and immediately closing the handle.
+ *
+ * The delete takes effect when the CREATE's handle is released, so no separate delete request is issued.
+ *
+ * Parameters:
+ *   share        connected SMB2 share
+ *   path         DOS-form path of the file relative to the share root
+ *   link_itself  true to delete a symbolic link at the end of the path; false to delete the file it points to
+ *
+ * Returns: OK on success, or the CREATE error if the file could not be opened for deletion.
+ */
+extern err_t SMB2_Delete(SMB2_Share *share, const char *path, bool link_itself);
+
+/*
+ * Rename a file or directory within a share, following any symlinks on the way to the destination.
+ *
+ * The source is opened with DELETE access and a SET_INFO rename to newpath issued against that handle; a symbolic link at the end of
+ * oldpath is opened as itself, so the link is renamed rather than its target. A hidden or system source is reported as not found unless
+ * LM_Vars.namemode includes NM_HIDDEN, as SMB1's rename does. A leading backslash on newpath is stripped since the wire form is
+ * share-relative. If the destination's path crosses a symlink the server refuses the rename (ESYMLINKFAILED); the link's substitute name is
+ * then read with an FSCTL and the rename retried at the resolved path, up to SMB2_SYMLINK_MAX_HOPS hops to bound symlink loops; an absolute
+ * target, which names a path on the server rather than in the share, is refused, as is one whose ".." climbs out of the share. On success
+ * any open-file table entries still naming the old path have their recorded DOS path updated to the new one.
+ *
+ * Parameters:
+ *   share    connected SMB2 share
+ *   oldpath  DOS-form path of the existing object
+ *   newpath  DOS-form destination path, share-relative
+ *
+ * Returns: OK on success; ESYMLINKFAILED if a link's reparse data cannot be read, its target is absolute or climbs out of the share, or
+ * the hop budget runs out; EFILENOTFOUND for a hidden source not being shown; EBADPARAM if a resolved path does not fit; otherwise the
+ * underlying CREATE/rename error.
+ */
+extern err_t SMB2_Rename(SMB2_Share *share, const char *oldpath, const char *newpath);
+
+/*
+ * Enumerate a directory, invoking a callback for each visible entry in SMB1 X2 form.
+ *
+ * The SMB1-shaped search routes, SMBFind_EnumDir and SMB_ReadDirEntries, come here when they meet an SMB2 share; directory reads and name
+ * lookups normally use SMB2_EnumerateDirectory and SMB2_FindLeaf instead. The directory is opened once, then QUERY_DIRECTORY
+ * (FileIdBothDirectoryInformation) is issued repeatedly until STATUS_NO_MORE_FILES; the first request sets SMB2_RESTART_SCANS. Each request
+ * sizes its output buffer by the credits in hand and the server's MaxTransactSize. The "." and ".." entries are skipped, and hidden and
+ * system entries unless NM_HIDDEN is set; the skip count then discards entries already seen, so a paged enumeration can resume. A symlink
+ * is listed with the link's own metadata. UTF-16LE names are converted to Latin-1 before the callback. Malformed entry offsets or lengths,
+ * and a reply that succeeds with no entries, abort with EPROTOCOLERR.
+ *
+ * Parameters:
+ *   share            connected SMB2 share
+ *   path             DOS-form path of the directory
+ *   max_count        maximum entries to deliver this call, or <=0 for no limit
+ *   dirfn            callback receiving each built X2 entry; a non-OK return aborts enumeration, and leaving its taken flag false
+ *                    (entry declined because the buffer or budget is full) stops it with the resume index left at that entry
+ *   private          opaque context passed through to dirfn
+ *   skip             number of leading visible entries to discard (resume point)
+ *   next_offset_out  receives the resume index when max_count is hit or the callback stops, -1 when the directory is exhausted; may be NULL
+ *
+ * Returns: OK when enumeration completes or the page limit is reached, or the first error from the wire or callback.
+ */
+extern err_t SMB2_ReadDirEntries(SMB2_Share *share, const char *path, int max_count, ENUM_DIR_FN dirfn, void *private, int skip,
+                                 int *next_offset_out);
+
+/*
+ * Report a share's total and free capacity as RISC OS disc-size blocks.
+ *
+ * Queries FileFsFullSizeInformation on the share root and converts the server's allocation-unit counts into block figures. Block size is
+ * sectors-per-unit times bytes-per-sector; the 64-bit unit counts are clamped to UINT32_CLAMP when they exceed the 32-bit field RISC OS
+ * expects.
+ *
+ * Parameters:
+ *   share  connected SMB2 share
+ *   pDSR   filled with block size and total/free block counts
+ *
+ * Returns: OK on success, EPROTOCOLERR on a short response, or the query error.
+ */
+extern err_t SMB2_GetFreeSpace(SMB2_Share *share, struct disk_size_response *pDSR);
+
+/*
+ * Arm a recursive CHANGE_NOTIFY watch on the share's root, so that changes the server reports raise a Filer refresh.
+ *
+ * Reuses the share's existing notify directory handle, opening the directory if none is held. The request watches the whole subtree
+ * (SMB2_WATCH_TREE) for every change class except last access and is fired without blocking for a reply: the async completion is picked up
+ * later, by SMB2_SendRecv when it arrives during other traffic or by SMB2_PollNotifications otherwise. The message is signed when the server
+ * requires it. A failure to open the directory schedules another attempt; a send failure or timeout marks the server dead, which frees the
+ * share, so a caller that goes on using the share first checks whether it is still in use.
+ *
+ * Parameters:
+ *   share  connected SMB2 share
+ */
+extern void SMB2_ChangeNotify(SMB2_Share *share);
+
+/*
+ * Service pending asynchronous work for every live server: drain queued async responses (chiefly CHANGE_NOTIFY completions), re-arm the
+ * watch on any share whose watch has completed, send the deferred closes, and close a parked directory listing no call has continued.
+ *
+ * Called at the start of every filing-system call and from the once-a-second background callback, outside any active exchange, and does
+ * the work at most once a centisecond, since a tree walk makes calls far faster than that. It holds the re-entrancy guard around the
+ * drain so an inline arrival cannot re-enter the socket, and does nothing if an exchange is already in flight. Re-arming is done after
+ * the guard is released because SMB2_ChangeNotify issues its own request.
+ */
+extern void SMB2_PollNotifications(void);
+
+/*
+ * Bind a per-mount cache to its SMB2 share by populating the cache's wire vtable with the SMB2 wire callbacks.
+ *
+ * Through these callbacks the cache drives directory enumeration and handle lifecycle independently of the wire format. Safe with a NULL
+ * cache.  A NULL share unbinds the cache, which must happen whenever its share slot is freed: another mount can claim the slot, and the
+ * cache would then list that mount's directories as its own.  An unbound cache's scans fail as transient until the share reconnects.
+ *
+ * Parameters:
+ *   cache  per-mount metadata cache to wire up
+ *   share  SMB2 share the cache belongs to, stored as the callback context, or NULL to unbind
+ */
+extern void SMB2_InstallCacheWire(LMCache_t *cache, SMB2_Share *share);
+
+/* Where a directory listing is to start, and the name it can later be picked up again under. */
+typedef struct SMB2_ListingStart {
+  const char *tag; // caller's own name for the directory, compared exactly when resuming
+  uint32_t index;  // index of the first entry wanted, counting the entries the visitor is shown from zero
+} SMB2_ListingStart;
+
+/*
+ * Enumerate a directory straight off the wire for a mount that has no cache, or a directory the cache cannot hold.
+ *
+ * Drives the same open, QUERY_DIRECTORY and per-entry decode that the cache's wire callbacks use, so symlinks are resolved to their
+ * targets, hidden entries are filtered and the server-quirk detection runs exactly as on a cached mount, but it retains nothing. The scan
+ * starts at the beginning of the directory and steps over the entries before from->index. When the visitor declines an entry the scan is
+ * not thrown away: if it was given a tag it can be resumed under, it is left open on the server, parked, so that SMB2_ResumeListing can
+ * carry on from that entry; otherwise it is closed. Only one listing is ever open, so this call first closes any that was parked.
+ *
+ * The node passed to the visitor is temporary, valid only for that call: name (the DOS leafname, not a full path), name_len, obj_type,
+ * length, load_addr, exec_addr and attrs are set; everything else is undefined. The visitor must not start another directory scan,
+ * because the entries are decoded in place from the one directory receive buffer.
+ *
+ * Parameters:
+ *   share     connected SMB2 share
+ *   dir_path  DOS path of the directory; leading separators are skipped and an empty string denotes the share root
+ *   from      first entry wanted, and the tag to park the listing under
+ *   visitor   called once per visible entry from that index on; returning false declines the entry and parks the listing, if it has a
+ *             tag it can be resumed under
+ *   user      opaque pointer passed through to the visitor
+ *
+ * Returns: OK when the listing completed or was parked, the CREATE error if the directory could not be opened, the error that stopped a
+ * scan that failed part-way (ELINKFAILED when none was recorded), or EBADPARAM.
+ */
+extern err_t SMB2_EnumerateDirectory(SMB2_Share *share, const char *dir_path, const SMB2_ListingStart *from, Cache_EnumVisitor_t visitor,
+                                     void *user);
+
+/*
+ * Carry on a parked directory listing from the entry its visitor last declined.
+ *
+ * Succeeds only for the continuation the parked listing is waiting for: the same tag, and the index of the entry it stopped at. Anything
+ * else leaves the parked listing alone and returns false, and the caller starts again with SMB2_EnumerateDirectory. No path is needed,
+ * because the directory is already open. The visitor contract is that of SMB2_EnumerateDirectory.
+ *
+ * Parameters:
+ *   from     the tag the listing was started under and the index of the next entry wanted
+ *   visitor  called once per visible entry; returning false declines the entry and parks the listing again, if its tag can be remembered
+ *   user     opaque pointer passed through to the visitor
+ *   err_out  receives the result when the return value is true: OK, or the error that stopped a scan that failed part-way
+ *
+ * Returns: true if the listing was resumed, false if there was no parked listing to match.
+ */
+extern bool SMB2_ResumeListing(const SMB2_ListingStart *from, Cache_EnumVisitor_t visitor, void *user, err_t *err_out);
+
+/*
+ * Close the parked directory listing, if there is one.
+ *
+ * A parked listing keeps a directory open on the server, so it is closed as soon as the filing system is asked for anything other than
+ * its continuation, and when no call has continued it within SMB2_LISTING_IDLE_CS. Safe to call at any time outside a wire exchange.
+ */
+extern void SMB2_EndListing(void);
+
+/* A caller's rule for whether a leafname as the server spells it answers to the leafname being sought. */
+typedef bool (*SMB2_LeafMatch_t)(const char *server_leaf, const char *sought_leaf);
+
+/*
+ * Find one name in a directory, asking the server to narrow the search.
+ *
+ * A RISC OS leafname does not fix how the server spells it (letter case, a filetype suffix, characters with two possible
+ * mappings), so the directory has to be searched with the caller's own comparison. Rather than read every entry, the server is given a
+ * search pattern chosen to admit every spelling the comparison could accept, and only the survivors are compared. Until a filtered search
+ * on the connection has once found its entry, each miss is confirmed by reading the whole directory; a server whose filtered search
+ * missed an entry the whole directory held is not sent a pattern again.
+ *
+ * As a side effect the outcome is kept for the request that follows: an SMB2_GetAttribs of a directory found is answered from the
+ * listing (and of a file too, once SMB2_LengthNotNeeded has been called), and an open of a name found to be absent fails without being
+ * sent. That record lasts only until the next exchange with the server or the next filing-system call, whichever comes first.
+ *
+ * Parameters:
+ *   share       connected SMB2 share
+ *   dir_path    DOS path of the directory to search; leading separators are skipped and an empty string denotes the share root
+ *   sought      leafname being looked for, passed to equivalent with each candidate
+ *   pattern     search pattern admitting every spelling equivalent could accept; "*" searches the whole directory
+ *   equivalent  the caller's comparison
+ *   leaf_out    receives the server's spelling of the entry found; SMB2_NAME_LIMIT bytes
+ *
+ * Returns: OK with leaf_out filled in, EFILENOTFOUND if the directory holds no such entry, EPATHNOTFOUND if the directory itself does not
+ * exist, any other CREATE error if it could not be opened, ELINKFAILED if the search failed part-way, or EBADPARAM.
+ */
+extern err_t SMB2_FindLeaf(SMB2_Share *share, const char *dir_path, const char *sought, const char *pattern, SMB2_LeafMatch_t equivalent,
+                           char *leaf_out);
+
+/*
+ * Discard what the last SMB2_FindLeaf left behind for the request following it.
+ *
+ * Called at the start of every filing-system call, so that a lookup made in one call can never serve a request made in the next.
+ */
+extern void SMB2_ForgetLookup(void);
+
+/*
+ * Declare that the filing-system call in progress has no use for an object's length.
+ *
+ * The length a directory listing reports for a file can lag behind the file itself while another client holds it open for writing.
+ * FileSwitch sizes a load by the length it is given, so a catalogue read reports a file's length only from an open of the file, and
+ * SMB2_GetAttribs does not normally let the lookup answer for a file. A call that needs only the object's kind declares that here, and the
+ * lookup may then supply it. Lasts until SMB2_ForgetLookup, that is, for the rest of the current filing-system call.
+ */
+extern void SMB2_LengthNotNeeded(void);
+
+/*
+ * Perform a DCE/RPC named-pipe transaction: open the pipe, send the marshalled input and return the server's output, bridging the SMB1
+ * transact-named-pipe interface onto an SMB2 IOCTL.
+ *
+ * The exchange is a single FSCTL_PIPE_TRANSCEIVE IOCTL against a freshly opened pipe handle, which is always closed before returning. A
+ * leading \PIPE\ prefix on the name is stripped since SMB2 opens the pipe by its bare name. The combined parameter and data input is laid
+ * down contiguously after the IOCTL request header; on reply the output is split back into caller parameter and data buffers, each clamped
+ * to its supplied maximum.
+ *
+ * Parameters:
+ *   share     connected share carrying the pipe
+ *   pipename  pipe name, with or without a leading \PIPE\ prefix
+ *   pT        transaction parameters: input buffers and lengths in, output buffers, maxima and returned lengths out
+ *
+ * Returns: OK once the pipe has been transacted and closed, otherwise the error from the create or IOCTL.
+ */
+extern err_t SMB2_Transact(SMB2_Share *share, const char *pipename, struct TransactParms *pT);
+
+/*
+ * Report whether the SMB2 layer is mid-exchange or the filing system is otherwise in use.
+ *
+ * Consulted by the keep-alive callback before it touches the socket.  Callbacks fire only on the outermost SWI exit, but a TaskWindow can
+ * suspend a LanManFS call mid-SWI (while a socket call sleeps, or when its output fills) and let other tasks run, and their callbacks with
+ * them, so the callback can run while an exchange is still in progress.
+ *
+ * Returns: true while an exchange or filing-system operation is active.
+ */
+extern bool SMB2_IsBusy(void);
+
+/*
+ * Mark the start or end of the background timer's pass.
+ *
+ * The desktop is frozen while the background timer waits on the network, so exchanges made during the pass give up after a few seconds,
+ * not the foreground deadline, and a server that misses that deadline is treated as gone.
+ *
+ * Parameters:
+ *   background  true on entering the pass, false on leaving it
+ */
+extern void SMB2_SetBackground(bool background);
+
+/*
+ * Send an SMB2 ECHO to the server and wait for the reply, used as a keep-alive to hold the session open.
+ *
+ * Parameters:
+ *   srv  connected server to ping
+ *
+ * Returns: OK on a successful round trip, otherwise the mapped error from the server status.
+ */
+extern err_t SMB2_Echo(SMB2_Server *srv);
+
+/*
+ * Send one SMB2 request, signed and credit-accounted, and return the NT STATUS of the response that matches it.
+ *
+ * CHANGE_NOTIFY completions and oplock breaks that arrive first are handled on the way. A timeout or link failure marks the connection
+ * dead, and a call made while another is in progress returns a private re-entry status without touching the socket.
+ *
+ * Parameters:
+ *   srv           server connection to send on
+ *   req_buf       the framed request, with its header built
+ *   req_len       length of the request in bytes
+ *   resp_buf      buffer that receives the matching response
+ *   resp_bufsize  size of resp_buf in bytes
+ *   resp_len_out  receives the length of the response
+ *
+ * Returns: the NT STATUS from the response header, or a private status for a transport failure or re-entry.
+ */
+extern uint32_t SMB2_SendRecv(SMB2_Server *srv, uint8_t *req_buf, int req_len, uint8_t *resp_buf, int resp_bufsize, int *resp_len_out);
+
+/* Claim a free server slot for a new connection, or return NULL when the table is full. */
+extern SMB2_Server *smb2_alloc_server(void);
+
+/*
+ * Release a server slot together with every share and open-file slot bound to it.
+ *
+ * Closes the socket if still open, then clears the file and share table entries pointing at this server, any deferred closes queued for
+ * its shares, and the directory lookup and parked listing if they belong to one of them, so no stale handle outlives the connection. The
+ * slot is left reading as a dead connection, so a caller part-way through an exchange that still holds the pointer fails at once. Safe
+ * to call with NULL.
+ *
+ * Parameters:
+ *   srv  server to release; may be NULL
+ */
+extern void smb2_free_server(SMB2_Server *srv);
+
+/*
+ * Return the open-file table entry at index, or NULL if the slot is out of range or not currently in use.
+ *
+ * Parameters:
+ *   index  slot in the SMB2 open-file table
+ *
+ * Returns: pointer to the live entry, or NULL when the index is invalid or the slot is free.
+ */
+extern SMB2_FileEntry *smb2_get_file(int index);
+
+/*
+ * Return the value by which code outside this layer names the open file in slot index.
+ *
+ * A slot is reused as soon as it is freed, and a lost connection frees every slot while FileSwitch still holds the handles, so the value
+ * carries the slot's generation as well as its index: an old handle then fails rather than reaching whichever file holds the slot now.
+ *
+ * Parameters:
+ *   index  slot in the SMB2 open-file table, one just claimed
+ *
+ * Returns: the handle value, in bits 0 to 29.
+ */
+extern int SMB2_FileHandleValue(int index);
+
+/*
+ * Recover the slot named by a value from SMB2_FileHandleValue.
+ *
+ * Parameters:
+ *   value  handle value, bits 0 to 29
+ *
+ * Returns: the slot index, or -1 if the slot has been freed or claimed again since the value was given out.
+ */
+extern int SMB2_FileHandleIndex(int value);
+
+#endif

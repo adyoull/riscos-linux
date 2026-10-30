@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "2.10"
+Module_Version          SETA    210
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "16 Nov 2024"
+Module_ApplicationDate  SETS    "16-Nov-24"
+Module_ComponentName    SETS    "NetStatus"
+Module_FullVersion      SETS    "2.10"
+Module_HelpVersion      SETS    "2.10 (16 Nov 2024)"
+                        END

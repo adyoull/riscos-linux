@@ -1,0 +1,148 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+*
+*     BUFLIB.H - Header for buffer chains management library
+*
+*/
+
+/* Data chain */
+
+typedef struct mbuf *BUFCHAIN;
+
+/* Exported functions ================= */
+
+/* Buffer chain handling */
+
+/* Free an mbuf chain and any indirect data attached to it.
+ *
+ * NULL is documented-safe; the call dispatches straight to MBufManager's m_freem.
+ *
+ * Parameters:
+ *   pB  chain to release; may be NULL
+ */
+extern void FreeChain(BUFCHAIN pB);
+
+/* Prepend `datalen` bytes from `pData` onto an existing mbuf chain, allocating as needed.
+ *
+ * Three paths in descending preference:
+ *   - existing first mbuf has free space at the front for all the data - prepend in place
+ *   - existing first mbuf has some space, but not all - fill what's there and alloc one more for
+ *     the rest
+ *   - no slack at all - alloc a fresh chain and concatenate it onto the head
+ *
+ * On any allocation failure the entire incoming chain is freed (since the caller can't recover
+ * anyway) and NULL is returned.
+ *
+ * Parameters:
+ *   pRest    existing chain to prepend onto, or NULL to allocate a fresh chain
+ *   pData    source bytes
+ *   datalen  byte count
+ *
+ * Returns: pointer to the new head mbuf, or NULL on out-of-memory.
+ */
+extern BUFCHAIN AddChain(BUFCHAIN pRest, void *pData, int datalen);
+
+/* Prepend an indirect mbuf referencing `pData` onto an existing chain.
+ *
+ * Unlike AddChain, this doesn't copy the source data - the new mbuf carries a pointer to the
+ * caller's buffer.  Caller must keep `pData` live until the chain is freed.  On allocation failure
+ * the incoming chain is freed and NULL returned.
+ *
+ * Parameters:
+ *   pRest    existing chain, or NULL
+ *   pData    source buffer (NOT copied; caller-owned)
+ *   datalen  byte count
+ *
+ * Returns: pointer to the new head mbuf, or NULL on out-of-memory.
+ */
+extern BUFCHAIN AddChainIndirect(BUFCHAIN pRest, void *pData, int datalen);
+
+/* Pull `datalen` bytes off the front of a chain, optionally copying to `pDest`.
+ *
+ * pDest == NULL is legal and means "discard datalen bytes".  datalen MUST be positive.
+ * If the chain doesn't actually have enough bytes, the whole chain is freed and NULL returned -
+ * partial trims aren't supported.
+ *
+ * Parameters:
+ *   pB       head of the chain
+ *   pDest    destination buffer for the trimmed bytes, or NULL to drop them
+ *   datalen  byte count (>0)
+ *
+ * Returns: head of the truncated chain (possibly NULL if every mbuf was consumed), or NULL on
+ * underflow.
+ */
+extern BUFCHAIN GetData(BUFCHAIN pB, void *pDest, int datalen);
+
+/* Allocate an empty mbuf chain large enough to hold `datalen` bytes of payload.
+ *
+ * Used when the caller intends to fill the chain themselves (e.g. by writing into mtod() pointers
+ * obtained via GetBlockPointer).  Returns NULL on out-of-memory.
+ *
+ * Parameters:
+ *   datalen  total payload capacity in bytes
+ *
+ * Returns: head of the new chain, or NULL.
+ */
+extern BUFCHAIN AllocBlankChain(int datalen);
+
+/* Return the total byte length of an mbuf chain.
+ *
+ * Parameters:
+ *   pB  chain to measure (may be NULL)
+ *
+ * Returns: byte count (0 for NULL chain).
+ */
+extern int ChainLen(BUFCHAIN pB);
+
+struct GBP_in_out {
+  BUFCHAIN pChain;
+  uint8_t *pBlock;
+  int BlockLen;
+};
+
+/* Advance to the next non-empty data block in an mbuf chain, one iterator step per call.
+ *
+ * Designed for building scatter/gather lists: caller seeds pGBP->pChain with the chain to walk
+ * and then calls this repeatedly.  Each call sets pGBP->pBlock and pGBP->BlockLen to the next
+ * region; mbufs with zero-length payload are skipped silently.  Iteration ends when the chain
+ * runs out (BlockLen == 0, return value 0).
+ *
+ * Parameters:
+ *   pGBP  in/out cursor; pChain advances, pBlock/BlockLen receive the next region
+ *
+ * Returns: 1 while a region is available, 0 at end-of-chain.
+ */
+extern int GetBlockPointer(struct GBP_in_out *pGBP);
+
+/* Init and startup routines */
+
+/* Open an MBufManager session and populate the per-session callback vector.
+ *
+ * Sizes are advisory hints to the MBufManager - 112 bytes (the DCI-2 value) fits most SMB packets
+ * in a single mbuf; 1280 bytes is a soft cap because block writes happen in 1 KiB chunks and we
+ * don't actually need to handle 1500-byte buffers in one go.  mincontig is 0 because we never use
+ * the "make contiguous" path.
+ *
+ * Returns: OK on success, EMBUFMODULE if Mbuf_OpenSession failed (typically MBufManager not
+ * loaded).
+ */
+extern err_t Buf_Init(void);
+
+/* Close our MBufManager session at module finalisation.
+ *
+ * Idempotent - safe to call when Buf_Init was never run or failed.
+ */
+extern void Buf_Shutdown(void);

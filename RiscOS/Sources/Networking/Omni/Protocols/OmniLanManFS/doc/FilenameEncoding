@@ -1,0 +1,118 @@
+OmniLanManFS filename encoding: the "<xxxx" escape
+===================================================
+
+On SMB2 mounts OmniLanManFS represents Unicode characters outside Latin-1 in RISC OS filenames with the "<xxxx" escape.
+This page is the reference for RISC OS software that interprets or produces such names: a Unicode-aware Filer, a text
+editor, a Wimp icon renderer.
+
+Context
+-------
+
+SMB2/3 servers store filenames as UTF-16LE. RISC OS filenames are Latin-1 (alphabet 101), with a small number of
+characters carrying special meaning to FileSwitch ('.', ':', '$', '&', '%', '@', '^', '<', '>', '#', space). UTF-16
+covers the whole of Unicode; Latin-1 covers 256 characters, of which RISC OS reserves around a dozen.
+
+When LanManFS reads a directory listing from an SMB2 server, each UTF-16 code unit from U+0000 to U+00FF is presented to
+RISC OS as the byte of the same value, except the C1 control characters U+0080 to U+009F. Each character that
+alphabet 101 places at bytes 0x80 to 0x9F (the Euro sign, the curly quotes and so on) is presented as that byte. Every
+other code unit (the C1 controls, CJK, emoji, Greek, Cyrillic, most of Latin Extended, and so on) must still be
+representable in some form, or the file could not be reached from the Filer. The "<xxxx" escape is that representation.
+
+The encoding
+------------
+
+Grammar:
+
+    escape ::= '<' hex hex hex hex
+    hex    ::= '0'..'9' | 'a'..'f' | 'A'..'F'
+
+Each escape represents exactly one UTF-16 code unit (not one Unicode code point). A Unicode character above U+FFFF,
+which on the wire is a UTF-16 surrogate pair, is therefore written as two consecutive escapes:
+
+    U+1F600 (grinning face emoji)  ->  "<d83d<de00"
+
+The encoder always emits lowercase hex digits, always exactly four of them, and never follows the escape with a closing
+'>'. The decoder accepts upper, lower or mixed case, but producers should use lowercase consistently.
+
+There is deliberately no closing bracket. In FileSwitch, a sequence "<name>" triggers system-variable expansion; "<name"
+does not. The absence of '>' is what makes the escape safe to embed in a filename that passes through FileSwitch's path
+resolver.
+
+Round trips, and where they fail
+--------------------------------
+
+On the way from the server, '&', '@', '^', '%', '<' and '>' are also presented as escapes: "<0026", "<0040",
+"<005e", "<0025", "<003c" and "<003e". A RISC OS path gives each of them a meaning of its own: '%' would otherwise be
+shown as '>', and a '>' after a '<' earlier in the path would close it into a "<...>" that FileSwitch expands. A '$' is
+presented as '<', as on SMB1, unless four hex digits follow it; then it is presented as "<0024", so "$RECYCLE.BIN" is
+shown as "<RECYCLE/BIN" and "05_$1000_Wedding.flac" as "05_<00241000_Wedding/flac". Every other character up to U+00FF
+is presented as itself, apart from the C1 controls above.
+
+On the way to the server, a name LanManFS finds in the directory is sent in the server's own spelling. In a name it does
+not find (one being created, for instance) a '<' followed by four hex digits is kept and decoded as an escape, and any
+other '<' is sent as '$'.
+
+So a '<' in a name from the server followed by four hex digits always starts an escape, any other '<' stands for '$', a
+name from the server never contains a '>', and a name that came from the encoder reaches the server as the object it
+came from.
+
+The SMB1 mapping
+----------------
+
+*LMNameMode -SMB2LegacyChars presents '$', '&', '@', '^' and '%' from an SMB2 server as '<', '+', '=', ',' and '>', as on
+an SMB1 mount, and *LMNameMode -SMB2EscapedChars returns to escapes. Under the SMB1 mapping a '<' is ambiguous: a server
+name containing '$' followed by four hex digits, such as "$beef", is presented as "<beef". An existing file of that name
+is still reached, because LanManFS finds the name in the directory and sends the server's own spelling, but a program
+decoding escapes reads it as U+BEEF, and a new name typed as "<beef" is created as the single character U+BEEF, not as
+"$beef". A '%' later in the same path is presented as '>', which closes the '<' into a "<...>" that FileSwitch expands,
+so such a path cannot be reached at all. A '&', '@' or '^' is presented as '+', '=' or ',', which goes back to the
+server as itself, so such a file is listed but cannot be opened by the name shown.
+
+Usage by Unicode-aware applications
+-----------------------------------
+
+Applications that present, edit or generate filenames with code points outside Latin-1 can use this encoding as
+the contract for names passed to and from LanManFS:
+
+- Decoding for display. When reading a name from a LanMan path, scan for '<' followed by four hex digits and substitute
+  the corresponding Unicode character. Combine two consecutive escapes in the surrogate range (U+D800..U+DFFF) into one
+  supplementary-plane code point.
+
+- Encoding for use. When constructing a name to hand back to LanManFS (rename, create, and so on), convert any
+  character outside the RISC OS Latin-1 repertoire into the corresponding "<xxxx" form. Write supplementary-plane code
+  points as two escapes, one per UTF-16 surrogate half.
+
+Deliberate edits to the hex digits are legal. To rename a file from one emoji to another, write the new escape sequence
+directly. LanManFS does not check "<xxxx" sequences at the rename boundary: the encoding is a data format that
+applications may edit.
+
+Scope and limits
+----------------
+
+The escape exists because FileSwitch paths are Latin-1 byte strings.
+
+On an SMB1 mount nothing decodes or produces the escape: names are exchanged as single-byte strings, '$', '&', '@' and
+'^' are presented as '<', '+', '=' and ',', and every '<' in a new name is turned into '$'.
+
+The escape sits alongside the separate c/Xlate translation step that handles the other characters RISC OS reserves ('#',
+'%', space, and so on). The two meet only at '<': on an SMB2 mount c/Xlate passes a '<' that starts an escape through
+unchanged, and maps any other '<' to '$'.
+
+Reference implementation
+------------------------
+
+c/SMB2Unicode in the OmniLanManFS source tree. The two directions are:
+
+- smb2_utf16le_to_latin1 - wire UTF-16LE to RISC OS Latin-1 plus escapes. Produces "<xxxx" for every surrogate half, for
+  the C1 controls U+0080 to U+009F, for any other code unit above U+00FF that alphabet 101 does not place at bytes 0x80
+  to 0x9F, and, in names from a listing or a change notification, for '&', '@', '^', '%', '<', '>' and a '$' that
+  four hex digits follow.
+- smb2_latin1_to_utf16le - RISC OS Latin-1 plus escapes to wire UTF-16LE. Recognises "<xxxx" and decodes it as a raw
+  UTF-16 code unit.
+
+The test c/Xlate applies before keeping a '<' (xlt_hex_digits, in Xlt_CopyViaInverseTable) is the same one the decoder
+applies, and the same one the encoder applies to the characters after a '$' (dollar_reads_as_escape).
+
+The Latin-1 to Unicode table is loaded at module initialisation from Service_International 8 (alphabet 101) on RISC OS
+versions that support it, falling back to a compiled-in copy of RISC OS 5's alphabet 101 otherwise. The reverse table,
+used on every name from the server, is always the compiled-in RISC OS 5 layout.

@@ -1,0 +1,86 @@
+# Copyright (c) 2021, RISC OS Open Ltd
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met: 
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+#       may be used to endorse or promote products derived from this software
+#       without specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+# 
+
+# A8.8.332 VLDM
+# A1 VFPv2, VFPv3, VFPv4, ASIMD
+VLDM_A1(Rn,D:Vd,imm8,U,W)
+{
+	return aborttrap_VLDM_D(ctx,Rn,D_Vd,imm8,U,W);
+}
+
+# A2 VFPv2, VFPv3, VFPv4
+VLDM_A2(Rn,Vd:D,imm8,U,W)
+{
+	return aborttrap_VLDM_S(ctx,Rn,Vd_D,imm8,U,W);
+}
+
+# A8.8.333 VLDR
+# A1 VFPv2, VFPv3, VFPv4, ASIMD
+VLDR_A1(Rn,D:Vd,imm8,U)
+{
+	return aborttrap_VLDR_D(ctx,Rn,D_Vd,imm8<<2,U);
+}
+
+# A2 VFPv2, VFPv3, VFPv4
+VLDR_A2(Rn,Vd:D,imm8,U)
+{
+	return aborttrap_VLDR_S(ctx,Rn,Vd_D,imm8<<2,U);
+}
+
+# A8.8.412 VSTM
+# A1 VFPv2, VFPv3, VFPv4, ASIMD
+VSTM_A1(Rn,D:Vd,imm8,U,W)
+{
+	return aborttrap_VSTM_D(ctx,Rn,D_Vd,imm8,U,W);
+}
+# A2 VFPv2, VFPv3, VFPv4
+VSTM_A2(Rn,Vd:D,imm8,U,W)
+{
+	return aborttrap_VSTM_S(ctx,Rn,Vd_D,imm8,U,W);
+}
+
+# A8.8.413 VSTR
+# A1 VFPv2, VFPv3, VFPv4, ASIMD
+VSTR_A1(Rn,D:Vd,imm8,U)
+{
+	return aborttrap_VSTR_D(ctx,Rn,D_Vd,imm8<<2,U);
+}
+# A2 VFPv2, VFPv3, VFPv4
+VSTR_A2(Rn,Vd:D,imm8,U)
+{
+	return aborttrap_VSTR_S(ctx,Rn,Vd_D,imm8<<2,U);
+}
+
+# A8.8.367 VPOP
+# Map to the underlying VLDM instruction, it exhibits the same behaviour
+VPOP_A1 as if VLDM_A1
+VPOP_A2 as if VLDM_A2
+
+# A8.8.368 VPUSH
+# Map to the underlying VSTM instruction, it exhibits the same behaviour
+VPUSH_A1 as if VSTM_A1
+VPUSH_A2 as if VSTM_A2

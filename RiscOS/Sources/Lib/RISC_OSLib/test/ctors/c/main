@@ -1,0 +1,40 @@
+/* Copyright 2023 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <stdio.h>
+#include "kernel.h"
+
+extern void otherfile1_ctor(void);
+extern void otherfile1_dtor(void);
+extern void mylib_import(void);
+
+static void test(const char *name, void (*fn)(void))
+{
+  const char *lang = _kernel_language((int) fn);
+  if (lang)
+    printf("%s language is '%s'\n", name, lang);
+  else
+    printf("%s language is unknown\n", name);
+}
+
+#define TEST(fn) do { test(#fn, fn); } while (0)
+
+int main(void)
+{
+  mylib_import();
+  printf("In main\n");
+  TEST(otherfile1_ctor);
+  TEST(otherfile1_dtor);
+}

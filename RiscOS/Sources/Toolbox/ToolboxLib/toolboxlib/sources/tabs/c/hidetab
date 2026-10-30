@@ -1,0 +1,58 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : hidetab.c
+ * Purpose     : Veneer for method Tabs_HideTab
+ * Description : Hides or reveals the tab of the given index
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "tabs.h"
+
+
+
+
+/*
+ * Name        : tabs_hide_tab
+ * Description : Hides or reveals the tab of the given index
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ *               int hide
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_hide_tab ( unsigned int flags,
+                                        ObjectId window,
+                                        ComponentId gadget,
+                                        int tab_index,
+                                        int hide
+                                      )
+{
+_kernel_swi_regs r;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = Tabs_HideTab;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) tab_index;
+  r.r[5] = (int) hide;
+  return(_kernel_swi(Toolbox_ObjectMiscOp,&r,&r));
+}
+

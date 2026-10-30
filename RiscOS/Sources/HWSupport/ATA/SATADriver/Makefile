@@ -1,0 +1,45 @@
+# Makefile for SATA driver
+
+COMPONENT   = SATADriver
+ASMHDRS     = ATA AHCIDevice
+ASMCHDRS    = ATA AHCIDevice
+HDRS        =
+CMHGDEPENDS = device module
+OBJS        = coroutine command device fgopcb globals module message op swi trampoline util
+LIBS        = ${SYNCLIB}
+ROMCDEFINES = -DROM_MODULE
+
+# Enable one of the following groups, depending on what sort of debug you want
+
+#CFLAGS     += -DDEBUG_ENABLED
+
+#CFLAGS     += -DDEBUG_ENABLED -DDEBUGLIB -DDEBUGLIB_NOBRACKETS
+#LIBS       += ${DEBUGLIBS} ${NET5LIBS}
+
+# Decide whether to use OS_Memory 0 or OS_Memory 19 for DMA prep
+OSMEM19 ?= TRUE
+
+ifeq ($(OSMEM19),TRUE)
+CFLAGS += -DOSMEM19
+CMHGFLAGS += -DOSMEM19
+OBJS += osmem19
+CMHGDEPENDS += osmem19
+else
+OBJS += osmem0
+endif
+
+include CModule
+
+# This version is used when cross-compiling or with amu >= 5.35
+
+AHCIDevice.expasmc: AHCIDevice.hdr AHCIDevice.h
+	${HDR2H} $(word 1, $^) ${C_EXP_HDR:.h=}${SEP}$(word 2, $^)
+	${FAPPEND} ${C_EXP_HDR:.h=}${SEP}$(word 2, $^) $(word 2, $^) ${C_EXP_HDR:.h=}${SEP}$(word 2, $^)
+
+# This version is used with amu < 5.35, and can be retired eventually
+
+expasmc.AHCIDevice: hdr.AHCIDevice h.AHCIDevice
+	${HDR2H} hdr.AHCIDevice ${C_EXP_HDR:.h=}.h.AHCIDevice
+	FAppend ${C_EXP_HDR:.h=}.h.AHCIDevice h.AHCIDevice ${C_EXP_HDR:.h=}.h.AHCIDevice
+
+# Dynamic dependencies:

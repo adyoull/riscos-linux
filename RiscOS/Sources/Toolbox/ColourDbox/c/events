@@ -1,0 +1,368 @@
+/* Copyright 1996 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Title:   events.c
+ * Purpose: filters registered with the Toolbox.  Events are delivered here.
+ * Author:  TGR
+ * History: 8-Mar-94: TGR: created from IDJ template
+ *
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "kernel.h"
+#include "swis.h"
+
+
+#include "tboxlibint/const.h"
+#include "tboxlibint/macros.h"
+#include "tboxlibint/debug.h"
+#include "tboxlibint/mem.h"
+#include "tboxlibint/messages.h"
+#include "tboxlibint/string32.h"
+
+#include "tboxlibint/objects/toolbox.h"
+#include "tboxlibint/objects/colourdbox.h"
+
+#include "auxiliary.h"
+#include "object.h"
+#include "events.h"
+
+static _kernel_oserror *event_colourdbox_to_show    (ObjectID object_id);
+static _kernel_oserror *event_colourdbox_to_close   (TaskDescriptor *t, wimp_PollBlock *block, IDBlock *id_block, _kernel_swi_regs *r);
+static _kernel_oserror *event_menus_deleted         (TaskDescriptor *t);
+static _kernel_oserror *event_picker_choice         (TaskDescriptor *t, wimp_PollBlock *block);
+static _kernel_oserror *event_colour_changed        (TaskDescriptor *t, wimp_PollBlock *block);
+static _kernel_oserror *event_reset_colour          (TaskDescriptor *t, wimp_PollBlock *block);
+static _kernel_oserror *update_dialogue             (ColourDboxInternal *internal);
+
+extern _kernel_oserror *events_postfilter (_kernel_swi_regs *r)
+{
+
+    /*
+     * called from the main Toolbox postfilter, when an event happens which
+     * this module has expressed an interest in.
+     * R0 = Wimp event reason code
+     * R1 ->client's Wimp event block
+     * R2 = Task Descriptor of task interested in the event
+     * R3 ->6-word "ID block" as passed to Toolbox_Initialise
+     *
+     */
+
+    /*
+     * This function gets a pointer to the task interested in the event in
+     * R2 (since this was the value passed to Toolbox_RegisterPostFilter).
+     * If the event is dealt with by this module (eg ID block gets updated).
+     * then set R0 to non-null before return.
+     */
+
+   wimp_PollBlock   *block           = (wimp_PollBlock *)r->r[1];
+   IDBlock          *id_block        = (IDBlock *)r->r[3];
+   int               event_code      = r->r[0];
+   TaskDescriptor   *t               = (TaskDescriptor *) r->r[2];
+
+   DEBUG debug_output ("e","ColD: Postfilter entered, received wimp event code = 0x%x\n",event_code);
+   r->r[0] = 0;
+
+   switch (event_code) {
+
+      case wimp_EREDRAW:
+      /*case wimp_EKEY:*/
+         r->r[0] = find_internal_w (*((int *)block),t) ? -1 : 0;
+         return NULL;
+      case wimp_ESEND:
+      case wimp_ESEND_WANT_ACK:
+         DEBUG debug_output ("e","ColD: message received, action = 0x%x\n",block->msg.hdr.action);
+         switch (block->msg.hdr.action) {
+            case wimp_MMENUS_DELETED:
+               return event_menus_deleted (t);
+            case colourpicker_MCOLOURCHANGED: /* Colour was changed by user */
+               return event_colour_changed (t, block);
+            case colourpicker_MPICKERCHOICE: /* User clicked ok to set new colour */
+               return event_picker_choice  (t, block);
+            case colourpicker_MCLOSEDIALOGUEREQUEST:
+               return event_colourdbox_to_close(t, block, id_block, r);
+            case colourpicker_MRESETCOLOURREQUEST:
+               return event_reset_colour (t, block);
+            default:
+               break;
+         }
+         break;
+      case wimp_ETOOLBOX_EVENT:
+         DEBUG debug_output ("e","ColD: handling a toolbox event, code = 0x%x\n",block->toolbox_event.hdr.event_code);
+         switch (block->toolbox_event.hdr.event_code) {
+            case ColourDbox_AboutToBeShown:
+                  return event_colourdbox_to_show (id_block->self_id);
+               break;
+            default:
+               break;
+         }
+      default:
+         break;
+   }
+   return NULL;
+}
+
+
+
+extern _kernel_oserror *events_prefilter (_kernel_swi_regs *r)
+{
+
+    /*
+     * called from the main Toolbox prefilter, when Wimp_Poll is called.
+     * R0 = mask passed to Wimp_Poll
+     * R1 ->client's poll block passed to Wimp_Poll
+     * R2 = Task Descriptor.
+     *
+     */
+
+    /*
+     * This function gets a pointer to the current task in
+     * R2 (since this was the value passed to Toolbox_RegisterPreFilter).
+     * This function can enable additional events by zero-ing bits in
+     * r->r[0]
+     */
+
+    DEBUG debug_output ("e","ColD: prefilter entered\n");
+
+    if (global_next) return show_actual();
+
+    IGNORE (r);
+
+    return NULL;
+}
+
+static _kernel_oserror *event_colourdbox_to_show      (ObjectID object_id) {
+
+   _kernel_oserror    *e;
+   _kernel_swi_regs    regs;
+
+   DEBUG debug_output ("e","ColD: colourdbox_to_show entered\n");
+
+   regs.r[0] = 0;
+   regs.r[1] = (int) object_id;
+
+   if ((e = _kernel_swi (Toolbox_GetInternalHandle, &regs, &regs)) != NULL)
+      return e;
+
+   global_next = (ColourDboxInternal *) regs.r[0];
+
+   return NULL;
+}
+
+static _kernel_oserror *event_colourdbox_to_close      (TaskDescriptor *t, wimp_PollBlock *block, IDBlock *id_block, _kernel_swi_regs *r) {
+
+   _kernel_oserror    *e;
+   ColourDboxInternal *internal;
+
+   DEBUG debug_output ("e","ColD: CloseDialogueRequest\n");
+   if ((internal = find_internal_d (((ColourPicker_CloseDialogueRequest_Event *)(block))->message.dialogue_handle, t)) == NULL) {
+      DEBUG debug_output ("e","ColD: Not our colour picker, dh = 0x%x\n", ((ColourPicker_CloseDialogueRequest_Event *)(block))->message.dialogue_handle);
+      return NULL;
+   }
+   DEBUG debug_output ("e","ColD: ... object ID = 0x%x\n",internal->object_id);
+
+   if (internal->reset_on_close) {
+      reset_colour (internal);
+   }
+
+   if ((e = close_dialogue (internal, t)) != NULL)
+      return e;
+
+   id_block->self_id = internal->object_id;
+   r->r[0]           = 1;
+
+   return NULL;
+}
+
+static _kernel_oserror *event_menus_deleted         (TaskDescriptor *t) {
+
+   _kernel_oserror    *e;
+   _kernel_swi_regs    regs;
+   ColourDboxInternal *internal;
+
+   DEBUG debug_output ("e","ColourDbox: menus deleted, handling...\n");
+
+   if (!global_menu)
+      return NULL;
+
+   DEBUG debug_output ("e","ColourDbox: we've got a live one!\n");
+
+   regs.r[0] = 0;
+   regs.r[1] = (int) global_menu;
+
+   if ((e = _kernel_swi (Toolbox_GetInternalHandle, &regs, &regs)) != NULL)
+      return e;
+
+   internal = (ColourDboxInternal *) regs.r[0];
+
+   internal->flags &= ~ColourDboxInternal_IsShowing;
+
+   if (internal->flags & ColourDboxInternal_GenerateHideEvent) {
+      if ((e = dialogue_completed (global_menu)) != NULL)
+         return e;
+   }
+   global_menu = 0;
+
+   /* deregister interest in events etc.
+
+   regs.r[0] = 1;
+   regs.r[1] = ColourDbox_PostFilter;
+   regs.r[2] = (int) t;
+   regs.r[3] = Toolbox_RegisterPostFilter_WimpMessage;
+   regs.r[4] = (int) menu_messages_of_interest;
+
+   if ((e = _kernel_swi (Toolbox_RegisterPostFilter, &regs, &regs)) != NULL)
+      return e;
+*/
+/*
+   if (!(--t->window_count) && ((e = deregister_task(t)) != NULL))
+      return e;
+*/
+   IGNORE(t);
+
+
+   return NULL;
+}
+
+static _kernel_oserror *event_picker_choice         (TaskDescriptor *t, wimp_PollBlock *block) {
+
+   _kernel_oserror                    *e;
+   _kernel_swi_regs                    regs;
+   ColourDboxInternal                 *internal;
+   ToolboxEvent                        toolbox_event;
+   ColourDbox_ColourSelected_Event    *colour_selected
+                                             = (ColourDbox_ColourSelected_Event *) &toolbox_event;
+   ColourPicker_PickerChoice_Event    *picker_choice  = (ColourPicker_PickerChoice_Event *) block;
+   size_t                              extension_size;
+
+   /* raise the toolbox event  ColourDbox_ColourSelected _if_ the client has asked to be
+        informed of this */
+
+   if ((internal = find_internal_d (picker_choice->message.dialogue_handle, t)) == NULL) {
+      DEBUG debug_output ("e","ColD: Not our colour picker, dh = 0x%x, 0x%x\n", ((ColourPicker_CloseDialogueRequest_Event *)(block))->message.dialogue_handle, ((int *)block)[5]);
+      return NULL;
+   }
+   toolbox_event.hdr.size       = sizeof(ColourDbox_ColourSelected_Event);
+   toolbox_event.hdr.event_code = ColourDbox_ColourSelected;
+   toolbox_event.hdr.flags      = 0;
+
+   extension_size = picker_choice->message.colour_descriptor_block.hdr.extension_size;
+
+   memcpy (&colour_selected->hdr.flags, &picker_choice->message.flags, extension_size + sizeof (ColourDescriptorHeader) + sizeof(int));
+
+   regs.r[0] = 0;
+   regs.r[1] = (int) internal->object_id;
+   regs.r[2] = -1;
+   regs.r[3] = (int) &toolbox_event;
+
+   if ((e = _kernel_swi (Toolbox_RaiseToolboxEvent, &regs, &regs)) != NULL) {
+      return e;
+   }
+
+   store_colour_descriptor_block (internal, (ColourDescriptorBlock *) &picker_choice->message.colour_descriptor_block, 1);
+
+   internal->ini_flags      = internal->flags;
+   internal->reset_on_close = 0;
+
+   return NULL;
+}
+
+static _kernel_oserror *event_colour_changed         (TaskDescriptor *t, wimp_PollBlock *block) {
+
+   ColourDboxInternal                 *internal;
+   ColourPicker_ColourChanged_Event   *colour_changed = (ColourPicker_ColourChanged_Event *) block;
+
+   DEBUG debug_output ("e","ColD: event colour changed\n");
+
+   if ((internal = find_internal_d (colour_changed->message.dialogue_handle, t)) == NULL) {
+      DEBUG debug_output ("e","ColD: Not our colour picker, dh = 0x%x, 0x%x\n", ((ColourPicker_CloseDialogueRequest_Event *)(block))->message.dialogue_handle, ((int *)block)[5]);
+      return NULL;
+   }
+
+   store_colour_descriptor_block (internal, (ColourDescriptorBlock *) &colour_changed->message.colour_descriptor_block, 0);
+
+   if (colour_changed->message.flags & ColourPicker_Message_NoneChosen) {
+      internal->flags |= ColourDboxInternal_SelectNoneButton;
+   } else {
+      internal->flags &= ~ColourDboxInternal_SelectNoneButton;
+   }
+
+   internal->reset_on_close = 1;
+
+   return NULL;
+}
+
+static _kernel_oserror *event_reset_colour          (TaskDescriptor *t, wimp_PollBlock *block) {
+
+   ColourDboxInternal                      *internal;
+   ColourPicker_ResetColourRequest_Event   *reset_colour_event = (ColourPicker_ResetColourRequest_Event *) block;
+
+   DEBUG debug_output ("e","ColD: event reset colour \n");
+
+   if ((internal = find_internal_d (reset_colour_event->message.dialogue_handle, t)) == NULL) {
+      DEBUG debug_output ("e","ColD: Not our colour picker, dh = 0x%x, 0x%x\n", ((ColourPicker_CloseDialogueRequest_Event *)(block))->message.dialogue_handle, ((int *)block)[5]);
+      return NULL;
+   }
+
+   reset_colour (internal);
+
+   IGNORE(t);
+
+   /* update dialogue */
+   return update_dialogue (internal);
+}
+
+static _kernel_oserror *update_dialogue(ColourDboxInternal *internal) {
+
+   _kernel_oserror       *e;
+   _kernel_swi_regs       regs;
+   ColourPickerExtended  *colourpicker_extd;
+   int                    colour_picker_extd_size;
+   int                    reqdsize;
+
+   colour_picker_extd_size = sizeof(ColourPickerHeader) + internal->colour_block_ini->hdr.extension_size;
+   reqdsize = sizeof (ColourDescriptorHeader) + internal->colour_block_ini->hdr.extension_size;
+
+   if ((colourpicker_extd = mem_alloc(colour_picker_extd_size)) == NULL)
+      return make_error (ColourDbox_AllocFailed, 0);
+
+   memcpy (&colourpicker_extd->hdr.descriptor_hdr, internal->colour_block_ini, reqdsize);
+
+   if (internal->ini_flags & ColourDboxInternal_SelectNoneButton) {
+      colourpicker_extd->hdr.flags |=  ColourPickerFlags_SelectNoneButton;
+   } else {
+      colourpicker_extd->hdr.flags &= ~ColourPickerFlags_SelectNoneButton;
+   }
+
+   regs.r[0] = ColourPicker_Update_ModelAndSetting | ColourPicker_Update_SelectNoneButton;
+   regs.r[1] = internal->dialogue_handle;
+   regs.r[2] = (int) colourpicker_extd;
+
+   if ((e = _kernel_swi (ColourPicker_UpdateDialogue, &regs, &regs)) != NULL)
+      goto handleError;
+
+   mem_freek (colourpicker_extd);
+
+   return NULL;
+
+handleError:
+   if (e->errnum == 0x20d02)
+      e = dialogue_hidden (internal);
+
+   mem_freek (colourpicker_extd);
+   return e;
+}

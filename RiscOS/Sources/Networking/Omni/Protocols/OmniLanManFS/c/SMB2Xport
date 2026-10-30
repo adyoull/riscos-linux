@@ -1,0 +1,531 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* c.SMB2Xport - Direct TCP transport for SMB2/3 (port 445)
+ *
+ * Implements a framed TCP transport for SMB2/3. Messages are sent and received with a 4-byte length-prefixed header as defined in
+ * MS-SMB2 section 2.1 (Direct TCP transport).
+ *
+ * The framing is identical to NetBIOS session data (type 0x00) but without the session request/response handshake used on port 139.
+ *
+ */
+
+#include <string.h>
+
+#include "kernel.h"
+#include "swis.h"
+
+#include "sys/types.h"
+#include "sys/socket.h"
+#include "sys/uio.h"
+#include "netinet/in.h"
+#include "netinet/tcp.h"
+#include "netdb.h"
+#include "arpa/inet.h"
+#include "sys/filio.h"
+#include "sys/errno.h"
+#include "socklib.h"
+
+#include "AsmUtils/callbacks.h"
+
+#include "stdtypes.h"
+#include "Tick.h"
+#include "SMB2Xport.h"
+
+/* Default bound on a TCP connect attempt, so an unreachable host cannot freeze the single-threaded desktop while it times out. */
+#define CONNECT_TIMEOUT_CS 500
+
+/*
+ * Perform a TCP connect that honours a timeout by driving the socket in non-blocking mode.
+ *
+ * connect() returns EINPROGRESS on a non-blocking socket; select then waits for writability (success) or an exception (failure) up to the
+ * deadline, and the deferred SO_ERROR is read to learn the real outcome.
+ *
+ * Parameters:
+ *   sock        socket to connect
+ *   addr        target address
+ *   addr_len    length of addr in bytes
+ *   timeout_cs  connect timeout in centiseconds
+ *
+ * Returns: 0 once connected, -1 on error or timeout.
+ */
+static int connect_with_timeout(int sock, const struct sockaddr *addr, int addr_len, int timeout_cs) {
+  int nonblock = 1;
+  int nodelay = 1;
+  int rc;
+
+  /*
+   * Send each request at once.  SMB2 is strictly request then response, so holding a request back to coalesce it with more data only waits
+   * for the server's delayed acknowledgement.  Worth having but not essential, so a refusal is only noted.
+   */
+  if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char *)&nodelay, sizeof(nodelay)) != 0) {
+    debug("SMB2X: TCP_NODELAY refused, errno=%d\n", errno);
+  }
+
+  /* Non-blocking mode keeps connect() from stalling the single-threaded module. */
+  if (socketioctl(sock, FIONBIO, (char *)&nonblock) != 0) {
+    vdebug("SMB2X: FIONBIO on failed\n");
+    return -1;
+  }
+
+  /* On a non-blocking socket this normally returns straight away with EINPROGRESS. */
+  rc = connect(sock, addr, addr_len);
+
+  /* Any immediate error other than in-progress is a hard failure. */
+  if (rc != 0 && errno != EINPROGRESS) {
+    vdebug("SMB2X: connect() immediate error %d\n", errno);
+    return -1;
+  }
+
+  /* Connection still pending: wait for it to complete or time out. */
+  if (rc != 0) {
+    fd_set wr, ex;
+    struct timeval tv;
+    int nready;
+
+    /* Writability signals success, an exception signals failure, bounded by the timeout. */
+    FD_ZERO(&wr);
+    FD_ZERO(&ex);
+    FD_SET(sock, &wr);
+    FD_SET(sock, &ex);
+    tv.tv_sec = (long)timeout_cs / 100;
+    tv.tv_usec = ((long)timeout_cs % 100) * 10000;
+
+    nready = select(sock + 1, NULL, &wr, &ex, &tv);
+
+    /* Zero is a timeout, negative is a select() error. */
+    if (nready <= 0) {
+      vdebug("SMB2X: connect() timed out after %dcs (select=%d)\n", timeout_cs, nready);
+      return -1;
+    }
+
+    /* select() only reports readiness; the actual connect result lives in SO_ERROR. */
+    {
+      int err = 0;
+      int len = sizeof(err);
+
+      if (getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0 || err != 0) {
+        vdebug("SMB2X: connect() deferred error %d\n", err);
+        return -1;
+      }
+    }
+  }
+
+  return 0;
+}
+
+/*
+ * Block until a socket becomes readable or writable, or the absolute deadline passes.
+ *
+ * Wraps every send and receive so the single-threaded module never blocks indefinitely. Drops to user mode first so a blocking select() is
+ * legal from module code.
+ *
+ * Parameters:
+ *   sock      socket to wait on
+ *   for_read  true to wait for readability, false for writability
+ *   deadline  absolute LM_Tick() centisecond value at which to give up
+ *
+ * Returns: OK when the socket is ready, ETIMEOUT once the deadline passes, ELINKFAILED on a select() error.
+ */
+static err_t wait_until_ready(int sock, bool for_read, uint deadline) {
+  uint now;
+  uint remaining;
+  fd_set fds;
+  struct timeval tv;
+  int nready;
+
+  /* usermode_donothing() drops to user mode so the blocking select() is legal from module code. */
+  usermode_donothing();
+
+  now = LM_Tick();
+
+  if ((int32_t)(now - deadline) >= 0) {
+    debug("SMB2X: %s deadline already past sock=%d now=%u deadline=%u\n", for_read ? "recv" : "send", sock, (unsigned)now,
+          (unsigned)deadline);
+    return ETIMEOUT;
+  }
+
+  remaining = deadline - now;
+
+  /* Turn the remaining centiseconds into the select() timeout. */
+  {
+    long rem_long = (long)remaining;
+    tv.tv_sec = rem_long / 100L;
+    tv.tv_usec = (rem_long % 100L) * 10000L;
+  }
+
+  FD_ZERO(&fds);
+  FD_SET(sock, &fds);
+
+  /* Wait on the read set or the write set according to the requested direction. */
+  if (for_read) {
+    nready = select(sock + 1, &fds, NULL, NULL, &tv);
+  } else {
+    nready = select(sock + 1, NULL, &fds, NULL, &tv);
+  }
+
+  if (nready > 0) {
+    return OK;
+  }
+
+  if (nready == 0) {
+    debug("SMB2X: %s select() timed out sock=%d remaining=%ucs\n", for_read ? "recv" : "send", sock, (unsigned)remaining);
+    return ETIMEOUT;
+  }
+
+  debug("SMB2X: %s select() error sock=%d errno=%d\n", for_read ? "recv" : "send", sock, errno);
+
+  return ELINKFAILED;
+}
+
+/*
+ * Read exactly `len` bytes from `sock` into `where`, blocking until the buffer is full, the peer closes, or the deadline passes.
+ *
+ * A stream recv may satisfy only part of the request, so it loops, waiting for the socket to become readable before each attempt.
+ *
+ * Parameters:
+ *   sock      connected stream socket
+ *   where     buffer to fill
+ *   len       number of bytes required
+ *   deadline  LM_Tick value past which the wait gives up
+ *
+ * Returns: OK once every byte is read; ELINKFAILED on peer close or socket error; the wait_until_ready error (typically ETIMEOUT) when the
+ * deadline passes.
+ */
+static err_t read_all(int sock, uint8_t *where, int len, uint deadline) {
+  /* Loop until the whole buffer is filled; a stream recv may return fewer bytes than asked for. */
+  while (len > 0) {
+    int rdlen;
+
+    err_t wait_res = wait_until_ready(sock, true, deadline);
+
+    /* Block until the socket is readable or the deadline expires, then propagate a timeout upwards. */
+    if (wait_res != OK) {
+      return wait_res;
+    }
+
+    rdlen = recv(sock, (char *)where, len, 0);
+
+    /* A zero-length read means the peer has closed the connection. */
+    if (rdlen == 0) {
+      debug("SMB2X: recv EOF sock=%d (peer closed)\n", sock);
+      return ELINKFAILED;
+    }
+
+    /* A negative return is a socket error. */
+    if (rdlen < 0) {
+      debug("SMB2X: recv error sock=%d errno=%d\n", sock, errno);
+      return ELINKFAILED;
+    }
+
+    len -= rdlen;
+    where += rdlen;
+  }
+
+  return OK;
+}
+
+err_t SMB2X_Connect(const char *hostname, int *sock_out) {
+  struct hostent *hp;
+  struct hostent synthetic_host;
+  struct in_addr synthetic_addr;
+  char *synthetic_list[2];
+  char **cur;
+
+  /* Try the name as a literal dotted-quad address first, sparing a DNS round-trip. */
+  debug("SMB2X: connecting to %s port %d\n", hostname, SMB2X_PORT);
+
+  synthetic_addr.s_addr = (u_int32_t)inet_addr(hostname);
+
+  /*
+   * A valid literal: wrap it in a one-entry hostent so the address walk below is identical for literal and resolved names; otherwise
+   * resolve through DNS.
+   */
+  if (synthetic_addr.s_addr != (u_int32_t)INADDR_NONE) {
+    synthetic_list[0] = (char *)&synthetic_addr;
+    synthetic_list[1] = NULL;
+    synthetic_host.h_addrtype = AF_INET;
+    synthetic_host.h_length = sizeof(struct in_addr);
+    synthetic_host.h_addr_list = synthetic_list;
+    hp = &synthetic_host;
+  } else {
+    debug("SMB2X: DNS lookup for %s\n", hostname);
+#ifdef SMB2_DEBUG_VERBOSE
+    {
+      uint t0 = LM_Tick();
+      hp = gethostbyname(hostname);
+      vdebug("SMB2X: gethostbyname returned %s after %d cs\n", hp ? "OK" : "NULL", (int)(LM_Tick() - t0));
+    }
+#else
+    hp = gethostbyname(hostname);
+#endif
+
+    /* Name did not resolve to any address. */
+    if (hp == NULL) {
+      return ECANTFINDNAME;
+    }
+  }
+
+  /* Try each address the resolver returned until one accepts a connection. */
+  for (cur = hp->h_addr_list; *cur != NULL; cur++) {
+    struct sockaddr_in addr;
+    int sock;
+    int connect_rc;
+
+    /* Build the port-445 target address and open a fresh TCP socket for this attempt. */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(SMB2X_PORT);
+    memcpy(&addr.sin_addr, *cur, (size_t)hp->h_length);
+
+#ifdef DEBUG
+    {
+      unsigned char *ip = (unsigned char *)&addr.sin_addr.s_addr;
+      debug("SMB2X: trying %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+    }
+#endif
+
+    sock = socket(PF_INET, SOCK_STREAM, 0);
+
+    /* Cannot create a socket at all; abandon the whole connect rather than retry. */
+    if (sock < 0) {
+      /* Attempt the connection with a bounded timeout so a dead host does not hang the caller. */
+      debug("SMB2X: socket() failed\n");
+      return ECREATESOCKET;
+    }
+
+#ifdef SMB2_DEBUG_VERBOSE
+    {
+      uint t0 = LM_Tick();
+      connect_rc = connect_with_timeout(sock, (struct sockaddr *)&addr, sizeof(addr), CONNECT_TIMEOUT_CS);
+      vdebug("SMB2X: connect_with_timeout returned %d after %d cs\n", connect_rc, (int)(LM_Tick() - t0));
+    }
+#else
+    connect_rc = connect_with_timeout(sock, (struct sockaddr *)&addr, sizeof(addr), CONNECT_TIMEOUT_CS);
+#endif
+
+    /* Connected: hand the socket back and stop searching. */
+    if (connect_rc == 0) {
+      debug("SMB2X: connected, socket=%d\n", sock);
+      *sock_out = sock;
+
+      return OK;
+    }
+
+    /* This address refused or timed out; close it and move on to the next. */
+    socketclose(sock);
+  }
+
+  debug("SMB2X: all addresses exhausted\n");
+
+  return ECONNECTSOCKET;
+}
+
+err_t SMB2X_ConnectAddr(unsigned long ip_addr, int *sock_out) {
+  /* Connect to a known IP address using the default timeout. */
+  return SMB2X_ConnectAddrTimed(ip_addr, CONNECT_TIMEOUT_CS, sock_out);
+}
+
+err_t SMB2X_ConnectAddrTimed(unsigned long ip_addr, int timeout_cs, int *sock_out) {
+  struct sockaddr_in addr;
+  int sock;
+  int connect_rc;
+
+#ifdef DEBUG
+  {
+    unsigned char *ip = (unsigned char *)&ip_addr;
+    debug("SMB2X: connecting to %d.%d.%d.%d port %d (timeout %dcs)\n", ip[0], ip[1], ip[2], ip[3], SMB2X_PORT, timeout_cs);
+  }
+#endif
+
+  /* Build the port-445 target from the caller's network-order address and open a TCP socket. */
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(SMB2X_PORT);
+  addr.sin_addr.s_addr = (u_int32_t)ip_addr;
+
+  sock = socket(PF_INET, SOCK_STREAM, 0);
+
+  if (sock < 0) {
+    /* Attempt the connection, bounded by the caller-supplied timeout. */
+    debug("SMB2X: socket() failed\n");
+    return ECREATESOCKET;
+  }
+
+#ifdef SMB2_DEBUG_VERBOSE
+  {
+    uint t0 = LM_Tick();
+    connect_rc = connect_with_timeout(sock, (struct sockaddr *)&addr, sizeof(addr), timeout_cs);
+    vdebug("SMB2X: connect_with_timeout returned %d after %d cs\n", connect_rc, (int)(LM_Tick() - t0));
+  }
+#else
+  connect_rc = connect_with_timeout(sock, (struct sockaddr *)&addr, sizeof(addr), timeout_cs);
+#endif
+
+  /* Connection refused or timed out. */
+  if (connect_rc != 0) {
+    socketclose(sock);
+    return ECONNECTSOCKET;
+  }
+
+  debug("SMB2X: connected, socket=%d\n", sock);
+  *sock_out = sock;
+
+  return OK;
+}
+
+/*
+ * Write the whole scatter/gather buffer to `sock`, retrying until every byte is sent or the deadline passes.
+ *
+ * After a partial writev it drops iov entries that went out in full and trims the first partially-sent entry, so the next attempt resumes
+ * exactly where the socket stopped. The iov array is advanced in place and left consumed on return.
+ *
+ * Parameters:
+ *   sock      connected stream socket
+ *   iov       gather list, advanced in place across partial writes
+ *   iovcnt    number of iov entries
+ *   total     total byte count across all iov entries
+ *   deadline  LM_Tick value past which the wait gives up
+ *
+ * Returns: true once all bytes are sent; false on socket error or when the deadline passes.
+ */
+static bool socket_writev_all(int sock, struct iovec *iov, int iovcnt, int total, uint deadline) {
+  /* Loop until every byte is out; a writev may accept fewer than offered. */
+  while (total > 0) {
+    int n;
+
+    err_t wait_res = wait_until_ready(sock, false, deadline);
+
+    /* Block until the socket is writable or the deadline expires. */
+    if (wait_res != OK) {
+      return false;
+    }
+
+    n = socketwritev(sock, iov, iovcnt);
+
+    /* A non-positive return is a send error on this non-blocking socket. */
+    if (n <= 0) {
+      debug("SMB2X: socketwritev error sock=%d n=%d errno=%d\n", sock, n, errno);
+      return false;
+    }
+
+    total -= n;
+
+    /*
+     * Advance the gather list by the bytes just sent: drop fully-drained entries, then trim the partially-sent head so the next writev
+     * resumes cleanly.
+     */
+    while (n > 0 && iovcnt > 0) {
+      if ((size_t)n >= iov[0].iov_len) {
+        n -= (int)iov[0].iov_len;
+        iov++;
+        iovcnt--;
+      } else {
+        iov[0].iov_base = (char *)iov[0].iov_base + n;
+        iov[0].iov_len -= (size_t)n;
+        n = 0;
+      }
+    }
+  }
+
+  return true;
+}
+
+err_t SMB2X_Send(int sock, const uint8_t *data, int len, uint deadline) {
+  uint8_t hdr[SMB2X_FRAME_HEADER_SIZE];
+  struct iovec iov[2];
+
+  /*
+   * Prepend the 4-byte direct-TCP session header (a zero byte then the payload length as a 24-bit big-endian value) and gather it
+   * ahead of the data so header and body leave in one writev.
+   */
+  hdr[0] = 0;
+  hdr[1] = (uint8_t)((len >> 16) & 0xFF);
+  hdr[2] = (uint8_t)((len >> 8) & 0xFF);
+  hdr[3] = (uint8_t)(len & 0xFF);
+
+  iov[0].iov_base = (char *)hdr;
+  iov[0].iov_len = SMB2X_FRAME_HEADER_SIZE;
+  iov[1].iov_base = (char *)(void *)data;
+  iov[1].iov_len = (size_t)len;
+
+  /* Send header and body together, distinguishing a deadline expiry from a link failure for the caller. */
+  if (!socket_writev_all(sock, iov, 2, SMB2X_FRAME_HEADER_SIZE + len, deadline)) {
+    if ((int32_t)(LM_Tick() - deadline) >= 0) {
+      return ETIMEOUT;
+    }
+
+    return ELINKFAILED;
+  }
+
+  return OK;
+}
+
+err_t SMB2X_Recv(int sock, uint8_t *buf, int bufsize, uint deadline, int *len_out) {
+  uint8_t hdr[SMB2X_FRAME_HEADER_SIZE];
+  int len;
+  err_t res;
+
+  res = read_all(sock, hdr, SMB2X_FRAME_HEADER_SIZE, deadline);
+
+  if (res != OK) {
+    return res;
+  }
+
+  /* The direct-TCP header's first byte must be zero; anything else is a framing error. */
+  if (hdr[0] != 0) {
+    debug("SMB2X: framing violation sock=%d hdr[0]=0x%02X (expected 0x00)\n", sock, hdr[0]);
+    return ELINKFAILED;
+  }
+
+  len = (hdr[1] << 16) | (hdr[2] << 8) | hdr[3];
+
+  /* Refuse a frame that would overflow the caller's buffer. */
+  if (len > bufsize) {
+    debug("SMB2X: message too large (%d > %d)\n", len, bufsize);
+    return EDATALEN;
+  }
+
+  /* Read the payload body; a zero-length frame is legal and yields an empty message. */
+  if (len > 0) {
+    res = read_all(sock, buf, len, deadline);
+
+    if (res != OK) {
+      return res;
+    }
+  }
+
+  *len_out = len;
+
+  return OK;
+}
+
+bool SMB2X_DataReady(int sock) {
+  fd_set fds;
+  struct timeval tv;
+
+  /* A zero timeout makes this a non-blocking poll rather than a wait. */
+  FD_ZERO(&fds);
+  FD_SET(sock, &fds);
+  tv.tv_sec = 0;
+  tv.tv_usec = 0;
+
+  /* A positive select result means a read would not block. */
+  return select(sock + 1, &fds, NULL, NULL, &tv) > 0;
+}
+
+void SMB2X_Close(int sock) {
+  debug("SMB2X: closing socket %d\n", sock);
+  socketclose(sock);
+}

@@ -1,0 +1,219 @@
+#------------------------------------------------------------------------------
+# Components file for PineA64 build
+#------------------------------------------------------------------------------
+%BaseAddress   0xFC000000
+%Image         Build$ImageName
+%Log           Build$ImageName
+%Messages      Sources.Internat.Messages
+%Joiner        romlinker
+%JoinerFormat  romlinker
+%noimagesize
+
+# BBE Support
+BuildApps
+BuildExport
+BuildSystem             -options COMPONENTFILE=PineA64 COMPONENTFILE2=Universal
+BuildEnvironment        -options ENVFILE=PineA64
+BuildModules
+BuildTools
+
+#------------------------------------------------------------------------------
+# some headers
+#
+HdrSrc                -type EXP
+#------------------------------------------------------------------------------
+# we need the following exported for swis.h generation
+# change the type to EXP
+#
+CompressPNG           -type EXP
+DDEUtils              -type EXP
+Econet                -type EXP
+GPIO                  -type EXP
+HostFS                -type EXP
+SCSIDriver            -type EXP
+PCCardFS              -type EXP
+PDriver               -type EXP
+
+# Kernel is first module in ROM seen as the UtilityModule
+# The custom StartCMOS value is used to disable Num Lock by default
+# The full value maps to ADFS Drive 4 + No Caps + No Dir + No Num
+HAL_PineA64
+Kernel                -at 0xFC020000 -options ASFLAGS="-PD \"CMOS_Override SETS \\\"= FileLangCMOS,fsnumber_SDFS,CDROMFSCMOS,&C0,StartCMOS,&54\\\"\""
+Podule                -type EXP
+PCI
+SharedRISC_OSLib
+FileSwitch
+ResourceFS
+Messages
+MessageTrans
+TerritoryManager
+# First 8 modules cannot be unplugged
+UK
+WindowManager         -options OPTIONS=Ursula
+# Desktop is the 11th module (default language)
+Desktop
+TaskManager
+ScreenModes
+PineVideo
+BASIC105
+BASIC64
+BASICVFP
+BlendTable
+BufferManager
+ColourTrans
+Debugger
+DeviceFS
+PortableHAL
+RTSupport
+USBDriver
+EHCIDriver
+OHCIDriver
+DisplayManager
+DMAManager
+DragASprite
+DragAnObj
+DrawMod
+BBCEconet
+FileCore
+ADFS                  -type EXP
+RamFS
+Filer
+FilerSWIs
+FSLock
+FontManager
+FPEmulator            -options FPE_APCS=3/32bit FPEANCHOR=High
+VFPSupport
+Free
+Hourglass
+IIC
+International
+InternationalKeyboard -options KEYBOARD=All
+ITable
+NetFS
+NetFiler
+NetPrint
+NetStatus
+Obey
+Pinboard
+PipeFS
+RAMFSFiler
+ResourceFiler
+ROMFonts
+RTC
+ScreenBlanker
+ScrSaver              -options SCRSAVERAPP=No
+DualSerial
+SerialDeviceDriver    -type EXP
+SerialDeviceSupport
+#SerialMouse
+ShellCLI
+SoundDMA_HAL
+SoundControl
+SoundChannels
+SoundScheduler
+SpriteExtend
+SpriteUtils
+Squash
+SuperSample
+SystemDevices
+TaskWindow
+WindowUtils
+FilterManager
+WaveSynth
+StringLib
+Percussion
+SharedSnd
+Filer_Action
+DOSFS                 -options PCMCIA=TRUE
+SCSISwitch
+SCSISoftUSB
+SCSIFS
+SCSIFiler             -options ASFLAGS="-PD \"SCSI SETL {TRUE}\"" TEMPLATES=yes
+SDIODriver
+SDFS
+SDFSFiler             -options ASFLAGS="-PD \"SDFS SETL {TRUE}\"" TEMPLATES=yes
+# remember to confirm byte disc address (for SDFS_DicsOp) with programmer
+SDCMOS                -options MYASFLAGS="-pd \"StoreAtDiscAddress SETA &000b1e00\" -pd \"ReadDiscAddressFromRom SETA &fc000008\""
+ColourPicker
+DrawFile
+BootCommands
+WindowScroll
+MManager
+Internet
+Resolver
+Net
+BootNet
+Freeway
+ShareFS
+MimeMap
+EtherUSB
+DHCP                  -options OPTIONS=-DMINIMUM_OPTIONS_LENGTH=4
+Edit
+Draw
+Paint
+Alarm
+Chars
+Help2
+
+#
+# Toolbox Modules/Libs
+#
+tboxlib
+ToolboxLib            -type EXP
+Toolbox
+Window
+ToolAction
+Menu
+Iconbar
+ColourDbox
+ColourMenu
+DCS_Quit
+FileInfo
+FontDbox
+FontMenu
+PrintDbox
+ProgInfo
+SaveAs
+Scale
+Gadgets
+#
+# CDFS
+#
+CDFSDriver
+CDFSSoftSCSI
+CDFS
+CDFSFiler
+
+UnSqzAIF
+BatMgrHAL
+InetRes               -options TYPE=EmergencyUtils
+
+# some libraries and bits
+#
+callx
+AsmUtils              -type EXP
+TCPIPheaders          -type EXP
+socklib
+inetlib
+unixlib
+xolib
+UnicodeLib            -type EXP
+ConfigLib             -type EXP
+OSLib
+DeskLib
+ModMallocLib
+PlainArgvLib
+RemoteDebug
+PDebug
+DDTLib
+Wild
+Trace
+DebugLib
+SyncLib
+SDIOLib
+SMHCLib
+
+SDCreate              -options INSTDIR=<Install$Dir>.ABRelease
+ABRelease
+
+# end

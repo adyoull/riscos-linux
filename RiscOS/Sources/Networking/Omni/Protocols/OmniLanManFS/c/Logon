@@ -1,0 +1,410 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Logon.c - OmniClient logon front-end for setting the default credential.
+ *
+ * Surfaces a "Log on to Lan Manager" icon in the OmniClient FS-List window.  When the user logs
+ * in, this module remembers the (workgroup, username, password) tuple in LM_Vars and tries to
+ * locate the user's home share via NetLogon RPC against the primary domain controller, mounting
+ * it as "Home" if found.  The credential is reused by Omni_MountServer when the user later mounts
+ * other shares without specifying credentials.
+ *
+ * Sets two RISC OS variables for the !ArmBoot framework: Omni$UserLanMan (login name) and
+ * LanMan$HomeDir (home-dir path, suitable for *Dir).
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include "kernel.h"
+#include "swis.h"
+
+#include "stdtypes.h"
+#include "LanMan.h"
+#include "LMVars.h"
+#include "Omni.h"
+#include "RPC.h"
+#include "Logon.h"
+#include "Xlate.h"
+#include "VersionNum"
+#include "LanMan_MH.h"
+
+/* ----------------------------------- */
+
+/* Store the password (jumbled in place) into LM_Vars.password_ptr's static backing buffer.
+ *
+ * NULL is normalised to an empty password.  Xlt_Jumble obfuscates so the password isn't trivially
+ * readable in a dump of the module's memory (see its doc for the not-cryptography caveat).
+ *
+ * Parameters:
+ *   pwd  plaintext password, or NULL for "no password"
+ */
+static void SetPassword(char *pwd) {
+  static char pass_buf[PASSWORD_LIMIT];
+  if (pwd == NULL) {
+    pwd = "";
+  }
+
+  strcpyn(pass_buf, pwd, PASSWORD_LIMIT);
+  Xlt_Jumble(pass_buf);
+  LM_Vars.password_ptr = pass_buf;
+}
+
+/* ----------------------------------- */
+
+/* Set or unset a RISC OS system variable as a literal string.
+ *
+ * value == NULL passes length -1 to OS_SetVarVal, which is the SWI's "delete this variable" call.
+ *
+ * Parameters:
+ *   varname  name of the variable (no leading '$')
+ *   value    literal string value, or NULL to unset
+ */
+static void SetOSVar(char *varname, char *value) {
+  int len = (value == NULL) ? -1 : (int)strlen(value);
+  (void)_swix(OS_SetVarVal, _INR(0, 4), varname, value, len, 0, 4);
+}
+
+/* ----------------------------------- */
+
+char Lgn_PrimaryDCName[NAME_LIMIT]; /* For debugging */
+char Lgn_HomeServerName[NAME_LIMIT];
+char Lgn_HomeShareName[NAME_LIMIT];
+char Lgn_HomeDirName[DOS_NAME_LEN];
+
+/* Pull the next backslash-delimited path component out of `*ptr_in_out`.
+ *
+ * Used by ParseHomeDir to walk a `\\server\share[\dir...]` UNC path one component at a time.  The
+ * caller's pointer is advanced past the consumed component (and left at the next '\\' or at the
+ * trailing NUL); component is copied to `result` and capped at NAME_LIMIT - 1.
+ *
+ * Parameters:
+ *   ptr_in_out  on entry: points at a '\\' followed by a component
+ *               on exit:  points at the '\\' or NUL after the component
+ *   result      destination buffer (at least NAME_LIMIT bytes)
+ *
+ * Returns: true if a non-empty component was extracted, false otherwise.
+ */
+static bool get_path(char **ptr_in_out, char *result) {
+  int i;
+  char *p = *ptr_in_out;
+
+  /* Must be sitting on a separator; if not, the caller has handed us a malformed UNC. */
+  if (*p++ != '\\') {
+    return false;
+  }
+
+  /* Copy bytes up to the next separator or NUL, capping at NAME_LIMIT to avoid overrun. */
+  i = 0;
+  while (*p != '\\' && *p != 0) {
+    if (i < NAME_LIMIT - 1) {
+      result[i++] = *p;
+    }
+    p++;
+  }
+
+  /* NUL-terminate the result and leave the caller's pointer at the next separator/end. */
+  result[i] = 0;
+  *ptr_in_out = p;
+  return (bool)(i > 0);
+}
+
+/* ----------------------------------- */
+
+/* Translate a UNC home-directory path returned by NetLogon into RISC OS LanMan: form.
+ *
+ * Expects "\\server\share[\dir...]"; the leading "\\server" picks Lgn_HomeServerName, the next
+ * component picks Lgn_HomeShareName, and any trailing path components are converted to RISC OS form
+ * via Xlt_NameDOStoRO and appended to "LanMan::Home.$".  The result lands in Lgn_HomeDirName so
+ * the boot-time SetOSVar("LanMan$HomeDir", ...) can publish it.
+ *
+ * Parameters:
+ *   name  NUL-terminated UNC path (leading whitespace tolerated)
+ *
+ * Returns: OK on success, EHOMEDIRNAME if the path doesn't start with "\\\\server\\share".
+ */
+static err_t ParseHomeDir(char *name) {
+  char *p;
+  char leaf_name[NAME_LIMIT];
+
+  while (isspace(*name)) {
+    name++; // Skip leading whitespace
+  }
+
+  if (name[0] != '\\' || name[1] != '\\') { // Doesn't start '\\'
+    return EHOMEDIRNAME;
+  }
+
+  /* Step past the first '\\' so get_path sees the expected leading backslash. */
+  name++;
+
+  if (!get_path(&name, Lgn_HomeServerName) || !get_path(&name, Lgn_HomeShareName)) {
+    return EHOMEDIRNAME;
+  }
+
+  /* Path tail (if any) - convert each DOS component to RISC OS form and chain on with '.' separators. */
+  sprintf(Lgn_HomeDirName, "%s::Home.$", FilingSystemName);
+  p = Lgn_HomeDirName + strlen(Lgn_HomeDirName);
+  while (get_path(&name, leaf_name)) {
+    char ro_leaf[NAME_LIMIT];
+    size_t ro_len;
+
+    /* Convert into a bounded scratch buffer first (Xlt_NameDOStoRO writes the 8.3 form, well under
+     * NAME_LIMIT), then refuse to append if the '.' separator plus the component would run past
+     * Lgn_HomeDirName - a malicious NetLogon reply must not smash adjacent statics with a long path. */
+    Xlt_NameDOStoRO(ro_leaf, leaf_name);
+    ro_len = strlen(ro_leaf);
+    if ((size_t)(p - Lgn_HomeDirName) + 1u + ro_len + 1u > sizeof(Lgn_HomeDirName)) {
+      return EHOMEDIRNAME;
+    }
+
+    *p++ = '.';
+    memcpy(p, ro_leaf, ro_len + 1u);
+    p += ro_len;
+  }
+
+  return OK;
+}
+
+/* ----------------------------------- */
+
+err_t Lgn_Init(void) {
+  strcpy(LM_Vars.workgroup, "WORKGROUP");
+  strcpy(LM_Vars.username, "GUEST");
+  SetPassword(NULL);
+  LM_Vars.logged_on = true;
+  return OK;
+}
+
+/* ----------------------------------- */
+
+err_t Lgn_Logon(char *wkgrp, char *userid, char *pwd) {
+  char *serv_name;
+  char *dir_name;
+  int tmp;
+  err_t res;
+
+  if (userid == NULL || userid[0] == 0) {
+    return EUSERUNKNOWN;
+  }
+
+  if (wkgrp != NULL && strlen(wkgrp) > 0) {
+    strcpyn_upper(LM_Vars.workgroup, wkgrp, NAME_LIMIT);
+  }
+
+  /* pwd may be NULL */
+
+  strcpyn(LM_Vars.username, userid, USERNAME_LIMIT);
+  SetPassword(pwd);
+  LM_Vars.logged_on = true;
+
+  SetOSVar("Omni$UserLanMan", LM_Vars.username);
+  SetOSVar("LanMan$HomeDir", NULL);
+  Lgn_HomeDirName[0] = 0;
+
+  Omni_RecheckInfo(RI_MOUNTS);
+  Omni_RecheckInfo(RI_SERVERS);
+  Omni_RecheckInfo(RI_PRINTERS);
+
+  /* Now attempt to find home directory */
+
+  serv_name = RPC_GetDomainController(LM_Vars.workgroup);
+  if (serv_name == NULL) // No DC: Don't worry about it
+  {
+    strcpy(Lgn_PrimaryDCName, MsgLookup("NoDC"));
+    return OK;
+  }
+
+  strcpy(Lgn_PrimaryDCName, serv_name);
+
+  /* Report bad passwords & other errors, ignore unset home directories */
+
+  res = RPC_LogonUser(serv_name, LM_Vars.username, pwd, &dir_name);
+  if (res == ENOTPRESENT) { // Server doesn't support it
+    return OK;
+  }
+
+  if (res != OK) {
+    return res;
+  }
+
+  /* Extract fields from name, & try to connect to it */
+
+  if (dir_name == NULL || dir_name[0] == 0) {
+    return OK;
+  }
+
+  res = ParseHomeDir(dir_name);
+  if (res != OK) {
+    return res;
+  }
+
+  /* Set the home directory name so it is available to the boot file */
+
+  SetOSVar("LanMan$HomeDir", Lgn_HomeDirName);
+
+  res = Omni_MountServer(Lgn_HomeServerName, LM_Vars.username, pwd, "Home", // Mountname
+                         Lgn_HomeShareName, &tmp);                          // MountID_out
+
+  /* Caution - this could potentially recurse, as the !ARMBOOT file may contain an LMLogon command! */
+
+  if (res == OK || res == ECONNEXISTS) {
+    return OK;
+  } else {
+    return EHOMEDIRCONN;
+  }
+}
+
+/* ----------------------------------- */
+
+err_t Lgn_Logoff(void) {
+  strcpy(LM_Vars.username, "");
+  SetPassword(NULL);
+  LM_Vars.logged_on = false;
+  Omni_ClearLists();
+
+  SetOSVar("Omni$UserLanMan", NULL);
+  SetOSVar("LanMan$HomeDir", NULL);
+
+  Omni_RecheckInfo(RI_SERVERS);
+
+  return OK;
+}
+
+/* --------------------------------------- */
+
+void Lgn_Register(void) {
+  char titlebar[24];    // Title bar - 24 max
+  char infobox[3 * 32]; // Info box - 3x32 max
+
+  /* Build the info-box text first while titlebar still holds the version string. */
+  strcpy(titlebar, MsgLookup("_Version")); // Temp copy
+  sprintf(infobox,
+          "%s\n"
+          "\xA9 Acorn Computers Ltd, 1997\n"
+          "%s",
+          MsgLookup("WhoLogon"), titlebar);
+  strncpy(titlebar, MsgLookup("DispName"), sizeof(titlebar));
+
+  /* Hand the assembled UI strings to OmniClient; the trailing "+" makes the client ID distinct
+   * from the main LanManFS one.
+   */
+  _swix(SWI_Omni_RegisterClient, _INR(0, 6), LanMan_LogonOp,                             // Client ID
+        RC_LOGON_TYPE | RC_NEEDS_AUTHSERV | RC_NEEDS_USERID | RC_NEEDS_PASSWD, "lmlgni", // Sprite name - 12 max
+        titlebar,                                                                        // Title bar - 24 max
+        infobox,                                                                         // Info box - 3x32 max
+        0,                                                                               // Site ID (ignored)
+        FilingSystemName "+");                                                           // Only needs to be unique from LanManFS name
+}
+
+/* ---------------------------------------- */
+
+/* OmniClient Op-3 back-end: enumerate the single "logon" server we surface.
+ *
+ * The logon client always advertises exactly one pseudo-server entry (this module's display name).
+ * On the first call (token_in == 0) the record is written and pToken_out set to 0; subsequent
+ * calls return "no more records".
+ *
+ * Parameters:
+ *   buf_ptr        destination buffer
+ *   buf_size       buffer capacity in bytes
+ *   token_in       continuation token; 0 starts a fresh enumeration
+ *   pNextByte_out  on return, points just past the last written byte
+ *   pToken_out     on return, 0 means "list complete"
+ *
+ * Returns: OK always (overflow becomes "no records written").
+ */
+static err_t Lgn_ListServers(char *buf_ptr, int buf_size, int token_in, char **pNextByte_out, int *pToken_out) {
+  int serverid = (int)"?"; // A unique memory address
+  int tot_size;
+  size_t name_size;
+
+  /* Size up the single record: 4-byte ID + short name + long name + extra-details string, padded
+   * to a dword boundary so the OmniClient consumer sees an aligned next-record offset.  Each lookup is
+   * measured before the next, because MsgLookup returns the same buffer every time.
+   */
+  name_size = strlen(MsgLookup("DispName"));
+  tot_size = sizeof(serverid) + (2 * (name_size + 1)) + strlen(MsgLookup("XtrLogon")) + 2 + 2 + 1;
+
+  tot_size = (tot_size + 3) & ~3; // Round to dword boundary
+
+  /* Continuation past the only record, or buffer too small to hold it - signal "list complete". */
+  if (token_in != 0 || tot_size > buf_size) {
+    *pNextByte_out = buf_ptr; /* No records written */
+    *pToken_out = 0;          /* All done */
+    return OK;
+  }
+
+  /* Advance the caller's cursor past the record we're about to write; token=0 signals end-of-list. */
+  *pNextByte_out = buf_ptr + tot_size;
+  *pToken_out = 0;
+
+  /* Write the record: server-id, short name, long name, extra-details string. */
+  memcpy(buf_ptr, &serverid, sizeof(serverid));
+  buf_ptr += sizeof(serverid);
+
+  const char *name = MsgLookup("DispName");
+  int name_len = (int)strlen(name);
+  strcpy(buf_ptr, name); // Short name
+  buf_ptr += name_len + 1;
+  strcpy(buf_ptr, name); // Long name (the same!)
+  buf_ptr += name_len + 1;
+
+  sprintf(buf_ptr, "%s\n \n ", MsgLookup("XtrLogon")); // Extra details
+
+  return OK;
+}
+
+/* ---------------------------------------- */
+
+_kernel_oserror *Lgn_LogonOp_SWI(_kernel_swi_regs *R) {
+  err_t res;
+
+  debug(" Logon Op(%d)\n", R->r[0]);
+
+  /* Dispatch on the OmniClient reason code in R0; each case maps to a Lgn_* helper or a fixed
+   * reply.  For Mount, EHOMEDIRCONN and EHOMEDIRNAME mean the credentials were stored but the home
+   * directory did not mount, so R1 still carries a non-zero mount ID, though the error is returned too.
+   */
+  switch (R->r[0]) {
+  case 0:                               // Mount
+    res = Lgn_Logon((char *)(R->r[1]),  // "Server" => domain/workgroup
+                    (char *)(R->r[2]),  // User ID
+                    (char *)(R->r[3])); // Password
+    if (res == OK || res == EHOMEDIRCONN || res == EHOMEDIRNAME) {
+      R->r[1] = 1; // Keep the Smith happy
+    } else {
+      R->r[1] = 0; // return mount_id 0 on error
+    }
+    break;
+
+  case 3: // Enumerate servers
+    res = Lgn_ListServers((char *)(R->r[1]), R->r[2], R->r[3], (char **)&(R->r[1]), &(R->r[3]));
+    break;
+
+  case 9: // Get mount info - (mild bodge - say it's not there!)
+    R->r[3] = 0;
+    res = OK;
+    break;
+
+  case 17:              // Log out of domain
+    res = Lgn_Logoff(); // Clear all user ID's & passwords
+    break;
+
+  default:
+    res = ENOTPRESENT;
+  }
+
+  return MsgError(res);
+}

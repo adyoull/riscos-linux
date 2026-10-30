@@ -1,0 +1,221 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+*  Lan Manager client
+*
+*  Omni.H - OmniFiler interface header
+*
+*/
+
+/* Mount a share, for reason 0 of the LanMan_OmniOp SWI and for *LMConnect. */
+extern err_t Omni_MountServer(char *servname, char *userID, char *passwd, char *mountname, char *mountpath, int *mount_id_out);
+
+/* Run the !ArmBoot steps that Omni_MountServer put off while the filing-system guard was held.
+ *
+ * Guarded commands that can mount a share call this straight after FSExit.  It does nothing while the guard is held.
+ *
+ * Returns: OK, or the first error from running a boot file.
+ */
+extern err_t Omni_RunDeferredBoots(void);
+
+/* Dismount a share, for reason 1 of the LanMan_OmniOp SWI and for *LMDisconnect.
+ *
+ * Filer windows on the mount are closed, the share is disconnected and the mount is deleted.  Errors from the Filer and
+ * the server are ignored, because a mount that could not be removed while its server is unreachable would stay for good.
+ *
+ * Parameters:
+ *   mount_id  mount handle from Omni_MountServer
+ *
+ * Returns: OK, or EBADPARAM if mount_id is not a mount handle.
+ */
+extern err_t Omni_DismountServer(int mount_id);
+
+/* Return the details of a mount.
+ *
+ * The server name, user name and share name come from the connection, so they are what the connection uses rather than
+ * what the caller of Omni_MountServer gave.  The returned strings belong to the mount and the connection; do not free them.
+ *
+ * Parameters:
+ *   mount_id    mount handle from Omni_MountServer
+ *   pServName   receives the server name
+ *   pUserName   receives the user name
+ *   pMountName  receives the mount name
+ *   pMountPath  receives the share name
+ *   pServerID   receives the handle of the server's entry in the browser lists, which may be 0
+ *
+ * Returns: OK, or EBADPARAM if mount_id is not a mount handle.
+ */
+extern err_t Omni_GetMountInfo(int mount_id, const char **pServName, const char **pUserName, const char **pMountName,
+                               const char **pMountPath, int *pServerID);
+
+/* Ask OmniClient to work out a RISC OS file type from a leaf name, for an 8.3 share when the extension tables have no match.
+ *
+ * Parameters:
+ *   leafname   leaf name to convert
+ *   ptype_out  receives the file type
+ *
+ * Returns: OK, or ENOTPRESENT if this module is not registered with OmniClient or OmniClient gave no type.
+ */
+extern err_t Omni_GetDefaultType(char *leafname, int *ptype_out);
+
+/* Return the handle of the mount with a given name, for *LMDisconnect.
+ *
+ * The name is cleaned by MountNameCpy first, as Omni_MountServer cleaned it, so that a name typed with spaces still
+ * matches.
+ *
+ * Parameters:
+ *   name  mount name as the user typed it
+ *
+ * Returns: the mount handle, or 0 if no mount has that name.
+ */
+extern int Omni_GetMountID(char *name);
+
+/* Return the drive letter by which the SMB layer knows a mount, to convert a "LanMan::Mount.$.file" path.
+ *
+ * The name is not cleaned, so it must be in the form MountNameCpy gives, or it will not match.
+ *
+ * Parameters:
+ *   name  mount name
+ *
+ * Returns: the drive letter, 'A' to 'Z', or 0 if no mount has that name.
+ */
+extern char Omni_GetDrvLetter(const char *name);
+
+/* Return the name of the mount on a drive letter, for the disc name.
+ *
+ * Parameters:
+ *   drvletter  drive letter given to the mount
+ *
+ * Returns: the mount name, which belongs to the mount and must not be freed, or NULL if no mount has that drive letter.
+ */
+extern const char *Omni_GetMountName(char drvletter);
+
+/* Return the name of the only mount, so that *Free can pick it when the current directory is not on a LanMan mount.
+ *
+ * Returns: the mount name, or NULL if there are no mounts or more than one.
+ */
+extern const char *Omni_GetSoleMountName(void);
+
+/* Register with OmniClient, if not registered already, and with the Free module, when the module starts. */
+extern void Omni_StartUp(void);
+
+/* Free the server and mount lists, and deregister from OmniClient and the Free module, when the module is dying. */
+extern void Omni_Shutdown(void);
+
+/* Forget the known shares, printers and servers other than those of active mounts, on *LMLogoff. */
+extern void Omni_ClearLists(void);
+
+/* Handle Service_OmniAction.
+ *
+ * Sub-reason 0, OmniClient starting, registers the file and logon clients.  Sub-reason 1, OmniClient dying, marks this
+ * module unregistered and adds a callback that kills this module too.
+ *
+ * Parameters:
+ *   R             registers; R0 is the sub-reason
+ *   private_word  module private word, passed to the callback
+ */
+extern void Omni_ServiceCall(_kernel_swi_regs *R, void *private_word);
+
+/* Tell OmniClient that the mounts, servers or printers it shows may have changed.  Does nothing while this module is not
+ * registered with OmniClient.
+ *
+ * Parameters:
+ *   flags  RI_MOUNTS, RI_SERVERS or RI_PRINTERS, naming the list that changed
+ */
+extern void Omni_RecheckInfo(int flags);
+
+#define RI_SERVERS  0
+#define RI_MOUNTS   1
+#define RI_PRINTERS 2
+
+/* Handle the LanMan_OmniOp SWI, which OmniClient calls for the file client.
+ *
+ * Reasons 0 to 9 mount and dismount, report free space, list servers, mounts and active mounts, open a mount's root or
+ * user root, and return mount details.  Reasons 10 to 15 create, write, end, abort, query and clear print jobs, and 16
+ * lists printers.  Any other reason gives ENOTPRESENT.
+ *
+ * Parameters:
+ *   R  registers; R0 is the reason code, the rest depend on the reason
+ *
+ * Returns: NULL, or the error as an OS error block.
+ */
+extern _kernel_oserror *OmniOp_SWI(_kernel_swi_regs *R);
+
+/* Handle the LanMan_FreeOp SWI, which the Free module calls for *Free.
+ *
+ * Reason 0 does nothing, 1 returns a device name, 2 and 4 return free space as 32-bit and 64-bit values, and 3 compares
+ * device names, returning R1 = 0 if they match.  Any other reason gives EBADPARAM.
+ *
+ * Parameters:
+ *   R  registers; R0 is the reason code, the rest depend on the reason
+ *
+ * Returns: NULL, or the error as an OS error block.
+ */
+extern _kernel_oserror *Omni_FreeOp_SWI(_kernel_swi_regs *R);
+
+/* Print this module's state for *LMInfo: names, logon, known servers and their shares, mounts, and any RPC error. */
+extern void Omni_Debug(void);
+
+/* Print the shares of one server, then the known servers, for *ListFS with a server name.
+ *
+ * Parameters:
+ *   server_name  server whose shares to list
+ *
+ * Returns: NULL, or the error from listing the shares as an OS error block.
+ */
+extern _kernel_oserror *Omni_DumpShares(char *server_name);
+
+/* Refresh the list of servers, then print this module's state with Omni_Debug, for *ListFS with no argument.
+ *
+ * Returns: NULL, or the error from listing the servers as an OS error block.
+ */
+extern _kernel_oserror *Omni_DumpServers(void);
+
+/* Add a server, or a share of a server, to the lists the OmniClient browser shows, without mounting anything.
+ *
+ * The server is added if it is not known already.  OAI_SERVER sets its description from `descr`; the other flags add
+ * the share named by `descr` to the server's list of that kind, with `comment` as its description.
+ *
+ * Parameters:
+ *   flags    OAI_SERVER, OAI_DISK, OAI_PRINTER, OAI_DEVICE or OAI_IPC
+ *   server   server name
+ *   descr    the share name, or for OAI_SERVER the server's description, which may be NULL
+ *   comment  the share's description, or NULL
+ */
+extern void Omni_AddInfo(int flags, const char *server, const char *descr, const char *comment);
+
+#define OAI_SERVER  0
+#define OAI_DISK    1
+#define OAI_PRINTER 2
+#define OAI_DEVICE  3
+#define OAI_IPC     4
+
+/* OmniClient SWI definitions --------------- */
+#define Omni_base 0x4A200
+
+#define SWI_Omni_EnumerateMounts      (Omni_base + 0)
+#define SWI_Omni_RegisterClient       (Omni_base + 1)
+#define RC_DOES_FILES                 (1 << 0)
+#define RC_NEEDS_USERID               (1 << 1)
+#define RC_NEEDS_PASSWD               (1 << 2)
+#define RC_NEEDS_MOUNTPATH            (1 << 3)
+#define RC_NEEDS_AUTHSERV             (1 << 4)
+#define RC_LOGON_TYPE                 (1 << 6)
+#define RC_DOES_PRINT                 (1 << 8)
+#define RC_NEEDS_PRINTPWD             (1 << 9)
+#define RC_NEEDS_PRINTLEN             (1 << 10)
+#define RC_EXTN_CHAR(a)               ((a) << 16)
+#define SWI_Omni_DeregisterClient     (Omni_base + 2)
+#define SWI_Omni_ConvertClientToAcorn (Omni_base + 4)

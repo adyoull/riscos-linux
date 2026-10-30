@@ -1,0 +1,8 @@
+| Edit:!Run Disc version
+|
+Set Edit$Dir <Obey$Dir>
+SetMacro Edit$Path <Edit$Dir>.
+Run Edit:!Boot
+WimpSlot -min 184k -max 184k
+Run Edit:Export
+Run Edit:!RunImage %*0

@@ -1,0 +1,55 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : setstate.c
+ * Purpose     : Veneer for method Tabs_SetState
+ * Description : Sets the gadget flags for the given tab
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "tabs.h"
+
+
+
+
+/*
+ * Name        : tabs_set_state
+ * Description : Sets the gadget flags for the given tab
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               unsigned int state
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_set_state ( unsigned int flags,
+                                         ObjectId window,
+                                         ComponentId gadget,
+                                         unsigned int state
+                                       )
+{
+_kernel_swi_regs r;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = Tabs_SetState;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) state;
+  return(_kernel_swi(Toolbox_ObjectMiscOp,&r,&r));
+}
+

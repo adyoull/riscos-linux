@@ -1,0 +1,32 @@
+REM
+REM Copyright 1996 Acorn Computers Ltd
+REM
+REM Licensed under the Apache License, Version 2.0 (the "License");
+REM you may not use this file except in compliance with the License.
+REM You may obtain a copy of the License at
+REM
+REM     http://www.apache.org/licenses/LICENSE-2.0
+REM
+REM Unless required by applicable law or agreed to in writing, software
+REM distributed under the License is distributed on an "AS IS" BASIS,
+REM WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+REM See the License for the specific language governing permissions and
+REM limitations under the License.
+REM
+DIM s% 256
+
+REM Make a font at 24pt
+SYS "Font_FindFont",,"Trinity.Medium",384,384,0,0 TO h%
+PRINT "Handle found is ";h%
+
+REM Set the current font
+SYS "Font_SetFont",h%
+
+REM Make a string
+$s%=CHR$ 25+CHR$ 0+CHR$ 0+CHR$ 11+CHR$ 0+CHR$ 0+CHR$ 0+"!""#$%&'()*+,-./0123456789:;<=>? "
+
+REM Split it at space
+SYS "Font_StringWidth",,s%,106000,268435456,32,268435456 TO ,,,,,split%
+PRINT "Split is ";split%
+
+SYS "Font_LoseFont",h%

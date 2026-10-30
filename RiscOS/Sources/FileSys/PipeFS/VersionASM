@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "0.25"
+Module_Version          SETA    25
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "23 Jan 2023"
+Module_ApplicationDate  SETS    "23-Jan-23"
+Module_ComponentName    SETS    "PipeFS"
+Module_FullVersion      SETS    "0.25"
+Module_HelpVersion      SETS    "0.25 (23 Jan 2023)"
+                        END

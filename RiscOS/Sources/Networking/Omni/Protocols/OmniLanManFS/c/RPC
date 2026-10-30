@@ -1,0 +1,600 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* RPC.c - Remote Administration Protocol (RAP) calls for interrogating LAN Manager servers.
+ *
+ * Implements the small set of MS-RAP "API" pipe calls (server enumeration, share enumeration,
+ * user info) that LanManFS uses to populate the OmniClient browser and discover a user's home
+ * share at logon.  Also wraps NetBIOS name-service lookups for master-browser and domain-
+ * controller discovery (LM_Boot and Lgn_Logon use RPC_GetDomainController to pick the server
+ * they connect to).
+ *
+ * The RAP pipe (\PIPE\LANMAN) is a NetBIOS-era named-pipe protocol carried over SMB1's
+ * Transact - modern Windows still exposes it for backwards compatibility.  External callers ride
+ * via LanMan_NameOp / LanMan_Transact (RPC_Transact below).
+ */
+
+/* Standard includes */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include <ctype.h>
+#include "kernel.h"
+
+/* Our includes */
+
+#include "stdtypes.h"
+#include "LanMan.h"
+#include "BufLib.h"
+#include "NetBIOS.h"
+#include "SMB.h"
+#include "Transact.h"
+#include "Xlate.h" /* For string functions */
+#include "Omni.h"
+#include "LMVars.h"
+#include "RPC.h"
+
+/* Globals */
+/*---------------------------- */
+
+char RPC_DebugMsg[100];
+int RPC_ErrorCount = 0;
+
+/* Debug routine */
+
+typedef enum {
+  DE_ENUMSHARESNOLOGON = 0,
+  DE_ENUMSHARESCALLTO,
+  DE_NOMASTERBROWSER,
+  DE_ENUMSERVERSNOLOGON,
+  DE_ENUMSERVERSCALLTO,
+  DE_LOGONUSERNOCONN,
+  DE_NETGETUSERINFO
+} debug_errs_t;
+
+/* Log an RPC error with context to RPC_DebugMsg, leaving non-error returns alone.
+ *
+ * RPC_ErrorCount is bumped per failure so *LMInfo can surface the running total.  The token
+ * picks which "D%02d" message to look up; %s in the looked-up text receives the failing name
+ * (server / share / user) and the OS error's errmess.
+ *
+ * Parameters:
+ *   res    inbound error code (OK is a passthrough)
+ *   token  debug_errs_t identifying which message to format
+ *   name   target name for the %s slot
+ *
+ * Returns: `res` unchanged.
+ */
+static err_t debug_err(err_t res, debug_errs_t token, char *name) {
+  char text[100];
+
+  if (res != OK) {
+    sprintf(text, "D%02d", token);
+    strcpy(text, MsgLookup(text));
+    strcat(text, ": %s"); // Append the error
+    RPC_ErrorCount++;
+    snprintf(RPC_DebugMsg, sizeof(RPC_DebugMsg), text, name, MsgError(res)->errmess); // The name comes from the user, unbounded
+  }
+  return res;
+}
+
+/* Parameter-assembly subroutines -------------------- */
+
+static struct TransactParms TP;
+
+/* Local convenience macros over the Transact_add* helpers in c.Transact: every callsite in RPC operates on
+ * the static `TP` global, so the wrappers exist purely to elide the repeated `&TP` argument.
+ */
+#define addword(v)   Transact_addword(&TP, (v))
+#define addlong(v)   Transact_addlong(&TP, (v))
+#define addstring(s) Transact_addstring(&TP, (s))
+
+/* ---------- */
+
+/* Set up the static TransactParms block for a fresh MS-RAP call.
+ *
+ * The RAP wire format opens with (func_code, in_format, out_format) where the format strings are
+ * little type-spec mnemonics ("WrLeh", "B13BWz" etc.) describing the parameter / return layouts.
+ * Callers then append per-call arguments via the addword/addlong/addstring macros above.  Reuses
+ * SMB_WorkBuf as both parameter-in and parameter-out backing.
+ *
+ * Parameters:
+ *   func_code      RAP function code (NetShareEnum, NetUserGetInfo, ...)
+ *   in_format      RAP parameter-format mnemonic
+ *   out_format     RAP return-format mnemonic
+ *   ret_param_len  expected return parameter length (caps parms_out_maxlen)
+ */
+static void StartParams(int func_code, char *in_format, char *out_format, int ret_param_len) {
+  TP.parms_in = SMB_WorkBuf;
+  TP.parms_in_len = 0;
+  TP.data_in = NULL;
+  TP.data_in_len = 0;
+
+  TP.parms_out_buf = SMB_WorkBuf;
+  TP.parms_out_maxlen = min(ret_param_len, SMBWORKBUF_SIZE);
+  TP.data_out_buf = SMB_WorkBuf + TP.parms_out_maxlen;
+  TP.data_out_maxlen = SMBWORKBUF_SIZE - TP.parms_out_maxlen;
+
+  addword(func_code);
+  addstring(in_format);
+  addstring(out_format);
+}
+
+/* Parameter-return subroutines ====================== */
+
+/* Resolve a 16-bit relative offset inside a returned RAP buffer into a real pointer.
+ *
+ * RAP returns strings indirectly: the parameter block carries a 16-bit offset into the data-out
+ * area.  The offset is relative to the end of the data buffer, hence the +data_out_len adjustment.
+ * Bounds-checked - silly offsets (zero, past the end) return NULL rather than dereference.
+ *
+ * Parameters:
+ *   p  pointer to the 16-bit offset inside parms_out_buf
+ *
+ * Returns: real pointer into TP.data_out_buf, or NULL if the offset is out of range.
+ */
+static uint8_t *getpointer(uint8_t *p) {
+  int ptrval;
+
+  ptrval = Transact_getword(p) + TP.data_out_len - TP.data_out_maxlen;
+  if (ptrval <= 0 || ptrval >= TP.data_out_len) {
+    return NULL;
+  }
+
+  return TP.data_out_buf + ptrval;
+}
+
+/* Resolve a share or server record's comment offset into a string within the returned RAP data.
+ *
+ * Parameters:
+ *   commoffset  comment offset from the record, 0 for no comment
+ *   co          converter word from the reply parameters, subtracted from the offset
+ *
+ * Returns: the comment, or NULL if there is none, or it starts or ends outside the returned data.
+ */
+static char *getcomment(int commoffset, int co) {
+  int off;
+
+  if (commoffset == 0) {
+    return NULL;
+  }
+
+  off = commoffset - co;
+  if (off < 0 || off >= TP.data_out_len || memchr(TP.data_out_buf + off, 0, (size_t)(TP.data_out_len - off)) == NULL) {
+    return NULL;
+  }
+
+  return (char *)TP.data_out_buf + off;
+}
+
+/* ============================================ */
+
+/* Report whether a share is visible: true unless its name ends in '$' (the SMB hidden-share marker).
+ *
+ * Parameters:
+ *   name  NUL-terminated share name
+ *
+ * Returns: false if hidden, true if user-visible.
+ */
+static bool check_hidden(char *name) {
+  while (*name != 0) {
+    if (name[0] == '$' && name[1] == 0) {
+      return false;
+    }
+    name++;
+  }
+  return true;
+}
+
+/*---------------------------- */
+
+/* Call NetShareEnum (RAP function 0) on an existing IPC$ connection and feed the results into
+ * the OmniClient known-shares list.
+ *
+ * Records are 20 bytes each: 13-byte share name + flags + comment-offset.  Hidden $-suffixed
+ * shares are filtered out unless they're the IPC$ share itself (which is by definition the one
+ * we're connected over).  The mystical comment-offset adjustment in the parameter block matches
+ * what Samba does and what Windows 98 requires.
+ *
+ * Parameters:
+ *   drv     internal drive letter of an open IPC$ connection
+ *   server  server name (for the Omni_AddInfo dispatch)
+ *
+ * Returns: OK, an SMB error from the underlying SMB_Transact, EDATALEN if the response is
+ * truncated or implausibly large, or ERPCERROR for a non-zero RAP return code.
+ */
+static err_t RPC_EnumSharesOnConnection(char drv, char *server) {
+  uint8_t *p;
+  int i, co;
+  err_t res;
+
+  /* Assemble parameters for RPC call */
+
+  StartParams(0x0000, "WrLeh", "B13BWz", 8); // NetShareEnum
+  addword(0x0001);                           // Detail level
+  addword(TP.data_out_maxlen);               // Return buf size
+
+  /* Make call */
+
+  res = SMB_Transact(drv, "\\PIPE\\LANMAN", &TP);
+  if (res != OK) {
+    return res;
+  }
+
+  if (TP.parms_out_len < 8) {
+    return EDATALEN;
+  }
+
+  /* Decode returned params */
+  p = TP.parms_out_buf;
+
+  if (Transact_getword(p) != 0) { // API return code; 0 = success
+    return ERPCERROR;             // Otherwise, call it 'generic' error
+  }
+
+  co = Transact_getword(p + 2); // converter word, subtracted from each comment offset
+
+  i = Transact_getword(p + 4);    // Number of records returned
+  if (i * 20 > TP.data_out_len) { // Silly values!
+    return EDATALEN;
+  }
+
+  /* Process returned records */
+
+  p = TP.data_out_buf;
+
+  while (i-- > 0) {
+    /* Each 20-byte record starts with the 13-byte share name and its terminator.  A name ending in '$' is hidden and is
+     * not listed unless it is an IPC share.  The comments are kept for *LanMan:ListFS to display; Windows 98 needs the
+     * converter word subtracted from their offsets, as Samba does.
+     */
+    int shrtype = Transact_getword(p + 14);
+    char *comment = getcomment(Transact_getword(p + 16), co);
+
+    if (shrtype == SHR_IPC || check_hidden((char *)p)) {
+      if (shrtype == SHR_DISK) {
+        Omni_AddInfo(OAI_DISK, server, (char *)p, comment);
+      } else if (shrtype == SHR_PRINTER) {
+        Omni_AddInfo(OAI_PRINTER, server, (char *)p, comment);
+      } else if (shrtype == SHR_IPC) {
+        Omni_AddInfo(OAI_IPC, server, (char *)p, comment);
+      } else if (shrtype == SHR_COMM) {
+        Omni_AddInfo(OAI_DEVICE, server, (char *)p, comment);
+      }
+    }
+    p += 20;
+  }
+
+  return OK;
+}
+
+/*---------------------------- */
+
+/* Call NetServerEnum2 (RAP function 0x68) on a master-browser IPC$ connection and feed servers
+ * into the OmniClient known-servers list.
+ *
+ * 26-byte records.  Returns every server type (the 0xFFFFFFFF mask).  Same comment-offset
+ * adjustment as RPC_EnumSharesOnConnection.
+ *
+ * Parameters:
+ *   drv     internal drive letter of an open IPC$ connection
+ *   domain  workgroup name (the master browser knows its members)
+ *
+ * Returns: OK, an SMB error, EDATALEN on truncation, or ERPCERROR on RAP failure.
+ */
+static err_t RPC_EnumServersOnConnection(char drv, char *domain) {
+  err_t res;
+  uint8_t *p;
+  int co;
+  int i;
+
+  /* NetServerEnum2 */
+  StartParams(0x0068, "WrLehDz", "B16BBDz", 8);
+  addword(0x0001);             // Detail level
+  addword(TP.data_out_maxlen); // Return buf size
+  addlong((int)0xFFFFFFFF);    // Return all server types
+  addstring(domain);           // Domain name
+
+  /* Make call */
+
+  res = SMB_Transact(drv, "\\PIPE\\LANMAN", &TP);
+  if (res != OK) {
+    return res;
+  }
+
+  if (TP.parms_out_len < 8) {
+    return EDATALEN;
+  }
+
+  /* Decode returned params */
+  p = TP.parms_out_buf;
+
+  if (Transact_getword(p) != 0) { // API return code; 0 = success
+    return ERPCERROR;
+  }
+
+  co = Transact_getword(p + 2);
+
+  i = Transact_getword(p + 4);    // Number of records returned
+  if (i * 26 > TP.data_out_len) { // Silly values!
+    return EDATALEN;
+  }
+
+  /* Process returned records */
+
+  p = TP.data_out_buf;
+
+  while (i-- > 0) {
+    /* p is the start of the record.
+     *
+     * The first 16 bytes are a server name + null termination.
+     */
+    char *comment = getcomment(Transact_getword(p + 22), co);
+
+    Omni_AddInfo(OAI_SERVER, (char *)p, comment, NULL);
+    p += 26;
+  }
+
+  return OK;
+}
+
+/*---------------------------- */
+
+err_t RPC_EnumerateShares(char *server) {
+  char drv;
+  err_t res;
+
+  res = SMB_CreateShare(SHR_IPC, CREATE_NORMAL, server, "IPC$", NULL, NULL, &drv, NULL);
+
+  if (res != OK) {
+    return debug_err(res, DE_ENUMSHARESNOLOGON, server);
+  }
+
+  Omni_AddInfo(OAI_SERVER, server, SMB_GetConnInfo(drv, GCI_SERVERINFO), NULL);
+
+  res = RPC_EnumSharesOnConnection(drv, server);
+
+  SMB_DeleteShare(drv);
+  return debug_err(res, DE_ENUMSHARESCALLTO, server);
+}
+
+/*---------------------------------------- */
+
+/* Locate the master browser for a workgroup via NetBIOS name service.
+ *
+ * Sends the special "Master Browser" name-suffix query (ntMBROWSER); the master is the host
+ * that serves NetServerEnum2 for the workgroup.  1.5-second timeout is short by NetBIOS standards
+ * - we'd rather fail fast and let the caller fall back than block the desktop on a vanished host.
+ *
+ * Parameters:
+ *   wg_name  workgroup name
+ *
+ * Returns: pointer to a static 16-byte buffer holding the master's name (overwritten on next
+ * call), or NULL if no master responded.
+ */
+static char *GetMasterBrowser(char *wg_name) {
+  NETNAME MBname;
+  struct FindName_res fnr;
+  static char namebuf[16];
+
+  NB_FormatName(ntMBROWSER, wg_name, &MBname);
+
+  if (NB_FindNames(&MBname, ntSERVER, &fnr, 1, 150) == 0) {
+    return NULL;
+  }
+
+  NB_DecodeName(&(fnr.name), namebuf);
+  return namebuf;
+}
+
+/*---------------------------------------- */
+
+char *RPC_GetDomainController(char *domain_name) {
+  NETNAME DCname;
+  struct FindName_res fnr;
+  static char namebuf[16];
+
+  NB_FormatName(ntPRIMARYDC, domain_name, &DCname);
+
+  if (NB_FindNames(&DCname, ntSERVER, &fnr, 1, 150) == 0) {
+    return NULL;
+  }
+
+  NB_DecodeName(&(fnr.name), namebuf);
+  return namebuf;
+}
+
+/*---------------------------- */
+
+err_t RPC_EnumerateServers(char *workgroup) {
+  char drv;
+  err_t res;
+  char *server;
+
+  /* Find a responder: master browser preferred (workgroup-elected), PDC as fallback. */
+  server = GetMasterBrowser(workgroup);
+
+  if (server == NULL) {
+    server = RPC_GetDomainController(workgroup);
+  }
+
+  if (server == NULL) {
+    return debug_err(ECANTFINDNAME, DE_NOMASTERBROWSER, workgroup);
+  }
+
+  /* Transient IPC$ binding to the responder so we can issue the NetServerEnum2 RAP call. */
+  res = SMB_CreateShare(SHR_IPC, CREATE_NORMAL, server, "IPC$", NULL, NULL, &drv, NULL);
+
+  if (res != OK) {
+    return debug_err(res, DE_ENUMSERVERSNOLOGON, server);
+  }
+
+  /* Run the actual enumeration over the bound pipe, then drop the IPC$ connection. */
+  res = RPC_EnumServersOnConnection(drv, workgroup);
+
+  SMB_DeleteShare(drv);
+  return debug_err(res, DE_ENUMSERVERSCALLTO, server);
+}
+
+/*---------------------------- */
+
+err_t RPC_LogonUser(char *server, char *user, char *password, char **pHomeDir) {
+  err_t res;
+  char drv;
+
+  /* Trying to connect to the IPC share is as good a method of password validation as any */
+
+  res = SMB_CreateShare(SHR_IPC, CREATE_NEW_USER, server, "IPC$", user, password, &drv, NULL);
+
+  if (res != OK) {
+    return debug_err(res, DE_LOGONUSERNOCONN, user);
+  }
+
+  /* NetUserGetInfo: RAP function 0x0038, parameter descriptor "zWrLh", returning a level-11 user
+   * info structure described by "B21B...".  We need at least 6 bytes back for the return-code word.
+   */
+  StartParams(0x0038, "zWrLh", "B21BzzzWDDzzDDWWzWzDWb21W", 6);
+
+  addstring(user);
+  addword(11);                 // Detail level
+  addword(TP.data_out_maxlen); // Return buf size
+
+  /* Make call */
+
+  res = SMB_Transact(drv, "\\PIPE\\LANMAN", &TP);
+
+  /* Decode the RAP return word and map to a LanMan error code; on success, pull the home-dir
+   * pointer out of the level-11 record (offset 44 = the home_dir field).
+   */
+  if (res == OK) {
+    if (TP.parms_out_len < 6) {
+      res = EDATALEN;
+    } else {
+      switch (Transact_getword(TP.parms_out_buf)) // return code
+      {
+      case 0:
+        *pHomeDir = (char *)getpointer(TP.data_out_buf + 44);
+        res = OK;
+        break;
+      case 5:
+      case 65: // Access denied
+        res = ENOACCESS;
+        break;
+      case 2221: // User not found
+        res = EUSERUNKNOWN;
+        break;
+      case 2239: // Account disabled
+        res = EACCDISABLED;
+        break;
+      default:
+        res = ERPCERROR;
+        break;
+      }
+    }
+  }
+
+  SMB_DeleteShare(drv);
+
+  return debug_err(res, DE_NETGETUSERINFO, user);
+}
+
+/*---------------------------- */
+
+err_t RPC_NameOp(int reason, char *name_in, char *buf_out) {
+  char *s;
+
+  /* Local-state reasons short-circuit to LM_Vars; lookup reasons fall through to NetBIOS NS
+   * queries.  In both lookup cases a NULL name_in defaults to the current workgroup so callers
+   * can use a single SWI without explicitly threading the workgroup name through.
+   */
+  switch (reason) {
+  case NAMEOP_GETLOCAL:
+    s = LM_Vars.machinename;
+    break;
+
+  case NAMEOP_GETWG:
+    s = LM_Vars.workgroup;
+    break;
+
+  case NAMEOP_GETBROWSER:
+    if (name_in == NULL) {
+      name_in = LM_Vars.workgroup;
+    }
+
+    s = GetMasterBrowser(name_in);
+    if (s == NULL) {
+      return ECANTFINDNAME;
+    }
+    break;
+
+  case NAMEOP_GETDC:
+    if (name_in == NULL) {
+      name_in = LM_Vars.workgroup;
+    }
+
+    s = RPC_GetDomainController(name_in);
+    if (s == NULL) {
+      return ECANTFINDNAME;
+    }
+    break;
+
+  default:
+    return EBADPARAM;
+  }
+
+  /* Every source is a 16-byte buffer, so the caller's 16 bytes hold any name with its terminator. */
+  strcpy(buf_out, s);
+  return OK;
+}
+
+/*------------------------- */
+
+err_t RPC_Transact(char *servername, char *pipename, void *pvParmBlk) {
+  struct TransactParms *caller = pvParmBlk;
+  char drv;
+  err_t res;
+  struct TransactParms t;
+
+  /* Connect to IPC share using default user ID/password */
+
+  res = SMB_CreateShare(SHR_IPC, CREATE_NORMAL, servername, "IPC$", NULL, NULL, &drv, NULL);
+
+  if (res != OK) {
+    return res;
+  }
+
+  /* Copy only the external portion of the caller's block; the internal layout extends it with
+   * setup fields that are forced to zero here, because external callers do not know about them.
+   */
+  memcpy(&t, pvParmBlk, sizeof_TransactParms_external);
+  t.setup_in_len = 0;
+  t.setup_out_maxlen = 0;
+  res = SMB_Transact(drv, pipename, &t);
+  SMB_DeleteShare(drv);
+
+  /* The SWI returns the lengths of the reply in the caller's block, so copy them back from the local copy. */
+  caller->parms_out_len = t.parms_out_len;
+  caller->data_out_len = t.data_out_len;
+  return res;
+}
+
+/*------------------------- */
+
+bool RPC_Init(void) {
+  RPC_ErrorCount = 0;
+  RPC_DebugMsg[0] = 0;
+  return true;
+}

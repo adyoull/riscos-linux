@@ -1,0 +1,17 @@
+# Softload Messages
+# Save translations as Message<TerritoryNumber>
+Test:>> Test Mode <<
+Desk:Any softload will terminate Apps & RISC OS immediately!
+Zero:No softloadable ROMs
+Roms:Available ROMs:
+Now:Current ROM
+Ask1:Escape continues using current ROM.
+Ask2:Cursor Up/Down changes selection, Return/Space selects.
+AskT:Otherwise selection will be loaded in %0 seconds.
+Soft:Softloading ROM...
+
+None:No softload
+Done:ROM already running.
+Max:ROM over Maximum.
+Old:ROM older than current.
+Min:ROM too small.

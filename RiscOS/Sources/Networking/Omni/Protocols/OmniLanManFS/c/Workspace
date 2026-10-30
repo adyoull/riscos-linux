@@ -1,0 +1,323 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* c.Workspace - Module-global Dynamic Area for LanManFS large statics.
+ *
+ * See h.Workspace for the high-level rationale.
+ *
+ * The DA is created exactly once per module incarnation, in Workspace_Init, and removed at Workspace_Shutdown.  The
+ * enumerate-and-remove prelude defends against the case where a previous incarnation died without finalising cleanly
+ * (a soft *RMReinit, a kernel-level panic, etc.); under normal operation it finds nothing and is a fast no-op.
+ *
+ * Every byte the DA owns is consumed by one of two module-global subsystems (SMB2, CoreFn).  Each publishes a
+ * <subsystem>_WorkspaceBytes() reporter and a <subsystem>_SetWorkspace(base) installer.  Total bytes are summed once at
+ * init, the DA is created at exactly that size (each slice is page-rounded first), and the installers run in deterministic
+ * order so each subsystem gets a stable base it can keep for the DA's lifetime.  Per-mount cache substrates live in
+ * their own per-mount DAs allocated via Cache_SetSubstrateAllocator.
+ */
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "kernel.h"
+#include "swis.h"
+
+#include "Global/OSMem.h"
+
+#include "stdtypes.h"
+#include "LanMan.h"
+#include "SMB.h"
+#include "Cache.h"
+#include "Workspace.h"
+
+/* The orphan cleanup matches on the "LanManFS" prefix.
+ * The per-mount prefix deliberately ends in colon-space so those areas read as "LanManFS: <label>".
+ */
+static const char Workspace_DAPrefix[] = "LanManFS";
+static const char Workspace_DAPerMountPrefix[] = "LanManFS: ";
+
+#define WS_PERMOUNT_NAME_MAX 32u // cap on a per-mount DA name including prefix and terminator; longer labels are truncated
+
+static unsigned ws_permount_seq = 0u; // uniquifier for per-mount DAs created without a usable label
+
+/* OS_Memory Amounts takes the memory type in bits 8-11 of r0; the DRAM type selects fitted main memory. */
+#define WS_OSMEM_TYPE_DRAM_SHIFT 8
+#define WS_OSMEM_TYPE_DRAM       1
+
+/*
+ * Machine-capacity bounds for Workspace_PickMemoryProfile: at or below the small bound the work buffer takes its minimum and file content
+ * is not cached; above the large bound the cache takes its biggest tier.
+ */
+#define WS_SMALL_MACHINE_BYTES (32u * 1024u * 1024u)
+#define WS_LARGE_MACHINE_BYTES (256u * 1024u * 1024u)
+
+static unsigned ws_page_bytes = 4096u; // MMU page size; the default stands until OS_Memory reports the real value
+
+static void *lm_da_substrate_alloc(size_t bytes, const char *label, int *handle_out);
+static void lm_da_substrate_free(void *base, size_t bytes, int handle);
+
+/*
+ * Choose the SMB2 work-buffer size and the cache tier to suit the amount of DRAM fitted.
+ *
+ * Must run before the workspace is sized, since SMB2_WorkspaceBytes reads smb2_workbuf_size, and before any mount exists, since a mount
+ * takes its sizing from the cache tier when it is created.  A small machine takes the minimum work buffer and caches no file content;
+ * larger machines scale the slab, string heap and content heap up.  If OS_Memory gives no usable figure, the machine is taken to be
+ * large: the maximum work buffer, and the cache left at its default tier.
+ */
+static void Workspace_PickMemoryProfile(void) {
+  int pages = 0;
+  int page_bytes = 0;
+  _kernel_oserror *err;
+  uint32_t slab_nodes;
+  uint32_t str_bytes;
+  uint32_t content_bytes;
+  bool content_disabled;
+  const char *tier_name;
+
+  /* Ask the OS how much memory is fitted so buffer and cache sizes can track machine capacity. */
+  err = _swix(OS_Memory, _IN(0) | _OUTR(1, 2), OSMemReason_Amounts | (WS_OSMEM_TYPE_DRAM << WS_OSMEM_TYPE_DRAM_SHIFT), &pages, &page_bytes);
+
+  /* The page size masks every workspace slice, so it is trusted only as a non-zero power of two. */
+  if (err != NULL || page_bytes <= 0 || ((unsigned)page_bytes & ((unsigned)page_bytes - 1u)) != 0u) {
+    debug("Workspace: no usable DRAM figure from OS_Memory - defaulting to max workbuf profile + default cache tier\n");
+    smb2_workbuf_size = SMB2_WORKBUF_MAX;
+
+    /* No usable memory figure: assume a large machine and take the largest work buffer, leaving the cache at its default tier. */
+    return;
+  }
+
+  /*
+   * Small machines get the minimum work buffer to conserve RAM; everything else gets the maximum.  The comparisons are in pages, since
+   * the byte total of a machine with 4 GiB or more does not fit in 32 bits.
+   */
+  ws_page_bytes = (unsigned)page_bytes;
+  smb2_workbuf_size = ((unsigned)pages <= WS_SMALL_MACHINE_BYTES / ws_page_bytes) ? SMB2_WORKBUF_MIN : SMB2_WORKBUF_MAX;
+
+  /* Size the cache per tier: slab nodes, string pool, content pool (file content and listings), and whether to cache file content. */
+  if ((unsigned)pages <= WS_SMALL_MACHINE_BYTES / ws_page_bytes) {
+    tier_name = "small";
+    slab_nodes = 1024u;
+    str_bytes = 128u * 1024u;
+    content_bytes = 512u * 1024u;
+    content_disabled = true;
+  } else if ((unsigned)pages <= WS_LARGE_MACHINE_BYTES / ws_page_bytes) {
+    tier_name = "medium";
+    slab_nodes = 2000u;
+    str_bytes = 256u * 1024u;
+    content_bytes = 1u * 1024u * 1024u;
+    content_disabled = false;
+  } else {
+    tier_name = "large";
+    slab_nodes = 4000u;
+    str_bytes = 512u * 1024u;
+    content_bytes = 8u * 1024u * 1024u;
+    content_disabled = false;
+  }
+
+  /* Hand the chosen sizing to the cache before any mount is created. */
+  Cache_SetTier(slab_nodes, str_bytes, content_bytes);
+  Cache_SetContentCachingDisabled(content_disabled);
+
+  debug("Workspace: DRAM=%d pages of %d bytes, cache tier=%s (smb2_workbuf=%d KiB)\n", pages, (int)ws_page_bytes, tier_name,
+        (int)(smb2_workbuf_size / 1024u));
+  (void)tier_name;
+}
+
+/* Round a byte count up to a whole MMU page, the granularity OS_DynamicArea allocates in. */
+#define WS_ROUND_UP_PAGE(n) (((n) + (ws_page_bytes - 1)) & ~(ws_page_bytes - 1))
+
+/* The module workspace DA, created once per incarnation; a NULL base means no workspace currently exists. */
+static int Workspace_DANumber = 0;
+static void *Workspace_DABase = NULL;
+
+/*
+ * Reclaim any Dynamic Areas left behind by an abnormal exit of a previous incarnation of the module.
+ *
+ * Both the module workspace and the per-mount cache substrates carry the "LanManFS" name prefix, so one prefix match catches every leaked
+ * area. Removing a DA invalidates the enumeration cursor, so the scan is restarted from the beginning after each removal.
+ */
+static void Workspace_RemoveOrphan(void) {
+  const size_t prefix_len = sizeof(Workspace_DAPrefix) - 1;
+  int next = -1;
+  const char *name;
+
+  /* Walk every Dynamic Area in the system. */
+  for (;;) {
+    int da_num;
+
+    /* DAReason_Enumerate advances the cursor; -1 marks the end of the list. */
+    if (_swix(OS_DynamicArea, _INR(0, 1) | _OUT(1), DAReason_Enumerate, next, &next) != NULL || next == -1) {
+      return;
+    }
+
+    /* Capture this DA's number before the next enumeration overwrites the shared cursor variable. */
+    da_num = next;
+
+    /* Skip anything that isn't ours, matched on the shared name prefix. */
+    if (_swix(OS_DynamicArea, _INR(0, 1) | _OUT(8), DAReason_GetInfo, da_num, &name) != NULL || name == NULL ||
+        strncmp(name, Workspace_DAPrefix, prefix_len) != 0) {
+      continue;
+    }
+
+    debug("Workspace: removing orphan DA %d \"%s\"\n", da_num, name);
+    (void)_swix(OS_DynamicArea, _INR(0, 1), DAReason_Remove, da_num);
+
+    /* Removal invalidates the cursor, so restart the scan from the top. */
+    next = -1;
+  }
+}
+
+_kernel_oserror *Workspace_Init(void) {
+  _kernel_oserror *err;
+  size_t total;
+  size_t smb2_bytes;
+  size_t corefn_bytes;
+  char *base;
+  char daname[32];
+
+  /* Already initialised: nothing to do. */
+  if (Workspace_DABase != NULL) {
+    return NULL;
+  }
+
+  /*
+   * Clear stale DAs, then pick the profile before sizing the workspace, since the profile fixes the work-buffer size that feeds the byte
+   * totals.
+   */
+  Workspace_RemoveOrphan();
+
+  Workspace_PickMemoryProfile();
+
+  smb2_bytes = WS_ROUND_UP_PAGE(SMB2_WorkspaceBytes());
+  corefn_bytes = WS_ROUND_UP_PAGE(CoreFn_WorkspaceBytes());
+  total = smb2_bytes + corefn_bytes;
+
+  debug("Workspace: requesting DA %d bytes (smb2=%d, corefn=%d)\n", (int)total, (int)smb2_bytes, (int)corefn_bytes);
+
+  /* Formulate the area name */
+  snprintf(daname, sizeof(daname), "%s %s", Workspace_DAPrefix, MsgLookup("WkSp"));
+
+  err = _swix(OS_DynamicArea, _INR(0, 8) | _OUT(1) | _OUT(3), DAReason_Create, -1, (int)total, -1,
+              DynAreaFlags_APNone | DynAreaFlags_NotUserDraggable, (int)total, 0, 0, daname, &Workspace_DANumber,
+              &Workspace_DABase);
+
+  if (err != NULL) {
+    debug("Workspace: DA Create failed: %d (%s)\n", err->errnum, err->errmess);
+    return err;
+  }
+
+  /*
+   * Carve the DA in the same fixed order the byte totals were computed in, SMB2's buffers first then CoreFn's path scratch, and register
+   * the per-mount cache allocator.
+   */
+  base = (char *)Workspace_DABase;
+  debug("Workspace: DA created, number=%d base=%p\n", Workspace_DANumber, Workspace_DABase);
+
+  SMB2_SetWorkspace(base);
+  base += smb2_bytes;
+
+  CoreFn_SetWorkspace(base);
+
+  Cache_SetSubstrateAllocator(lm_da_substrate_alloc, lm_da_substrate_free);
+
+  return NULL;
+}
+
+/*
+ * Allocate a per-mount cache substrate as its own Dynamic Area.
+ *
+ * Registered with the cache as the substrate allocator hook and called when a mount is created. The area is named "LanManFS: <label>" so
+ * the orphan cleanup recognises and reclaims it after a crash; with no label a running sequence number keeps the name unique.
+ *
+ * Parameters:
+ *   bytes       requested size; rounded up to a whole page
+ *   label       mount label used in the DA name, or NULL/empty to use a unique sequence number
+ *   handle_out  receives the new DA's number for later release, when non-NULL
+ *
+ * Returns: the base address of the new area, or NULL if the DA could not be created.
+ */
+static void *lm_da_substrate_alloc(size_t bytes, const char *label, int *handle_out) {
+  char da_name[WS_PERMOUNT_NAME_MAX];
+  int da_num = 0;
+  void *da_base = NULL;
+  size_t rounded = WS_ROUND_UP_PAGE(bytes);
+
+  /* Name the DA after the mount label so the orphan cleanup can spot it later. */
+  if (label != NULL && label[0] != '\0') {
+    int written = snprintf(da_name, sizeof(da_name), "%s%s", Workspace_DAPerMountPrefix, label);
+
+    /* Guarantee a terminated name on overflow; with no label, fall back to a unique sequence number. */
+    if (written < 0 || (size_t)written >= sizeof(da_name)) {
+      da_name[sizeof(da_name) - 1u] = '\0';
+    }
+  } else {
+    snprintf(da_name, sizeof(da_name), "%s%u", Workspace_DAPerMountPrefix, ++ws_permount_seq);
+  }
+
+  /* Create a page-rounded, non-user-draggable area, matching the module workspace's flags. */
+  if (_swix(OS_DynamicArea, _INR(0, 8) | _OUT(1) | _OUT(3), DAReason_Create, -1, (int)rounded, -1,
+            DynAreaFlags_APNone | DynAreaFlags_NotUserDraggable, (int)rounded, 0, 0, da_name, &da_num, &da_base) != NULL) {
+    debug("Workspace: per-mount DA Create failed for \"%s\" (%d bytes)\n", da_name, (int)rounded);
+    return NULL;
+  }
+
+  debug("Workspace: per-mount DA \"%s\" created num=%d base=%p\n", da_name, da_num, da_base);
+
+  /* Hand back the DA number so the free hook can identify the area. */
+  if (handle_out != NULL) {
+    *handle_out = da_num;
+  }
+
+  return da_base;
+}
+
+/*
+ * Release a per-mount cache substrate Dynamic Area.
+ *
+ * The counterpart to lm_da_substrate_alloc, registered as the cache's substrate free hook. The DA number alone identifies the area, so base
+ * and size are ignored; a zero handle is treated as nothing-to-free, so the caller need not guard against unallocated slots.
+ *
+ * Parameters:
+ *   base    unused; the DA number identifies the area
+ *   bytes   unused
+ *   handle  DA number from lm_da_substrate_alloc; zero is a no-op
+ */
+static void lm_da_substrate_free(void *base, size_t bytes, int handle) {
+  /* The DA number alone identifies the area; base and size are unused. */
+  (void)base;
+  (void)bytes;
+
+  /* A zero handle means nothing was allocated, so this is a safe no-op. */
+  if (handle == 0) {
+    return;
+  }
+
+  (void)_swix(OS_DynamicArea, _INR(0, 1), DAReason_Remove, handle);
+}
+
+void Workspace_Shutdown(void) {
+  /* Nothing to do if the workspace was never created. */
+  if (Workspace_DABase == NULL) {
+    return;
+  }
+
+  /* Remove the DA and clear the handles so a later re-init starts clean. */
+  debug("Workspace: removing DA %d\n", Workspace_DANumber);
+
+  (void)_swix(OS_DynamicArea, _INR(0, 1), DAReason_Remove, Workspace_DANumber);
+
+  Workspace_DABase = NULL;
+  Workspace_DANumber = 0;
+}

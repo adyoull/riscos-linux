@@ -1,0 +1,14 @@
+| >!Boot.Resources.SoftLoad.!Run
+| Copyright © 2010, RISC OS Open
+| All rights reserved.
+|
+| RISC OS ROM softload utility
+
+| Set up environment, start the process...
+Set File$Type_FE5 EPROM
+Set SoftLoad$Dir <Obey$Dir>
+
+| Prompt user if there are any ROM files...
+| Possible optional parameters are -test -all
+| See SoftLoad.!Help for details.
+Run <SoftLoad$Dir>.Prompt %*0

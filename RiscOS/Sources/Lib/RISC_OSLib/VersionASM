@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "6.23"
+Module_Version          SETA    623
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "22 Aug 2026"
+Module_ApplicationDate  SETS    "22-Aug-26"
+Module_ComponentName    SETS    "RISC_OSLib"
+Module_FullVersion      SETS    "6.23"
+Module_HelpVersion      SETS    "6.23 (22 Aug 2026)"
+                        END

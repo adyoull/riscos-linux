@@ -1,0 +1,207 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* buflib.c - mbuf chain wrappers over the RISC OS MBufManager module.
+ *
+ * SMB1's network layer carries packets as chained mbufs (the BSD-style m_off / m_len /
+ * m_next structure).  This file is a thin shim over MBufManager that gives the rest of the
+ * SMB1 path a friendlier API: allocate, prepend, append, slice off, free.
+ */
+
+/* Standard includes */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+/* Our includes */
+
+#include "kernel.h"
+#include "swis.h"
+#include "stdtypes.h"
+#include "Mbuf.h"
+#include "BufLib.h"
+
+/* MBuffer handling routines ******************************************** */
+
+static struct mbctl Net_Mbctl; /* MBuf control struct */
+static bool Mbufs_Attached;    // True if we've got an active mbuf manager session
+
+/* ------------------------------------ */
+
+void FreeChain(BUFCHAIN pB) {
+  Net_Mbctl.freem(&Net_Mbctl, pB);
+}
+
+/* ----------------------------------- */
+
+BUFCHAIN AddChain(BUFCHAIN pBin, void *pData, int datalen) {
+  struct mbuf *pBnew;
+  int n;
+
+  /* If we already have a chain there, try to copy as much data at the start as possible */
+
+  if (pBin != NULL) {
+    n = pBin->m_off - pBin->m_inioff; // Amount of space at start
+
+    /* Most common case - append to start of existing chain */
+    if (n >= datalen) {
+      pBin->m_off -= datalen;
+      pBin->m_len += datalen;
+      memcpy(mtod(pBin, char *), pData, datalen);
+      return pBin;
+    } else if (n > 0) {
+      pBin->m_off -= n;
+      pBin->m_len += n;
+
+      /* Won't all fit in this buffer - copy some anyway */
+      memcpy(mtod(pBin, char *), (uint8_t *)pData + datalen - n, n);
+      datalen -= n;
+    }
+  }
+
+  /* We need to alloc some new mbufs to hold data */
+
+  /* Try to get a single mbuf & put the data at the end */
+
+  pBnew = Net_Mbctl.alloc_s(&Net_Mbctl, datalen, NULL);
+  if (pBnew != NULL) {
+    pBnew->m_len = datalen;
+    pBnew->m_off = pBnew->m_inioff + pBnew->m_inilen - datalen;
+    memcpy(mtod(pBnew, char *), (uint8_t *)pData, datalen);
+    pBnew->m_next = pBin;
+    return pBnew;
+  }
+
+  /* Give up trying to allocate efficiently at this point.
+   *
+   * Make a chain and tack it on.
+   */
+
+  pBnew = Net_Mbctl.alloc(&Net_Mbctl, datalen, pData);
+  if (pBnew == NULL) // Bother!
+  {
+    FreeChain(pBin);
+    return NULL;
+  }
+
+  return Net_Mbctl.cat(&Net_Mbctl, pBnew, pBin);
+}
+
+/* ---------------------------------- */
+
+BUFCHAIN AddChainIndirect(BUFCHAIN pRest, void *pData, int datalen) {
+  BUFCHAIN pBnew;
+
+  pBnew = Net_Mbctl.alloc_u(&Net_Mbctl, datalen, pData);
+  /* We rely on alloc_u setting m_inioff and m_inilen to the same as m_off and m_len (as documented), to stop further AddChains
+   * from trampling on memory.
+   *
+   * Also rely on it being a single allocation (as documented).
+   */
+
+  if (pBnew == NULL) // Bother!
+  {
+    FreeChain(pRest);
+    return NULL;
+  }
+
+  pBnew->m_next = pRest;
+  return pBnew;
+}
+
+/* ---------------------------------- */
+
+BUFCHAIN AllocBlankChain(int datalen) {
+  return Net_Mbctl.alloc(&Net_Mbctl, datalen, NULL);
+}
+
+/* ---------------------------------- */
+
+int GetBlockPointer(struct GBP_in_out *pGBP) {
+  do {
+    if (pGBP->pChain == NULL) {
+      pGBP->BlockLen = 0;
+      return 0;
+    }
+    pGBP->pBlock = mtod(pGBP->pChain, uint8_t *);
+    pGBP->BlockLen = pGBP->pChain->m_len;
+    pGBP->pChain = pGBP->pChain->m_next;
+  } while (pGBP->BlockLen == 0);
+
+  return 1;
+}
+
+/* ---------------------------------- */
+
+BUFCHAIN GetData(BUFCHAIN pB, void *pDst, int datalen) {
+  BUFCHAIN pB2;
+  int len_tst;
+
+  /* Check data is available: this will, in practise, rarely need to look at more than one mbuf */
+
+  pB2 = pB;
+  len_tst = datalen;
+  while (pB2 != NULL) {
+    len_tst -= pB2->m_len;
+    if (len_tst <= 0) { // We're there, dude
+      return Net_Mbctl.trim(&Net_Mbctl, pB, datalen, pDst);
+    }
+
+    pB2 = pB2->m_next;
+  }
+
+  /* Out of data! */
+  FreeChain(pB);
+  return NULL;
+}
+
+/* ------------------------------- */
+
+int ChainLen(BUFCHAIN pB) {
+  return Net_Mbctl.count_bytes(&Net_Mbctl, pB);
+}
+
+/* Initialise routine ------------------------------- */
+
+err_t Buf_Init(void) {
+  Mbufs_Attached = false;
+
+  /* Fill in the session-control block with size hints (see the doc comment in h/BufLib for the rationale on these values). */
+  Net_Mbctl.mbcsize = sizeof(struct mbctl);
+  Net_Mbctl.mbcvers = MBUF_MANAGER_VERSION;
+  Net_Mbctl.flags = 0;
+  Net_Mbctl.advminubs = 112;
+  Net_Mbctl.advmaxubs = 1280;
+  Net_Mbctl.mincontig = 0;
+  Net_Mbctl.spare1 = 0;
+
+  /* Open the session; on success the callback vector inside the block becomes valid. */
+  if (_swix(Mbuf_OpenSession, _IN(0), &Net_Mbctl) != NULL) {
+    return EMBUFMODULE;
+  }
+
+  Mbufs_Attached = true;
+  return OK;
+}
+
+/* --------------------------- */
+
+void Buf_Shutdown(void) {
+  if (Mbufs_Attached) {
+    (void)_swix(Mbuf_CloseSession, _IN(0), &Net_Mbctl);
+  }
+  Mbufs_Attached = false;
+}

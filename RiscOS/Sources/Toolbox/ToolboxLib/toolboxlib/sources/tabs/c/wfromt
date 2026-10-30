@@ -1,0 +1,62 @@
+/************************************************************************
+ * © Acorn Computers Ltd, 1994.                                         *
+ *                                                                      *
+ * It may be freely used to create executable images for saleable       *
+ * products but cannot be sold in source form or as an object library   *
+ * without the prior written consent of Acorn Computers Ltd.            *
+ *                                                                      *
+ * If this file is re-distributed (even if modified) it should retain   *
+ * this copyright notice.                                               *
+ *                                                                      *
+ ************************************************************************/
+
+
+/*
+ * Name        : wfromt.c
+ * Purpose     : Veneer for method Tabs_WindowFromTab
+ * Description : Reads the window object which has the given tab is associated with it
+ */
+
+
+#include "kernel.h"
+#include "toolbox.h"
+#include "gadgets.h"
+#include "tabs.h"
+
+
+
+
+/*
+ * Name        : tabs_window_from_tab
+ * Description : Reads the window object which has the given tab is associated with it
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ * Out         : ObjectId *nested_window
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_window_from_tab ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget,
+                                               int tab_index,
+                                               ObjectId *nested_window
+                                             )
+{
+_kernel_swi_regs r;
+_kernel_oserror *e;
+
+  r.r[0] = flags;
+  r.r[1] = (int) window;
+  r.r[2] = Tabs_WindowFromTab;
+  r.r[3] = (int) gadget;
+  r.r[4] = (int) tab_index;
+  if((e = _kernel_swi(Toolbox_ObjectMiscOp,&r,&r)) == NULL)
+  {
+    if(nested_window != NULL) *nested_window = (ObjectId) r.r[0];
+  }
+
+  return(e);
+}
+

@@ -1,0 +1,749 @@
+/*
+ * Copyright (c) 2000, Rik Griffin
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+
+
+/*
+ * Name        : treeview.h
+ * Description : C veneers to the Methods provided by the TreeView gadget
+ */
+
+
+
+#ifndef __treeview_h
+#define __treeview_h
+
+
+#ifndef __kernel_h
+#include "kernel.h"
+#endif
+
+#ifndef __toolbox_h
+#include "toolbox.h"
+#endif
+
+
+/****************************************************************************
+ * TreeView templates                                                       *
+ ****************************************************************************/
+
+/*-- gadget flags --*/
+
+#define TreeView_AllowVScroll           (1u<<0)
+#define TreeView_AllowHScroll           (1u<<1)
+#define TreeView_AutoUpdate             (1u<<2)
+#define TreeView_ShowCurrentNode        (1u<<3)
+#define TreeView_PlotLines              (1u<<4)
+
+#define TreeView_AllowSelection         (1u<<5)
+#define TreeView_NotifySelection        (1u<<6)
+#define TreeView_SelectChildren         (1u<<7)
+
+#define TreeView_AllowExpand            (1u<<8)
+#define TreeView_NotifyExpansion        (1u<<9)
+#define TreeView_ExpandByDefault        (1u<<10)
+
+#define TreeView_AllowRename            (1u<<11)
+#define TreeView_NotifyRename           (1u<<12)
+
+#define TreeView_AllowDrags             (1u<<13)
+#define TreeView_NotifyDragEnd          (1u<<14)
+
+#define TreeView_AllEvents              (1u<<15)
+#define TreeView_DoubleClickExpands     (1u<<16)
+
+#define TreeView_FlatMode               (1u<<17)
+#define TreeView_TextBelowSprite        (1u<<18)
+
+#define TreeView_SortDisplay            (1u<<19)
+#define TreeView_SortReversed           (1u<<20)
+#define TreeView_SortBySprite           (1u<<21)
+
+
+/*-- templates --*/
+
+typedef struct
+{
+  GadgetHeader    hdr;
+  struct
+  {
+    unsigned int  foreground_wimp : 4;
+    unsigned int  background_wimp : 4;
+    unsigned int  linecolour_wimp : 4;
+    unsigned int  unused : 12;
+    unsigned int  version : 8;
+  } colours;
+  unsigned int    vertical_spacing;
+  unsigned int    horizontal_spacing;
+  unsigned int    unused;
+} TreeView;
+
+
+/****************************************************************************
+ * TreeView Methods                                                         *
+ ****************************************************************************/
+
+#define TreeView_Base           0x4028
+#define TreeView_Type           (sizeof(TreeView)) << 16 | TreeView_Base
+#define TreeView_SWIBase        0x140280
+
+#define TreeView_SetState               (TreeView_Base +  0)
+#define TreeView_GetState               (TreeView_Base +  1)
+#define TreeView_AddNode                (TreeView_Base +  2)
+#define TreeView_GetNodeId              (TreeView_Base +  3)
+#define TreeView_SetNodeText            (TreeView_Base +  4)
+#define TreeView_SetNodeSprite          (TreeView_Base +  5)
+#define TreeView_SetNodePrivateWord     (TreeView_Base +  6)
+#define TreeView_GetNodeText            (TreeView_Base +  7)
+#define TreeView_GetNodeSprite          (TreeView_Base +  8)
+#define TreeView_GetNodePrivateWord     (TreeView_Base +  9)
+#define TreeView_MoveTo                 (TreeView_Base + 10)
+#define TreeView_MoveNext               (TreeView_Base + 11)
+#define TreeView_MovePrevious           (TreeView_Base + 12)
+#define TreeView_MoveChild              (TreeView_Base + 13)
+#define TreeView_MoveParent             (TreeView_Base + 14)
+#define TreeView_DeleteNode             (TreeView_Base + 15)
+#define TreeView_DeleteAll              (TreeView_Base + 16)
+#define TreeView_UpdateDisplay          (TreeView_Base + 17)
+#define TreeView_MoveFirstSelected      (TreeView_Base + 18)
+#define TreeView_MoveNextSelected       (TreeView_Base + 19)
+#define TreeView_SetMenu                (TreeView_Base + 20)
+#define TreeView_ExpandNode             (TreeView_Base + 21)
+#define TreeView_SelectNode             (TreeView_Base + 22)
+#define TreeView_MakeVisible            (TreeView_Base + 23)
+#define TreeView_FindNode               (TreeView_Base + 24)
+#define TreeView_GetNodeState           (TreeView_Base + 25)
+#define TreeView_GetWindowId            (TreeView_Base + 26)
+#define TreeView_GetMenu                (TreeView_Base + 27)
+
+/*-- add node method flags --*/
+
+#define TreeView_AddNode_AsChild        (1u<<0)
+#define TreeView_AddNode_AsSibling      (0)
+
+/*-- expand node method flags --*/
+
+#define TreeView_ExpandNode_Expand      (1u<<0)
+#define TreeView_ExpandNode_Recurse     (1u<<1)
+
+/*-- select node method flags --*/
+
+#define TreeView_SelectNode_Select      (1u<<0)
+#define TreeView_SelectNode_Unique      (1u<<1)
+
+/*-- move method flags --*/
+
+#define TreeView_Move_Unsorted          (0)
+#define TreeView_Move_Sorted            (1u<<0)
+
+/*-- get node state method flags --*/
+
+#define TreeView_Node_HasSiblingNext    (1u<<0)
+#define TreeView_Node_HasSiblingPrev    (1u<<1)
+#define TreeView_Node_HasChild          (1u<<2)
+#define TreeView_Node_ParentIsRoot      (1u<<3)
+#define TreeView_Node_HasSprite         (1u<<4)
+#define TreeView_Node_HasExpandedSprite (1u<<5)
+#define TreeView_Node_HasText           (1u<<6)
+#define TreeView_Node_IsExpanded        (1u<<7)
+#define TreeView_Node_IsSelected        (1u<<8)
+
+/****************************************************************************
+ * TreeView Toolbox Events                                                  *
+ ****************************************************************************/
+
+#define TreeViewEvent_NodeSelected      (TreeView_SWIBase + 0)
+#define TreeViewEvent_NodeExpanded      (TreeView_SWIBase + 1)
+#define TreeViewEvent_NodeRenamed       (TreeView_SWIBase + 2)
+/* Unused                               (TreeView_SWIBase + 3) */
+#define TreeViewEvent_NodeDragged       (TreeView_SWIBase + 4)
+#define TreeViewEvent_Scroll            (TreeView_SWIBase + 5)
+
+/*-- node selected event block --*/
+
+typedef struct
+{
+    ToolboxEventHeader  hdr;
+    int                 node;
+} TreeViewNodeSelectedEvent;
+
+#define TreeView_NodeSelected_Selected  (1u<<0)
+#define TreeView_NodeSelected_Multiple  (1u<<1)
+
+/*-- node expanded event block --*/
+
+typedef struct
+{
+    ToolboxEventHeader  hdr;
+    int                 node;
+} TreeViewNodeExpandedEvent;
+
+#define TreeView_NodeExpanded_Expanded  (1u<<0)
+
+/*-- node renamed event block --*/
+
+typedef struct
+{
+    ToolboxEventHeader  hdr;
+    int                 node;
+} TreeViewNodeRenamedEvent;
+
+/*-- node dragged event block --*/
+
+typedef struct
+{
+    ToolboxEventHeader  hdr;
+    int                 node;
+    int                 destination_node;
+    int                 mouse_buttons;
+    WimpGetPointerInfoBlock destination;
+} TreeViewNodeDraggedEvent;
+
+#define TreeView_NodeDragged_OutsideGadget      (1u<<0)
+#define TreeView_NodeDragged_MultipleSelection  (1u<<1)
+
+/*-- scroll event block --*/
+
+typedef struct
+{
+    ToolboxEventHeader  hdr;
+    WimpOpenWindowBlock data;
+} TreeViewScrollEvent;
+
+
+/****************************************************************************
+ * The following functions provide veneers to the methods that are          *
+ * associated with this particular class.  Please read the User Interface   *
+ * Toolbox manual for more detailed information on their functionality.     *
+ ****************************************************************************/
+
+
+
+#ifdef __cplusplus
+  extern "C" {
+#endif
+
+
+/*
+ * Name        : treeview_get_window_id
+ * Description : Returns the Window object for the window in which the tree resides
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : ObjectId *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_window_id ( unsigned int flags,
+                                                 ObjectId window,
+                                                 ComponentId gadget,
+                                                 ObjectId *id
+                                               );
+
+
+/*
+ * Name        : treeview_find_node
+ * Description : Returns the Id of the node at the given position on the screen
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int x
+ *               int y
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_find_node ( unsigned int flags,
+                                             ObjectId window,
+                                             ComponentId gadget,
+                                             int x,
+                                             int y,
+                                             int *id
+                                           );
+
+
+/*
+ * Name        : treeview_make_visible
+ * Description : Scrolls the tree so that the current node is in the visiable area
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_make_visible ( unsigned int flags,
+                                                ObjectId window,
+                                                ComponentId gadget
+                                              );
+
+
+/*
+ * Name        : treeview_select_node
+ * Description : Selects or deselects the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_select_node ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget
+                                             );
+
+
+/*
+ * Name        : treeview_expand_node
+ * Description : Expands or collapses part or all of the tree
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_expand_node ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget
+                                             );
+
+
+/*
+ * Name        : treeview_move_next_selected
+ * Description : Moves the current node to be the next selected node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *new_id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_move_next_selected ( unsigned int flags,
+                                                      ObjectId window,
+                                                      ComponentId gadget,
+                                                      int *new_id
+                                                    );
+
+
+/*
+ * Name        : treeview_move_first_selected
+ * Description : Moves the current node to be the first selected node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *new_id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_move_first_selected ( unsigned int flags,
+                                                       ObjectId window,
+                                                       ComponentId gadget,
+                                                       int *new_id
+                                                     );
+
+
+/*
+ * Name        : treeview_update_display
+ * Description : Ensures the gadget's display is up to date
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_update_display ( unsigned int flags,
+                                                  ObjectId window,
+                                                  ComponentId gadget
+                                                );
+
+
+/*
+ * Name        : treeview_delete_all
+ * Description : Deletes the entire tree
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_delete_all ( unsigned int flags,
+                                              ObjectId window,
+                                              ComponentId gadget
+                                            );
+
+
+/*
+ * Name        : treeview_delete_node
+ * Description : Deletes the current node and any descendants it has
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *new_id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_delete_node ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget,
+                                               int *new_id
+                                             );
+
+
+/*
+ * Name        : treeview_move_parent
+ * Description : Sets the current node to its parent
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_move_parent ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget,
+                                               int *id
+                                             );
+
+
+/*
+ * Name        : treeview_move_child
+ * Description : Sets the current node to its parent
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_move_child ( unsigned int flags,
+                                              ObjectId window,
+                                              ComponentId gadget,
+                                              int *id
+                                            );
+
+
+/*
+ * Name        : treeview_move_previous
+ * Description : Sets the current node to its previous sibling
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_move_previous ( unsigned int flags,
+                                                 ObjectId window,
+                                                 ComponentId gadget,
+                                                 int *id
+                                               );
+
+
+/*
+ * Name        : treeview_move_next
+ * Description : Sets the current node to its next sibling
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_move_next ( unsigned int flags,
+                                             ObjectId window,
+                                             ComponentId gadget,
+                                             int *id
+                                           );
+
+
+/*
+ * Name        : treeview_move_to
+ * Description : Sets the current node to the one specified
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int id
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_move_to ( unsigned int flags,
+                                           ObjectId window,
+                                           ComponentId gadget,
+                                           int id
+                                         );
+
+
+/*
+ * Name        : treeview_get_node_private_word
+ * Description : Gets the private word of the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : void * *private_word
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_node_private_word ( unsigned int flags,
+                                                         ObjectId window,
+                                                         ComponentId gadget,
+                                                         void * *private_word
+                                                       );
+
+
+/*
+ * Name        : treeview_get_node_sprite
+ * Description : Reads either of the sprite names associated with the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               char *buffer
+ *               int buff_size
+ * Out         : int *nbytes
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_node_sprite ( unsigned int flags,
+                                                   ObjectId window,
+                                                   ComponentId gadget,
+                                                   char *buffer,
+                                                   int buff_size,
+                                                   int *nbytes
+                                                 );
+
+
+/*
+ * Name        : treeview_get_node_text
+ * Description : Gets the text for the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               char *buffer
+ *               int buff_size
+ * Out         : int *nbytes
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_node_text ( unsigned int flags,
+                                                 ObjectId window,
+                                                 ComponentId gadget,
+                                                 char *buffer,
+                                                 int buff_size,
+                                                 int *nbytes
+                                               );
+
+
+/*
+ * Name        : treeview_set_node_private_word
+ * Description : Sets the private word of the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               void *private_word
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_set_node_private_word ( unsigned int flags,
+                                                         ObjectId window,
+                                                         ComponentId gadget,
+                                                         void *private_word
+                                                       );
+
+
+/*
+ * Name        : treeview_set_node_sprite
+ * Description : Specifies a sprite to use for a node in the tree
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               void *sprite_area
+ *               const char *sprite_name
+ *               const char *expanded_sprite_name
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_set_node_sprite ( unsigned int flags,
+                                                   ObjectId window,
+                                                   ComponentId gadget,
+                                                   void *sprite_area,
+                                                   const char *sprite_name,
+                                                   const char *expanded_sprite_name
+                                                 );
+
+
+/*
+ * Name        : treeview_set_node_text
+ * Description : Sets the text for the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               const char *text
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_set_node_text ( unsigned int flags,
+                                                 ObjectId window,
+                                                 ComponentId gadget,
+                                                 const char *text
+                                               );
+
+
+/*
+ * Name        : treeview_get_node_id
+ * Description : Gets the id of the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_node_id ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget,
+                                               int *id
+                                             );
+
+
+/*
+ * Name        : treeview_add_node
+ * Description : Adds a new node adjacent to the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               const char *text
+ * Out         : int *id
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_add_node ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            const char *text,
+                                            int *id
+                                          );
+
+
+/*
+ * Name        : treeview_get_menu
+ * Description : Gets the menu that would be displayed when the user clicks Menu over the gadget
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : ObjectId *menu
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_menu ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            ObjectId *menu
+                                          );
+
+
+/*
+ * Name        : treeview_set_menu
+ * Description : Sets the menu to be displayed when the user clicks Menu over the gadget
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               ObjectId menu
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_set_menu ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            ObjectId menu
+                                          );
+
+
+/*
+ * Name        : treeview_get_state
+ * Description : Gets the current gadget flags
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : unsigned int *state
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_state ( unsigned int flags,
+                                             ObjectId window,
+                                             ComponentId gadget,
+                                             unsigned int *state
+                                           );
+
+
+/*
+ * Name        : treeview_set_state
+ * Description : Sets the gadget flags
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               unsigned int state
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_set_state ( unsigned int flags,
+                                             ObjectId window,
+                                             ComponentId gadget,
+                                             unsigned int state
+                                           );
+
+
+/*
+ * Name        : treeview_get_node_state
+ * Description : Returns a bitfield describing the state of the current node
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : unsigned int *state
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *treeview_get_node_state ( unsigned int flags,
+                                                  ObjectId window,
+                                                  ComponentId gadget,
+                                                  unsigned int *state
+                                                );
+
+
+#ifdef __cplusplus
+  }
+#endif
+
+
+#endif

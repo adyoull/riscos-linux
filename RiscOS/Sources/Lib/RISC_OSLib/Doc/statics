@@ -1,0 +1,27 @@
+       C Library               Stubs
+ (either shared RAM or    area Stub$$Data
+      ROM library)
+      area C$$data
+           or
+       AnsiLib(m)
+      area K$$Data
+  |--------------------|--------------------|     ^ Fixed size
+  | kernel/k_data.s    | kernel/k_data.s    |     | &31C
+  |--------------------|--------------------|     v
+
+       C Library               Stubs
+ (either shared RAM or    area Stub$$Data
+ROM library or AnsiLib)
+      area C$$data
+  |--------------------|--------------------|     ^
+  | clib/cl_data.s     | clib/cl_data.s     |     |
+  |--------------------|--------------------|     |
+  | static             |                    |     |
+  | initialisers       |                    |     | Fixed size
+  | emitted by C       |                    |     | &B48
+  | compiler           | clib/clibdata.s    |     |
+  |--------------------|                    |     |
+  | clib/cl_spare.s    |                    |     |
+  | (omitted from      |                    |     |
+  | AnsiLib(m))        |                    |     |
+  |--------------------|--------------------|     v

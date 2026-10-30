@@ -1,0 +1,82 @@
+/*
+ * Copyright (c) 2015, Colin Granville
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+ *       may be used to endorse or promote products derived from this software
+ *       without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#ifndef AUTH_H
+#define AUTH_H
+
+/* Compute the NTOWFv2 (NT One-Way Function v2) key, which is the same 16-byte value as LMOWFv2.
+ *
+ * Defined as HMAC-MD5(NTOWFv1(password), UTF-16LE(UPPERCASE(username) + domain)); the domain keeps its case.  The result keys
+ * the HMAC-MD5 that produces both the LMv2 and the NTLMv2 challenge responses.
+ *
+ * Parameters:
+ *   password    plaintext password (Latin-1)
+ *   pass_size   length of password in characters
+ *   username    user name (Latin-1, uppercased internally)
+ *   user_size   length of username in characters
+ *   userdomain  domain name (Latin-1)
+ *   dom_size    length of domain in characters
+ *   digestout   receives the 16-byte NTOWFv2 key
+ */
+void Auth_LMOWFv2(const char *password, size_t pass_size, const char *username, size_t user_size, const char *userdomain, size_t dom_size,
+                  unsigned char digestout[16]);
+
+/* Compute the LMv2 challenge response sent in the LmChallengeResponse field of NTLM AUTHENTICATE.
+ *
+ * Generates a fresh random 8-byte client challenge and computes HMAC-MD5(NTOWFv2, server_challenge + client_challenge).  The
+ * client challenge follows the HMAC in the output so the server can recompute it.
+ *
+ * Parameters:
+ *   lmowfv2digest    16-byte NTOWFv2 key (from Auth_LMOWFv2)
+ *   serverchallenge  8-byte server challenge from the Type 2 message
+ *   responseout      receives 24 bytes: 16-byte HMAC then 8-byte client challenge
+ */
+void Auth_LMv2ChallengeResponse(const unsigned char lmowfv2digest[16], const unsigned char serverchallenge[8],
+                                unsigned char responseout[24]);
+
+/* Compute the NTLMv2 challenge response, echoing the server's target info as modern Windows requires for SMB2.
+ *
+ * The server's Type 2 message carries a TargetInfo AV_PAIR list that the client echoes back, with any pairs it adds per
+ * MS-NLMP 3.1.5.1.2.  If server_timestamp is non-zero, that FILETIME is embedded in the NTLMv2 blob in place of the local
+ * wall-clock.  MS-NLMP 3.1.5.1.2 says the client SHOULD use MsvAvTimestamp from the server's Type 2 target info when present;
+ * macOS in particular rejects SessionSetup if the client supplies a fresh timestamp when the server offered one.
+ *
+ * Parameters:
+ *   ntowfv2digest     16-byte NTOWFv2 hash
+ *   serverchallenge   8-byte server challenge from the Type 2 message
+ *   target_info       target info AV_PAIRs from the Type 2 message (raw bytes), or NULL
+ *   target_info_len   length of target_info
+ *   server_timestamp  MsvAvTimestamp from the server, or 0 to use local time
+ *   responseout       receives NTProofStr followed by the client blob
+ *   responseout_max   size of output buffer
+ *   responseoutsize   receives actual response size, or 0 on overflow
+ */
+void Auth_NTv2ChallengeResponseEx(const unsigned char ntowfv2digest[16], const unsigned char serverchallenge[8],
+                                  const unsigned char *target_info, unsigned short target_info_len, unsigned long long server_timestamp,
+                                  unsigned char *responseout, int responseout_max, unsigned short *responseoutsize);
+
+#endif

@@ -1,0 +1,1934 @@
+/* Copyright 1998 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* Omni.c - OmniFiler interface portions of the LanManFS client. */
+
+/* This manages the following bits:
+
+  (i) Keeps a list of all the server names we have seen,
+   in order to provide some server_ids.
+
+  (ii) Keeps a list of all the mount paths we have seen,
+   to provide an enumerate-mounts function.
+
+  (iii) Keeps a list of all the current drives (mounts) to
+   enable mount name->drive number conversion
+
+  (iv) Does the interface to the Free module
+
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#include "kernel.h"
+#include "swis.h"
+
+#include "Global/ModHand.h"
+#include "stdtypes.h"
+#include "SMB.h"
+#include "RPC.h"
+#include "LanMan.h"
+#include "Printers.h"
+#include "VersionNum"
+#include "Xlate.h"
+#include "LMVars.h"
+#include "Stats.h"
+#include "Logon.h"
+#include "Omni.h"
+#include "LanMan_MH.h"
+
+#define INFO_STR_LEN 64
+/* Length of info string kept about servers & mounts */
+
+/* ------------------------ */
+
+/* Tags saying which kind of record a NAMELIST holds.
+ *
+ * Every kind of record shares the one NAMELIST structure and one set of generic list handler routines; Validate checks a
+ * handle against the tag the caller expects.
+ */
+#define D_VALID_TAG 0x834EBE92 /* Tag for a valid disk name */
+#define P_VALID_TAG 0x945EBE93 /* Tag for a valid printer name */
+#define S_VALID_TAG 0x4938EE2B /* Tag for a valid server name */
+#define M_VALID_TAG 0x9384EBE2 /* Tag for a valid current mount */
+#define I_VALID_TAG 0x24435049 /* Tag for an IPC mount */
+#define C_VALID_TAG 0x314D4F43 /* Tag for comms device mount */
+
+typedef struct namelist NAMELIST; /* Our general holds-everything list */
+
+/* Information on a server */
+struct server_extra_info {
+  NAMELIST *known_disks;    // -> list of D_VALID_TAG records
+  NAMELIST *known_printers; // -> list of P_VALID_TAG records
+  NAMELIST *known_ipc;      // list of I_VALID_TAG records
+  NAMELIST *known_comms;    // list of C_VALID_TAG records
+  char info_string[INFO_STR_LEN];
+};
+
+/* Information on a current connection */
+struct mount_extra_info {
+  NAMELIST *servername; /* Server ID -> S_VALID_TAG record*/
+  NAMELIST *diskname;   // Mount path -> D_VALID_TAG record
+  char smb_lettr;       // SMB deals in drive letters
+  char connected;       // Non-zero as soon as it is mounted
+};
+
+/* Information on a share */
+struct share_extra_info {
+  char info_string[INFO_STR_LEN];
+};
+
+/* Multipurpose name-list structure */
+struct namelist {
+  unsigned int tag; // One or other VALID_TAG
+  struct namelist *next;
+  char name[NAME_LIMIT];
+
+  union {
+    struct mount_extra_info mount;
+    struct server_extra_info server;
+    struct share_extra_info share;
+  } u;
+
+  struct namelist *master_link;
+};
+
+static NAMELIST *MasterList = NULL; /* List of everything we've malloc'd */
+static NAMELIST *FreeList = NULL;   /* Used for deleted items */
+static NAMELIST *MountsList = NULL; /* Current mounts */
+static NAMELIST *ServerList = NULL; /* Known servers (known disks/printers
+                                       hang off the side of this list) */
+
+/* Name-list functions */
+/* ============================================= */
+
+/* Get a fresh NAMELIST node, recycling one from FreeList if available.
+ *
+ * Returns: pointer to a zero-initialised NAMELIST, or NULL on out-of-memory.
+ */
+static NAMELIST *alloc_nl(void) {
+  NAMELIST *pNL;
+
+  if (FreeList != NULL) // Salvage deleted items
+  {
+    NAMELIST *pLinkSave;
+
+    pNL = FreeList; // Recycle one from free list
+    FreeList = FreeList->next;
+
+    pLinkSave = pNL->master_link; // Clear everything except master_link
+    memset(pNL, 0, sizeof(NAMELIST));
+    pNL->master_link = pLinkSave;
+  } else {
+    pNL = (NAMELIST *)malloc(sizeof(NAMELIST));
+    if (pNL == NULL) { // Bum!
+      return NULL;
+    }
+    memset(pNL, 0, sizeof(NAMELIST));
+
+    pNL->master_link = MasterList; // Add it to the master list
+    MasterList = pNL;
+  }
+
+  return pNL;
+}
+
+/* FreeAllLists() */
+/* ---------------------------------*/
+
+/* This frees everything we've allocated; it also does some heavy deletion of things to prevent grief if it gets called twice,
+ * etc.
+ */
+static void FreeAllLists(void) {
+  NAMELIST *pNL, *pNL2;
+
+  pNL = MasterList;
+  FreeList = NULL;
+  MasterList = NULL;
+
+  while (pNL != NULL) {
+    pNL2 = pNL->master_link;
+    memset(pNL, 0, sizeof(NAMELIST));
+    free(pNL);
+    pNL = pNL2;
+  }
+}
+
+/* AddToList() */
+/* ------------------------------------*/
+
+/* Find or insert a named entry on a NAMELIST.
+ *
+ * If an item of the same name already exists on the list, no allocation is performed; the existing
+ * item is returned.  New allocations have all their 'extra_info' fields set to zero.
+ *
+ * Parameters:
+ *   pListHead  in/out: head of the target list
+ *   valid_tag  tag stamped onto the new node (M_VALID_TAG / S_VALID_TAG / D_VALID_TAG / P_VALID_TAG)
+ *   name_in    NUL-terminated name string
+ *
+ * Returns: pointer to the (possibly pre-existing) NAMELIST entry, or NULL on out-of-memory.
+ */
+static NAMELIST *AddToList(NAMELIST **pListHead, unsigned int valid_tag, const char *name_in) {
+  NAMELIST *pNL, *pNLprev, *pNLnew;
+  int c;
+  char namebuf[NAME_LIMIT];
+
+  /* Truncate name appropriately */
+  strcpyn(namebuf, name_in, NAME_LIMIT);
+
+  /* Traverse list */
+  for (pNL = *pListHead, pNLprev = NULL; pNL != NULL; pNLprev = pNL, pNL = pNL->next) {
+    c = stricmp(pNL->name, namebuf);
+    if (c == 0) {
+      return pNL; // Exact match
+    }
+    if (c > 0) { // Item goes after pNLprev and before pNL
+      break;
+    }
+  }
+
+  /* Need to insert item before pNL and after pNLprev. pNLprev is NULL if it goes at the head of the list. */
+
+  pNLnew = alloc_nl();
+
+  if (pNLnew == NULL) { // Bummer! Failed!
+    return NULL;
+  }
+
+  pNLnew->tag = valid_tag;
+  strcpy(pNLnew->name, namebuf);
+  pNLnew->next = pNL;
+
+  if (pNLprev == NULL) {
+    *pListHead = pNLnew;
+  } else {
+    pNLprev->next = pNLnew;
+  }
+
+  return pNLnew;
+}
+
+/* FindInList() */
+/* -----------------------------------*/
+
+/* Look up an entry on a NAMELIST by name (case-insensitive).
+ *
+ * Parameters:
+ *   ListHead  head of the list
+ *   name_in   target name
+ *
+ * Returns: matching entry, or NULL if not found.
+ */
+static NAMELIST *FindInList(NAMELIST *ListHead, const char *name_in) {
+  NAMELIST *pNL;
+  int c;
+  char namebuf[NAME_LIMIT];
+
+  /* Truncate name appropriately */
+  strcpyn(namebuf, name_in, NAME_LIMIT);
+
+  /* Traverse list */
+  for (pNL = ListHead; pNL != NULL; pNL = pNL->next) {
+    c = stricmp(pNL->name, namebuf);
+    if (c == 0) {
+      return pNL; // Exact match
+    }
+    if (c > 0) { // Gone past end
+      break;
+    }
+  }
+
+  return NULL; // Not found
+}
+
+/* DeleteFromList() */
+/*-------------------------------*/
+
+/* Unlink a NAMELIST entry from its list and stash it on FreeList for later reuse.
+ *
+ * Parameters:
+ *   pListHead  in/out: head of the source list
+ *   item       entry to remove (must be linked into the same list)
+ */
+static void DeleteFromList(NAMELIST **pListHead, NAMELIST *item) {
+  NAMELIST *pNL;
+
+  if (*pListHead == item) // First in list
+  {
+    *pListHead = item->next;
+  } else { // Search for it in list
+    for (pNL = *pListHead; pNL != NULL; pNL = pNL->next) {
+      if (pNL->next == item) {
+        pNL->next = item->next;
+        break;
+      }
+    }
+  }
+
+  /* Add to freelist */
+  item->next = FreeList;
+  item->tag = 0u;
+  FreeList = item;
+}
+
+/* Main Routines */
+/*=================================================== */
+
+/* FindActiveMount() */
+/*------------------------------*/
+
+/* Find a mount-list entry whose `diskname` points at a given disk-list entry.
+ *
+ * Used when crossing from the known-disks list back to the active-mounts list (the two share
+ * pointers but the relationship isn't bidirectional).
+ *
+ * Parameters:
+ *   pD  disk-list entry (D_VALID_TAG)
+ *
+ * Returns: matching mount-list entry, or NULL if no mount uses that disk.
+ */
+static NAMELIST *FindActiveMount(NAMELIST *pD) {
+  NAMELIST *pNL;
+
+  for (pNL = MountsList; pNL != NULL; pNL = pNL->next) {
+    if (pNL->u.mount.diskname == pD) {
+      return pNL;
+    }
+  }
+
+  return NULL;
+}
+
+/* Validate() */
+/*-------------------------------------*/
+
+/* Treat `id` as a NAMELIST* and confirm it's currently linked and carries the expected tag.
+ *
+ * Used to validate caller-supplied handles (mount_id, server_id, etc.) before dereferencing.
+ * The linkage walk closes a recycle hole: a NAMELIST that was DeleteFromList'd and then reused
+ * by alloc_nl for an unrelated mount/server keeps the same address, so a tag-only check would
+ * silently accept a stale caller-supplied handle that now resolves to the new occupant.
+ *
+ * Parameters:
+ *   id        candidate handle (a NAMELIST* cast to int)
+ *   validtag  expected tag (M_/S_/D_/P_VALID_TAG)
+ *
+ * Returns: the validated NAMELIST*, or NULL if the handle isn't recognised.
+ */
+static NAMELIST *Validate(int id, unsigned int validtag) {
+  NAMELIST *pNL;
+  NAMELIST *cur;
+  NAMELIST *srv;
+
+  /* Cheap sanity gate: a NAMELIST* is always word-aligned and never zero. */
+  if (id == 0 || (id & 3) != 0) {
+    return NULL;
+  }
+
+  /* Tag-only check is necessary but not sufficient (reused slots keep the same address). */
+  pNL = (NAMELIST *)id;
+  if (pNL->tag != validtag) {
+    return NULL;
+  }
+
+  /* Walk the list that matches the tag, confirming pNL is currently linked. */
+  switch (validtag) {
+  case M_VALID_TAG:
+    for (cur = MountsList; cur != NULL; cur = cur->next) {
+      if (cur == pNL) {
+        return pNL;
+      }
+    }
+    break;
+
+  case S_VALID_TAG:
+    for (cur = ServerList; cur != NULL; cur = cur->next) {
+      if (cur == pNL) {
+        return pNL;
+      }
+    }
+    break;
+
+  case D_VALID_TAG:
+    for (srv = ServerList; srv != NULL; srv = srv->next) {
+      for (cur = srv->u.server.known_disks; cur != NULL; cur = cur->next) {
+        if (cur == pNL) {
+          return pNL;
+        }
+      }
+    }
+    break;
+
+  case P_VALID_TAG:
+    for (srv = ServerList; srv != NULL; srv = srv->next) {
+      for (cur = srv->u.server.known_printers; cur != NULL; cur = cur->next) {
+        if (cur == pNL) {
+          return pNL;
+        }
+      }
+    }
+    break;
+
+  default:
+    break;
+  }
+
+  return NULL;
+}
+
+static char work_buf[80];
+static char name_buf[NAME_LIMIT + 16];
+
+/* DoCLIop() */
+/*--------------------------------------*/
+
+/* Issue an OS_CLI command parameterised by a mount name.
+ *
+ * The command string should contain a %s at the point where the mount name belongs; it gets
+ * replaced by "LanMan::mountname".
+ *
+ * Parameters:
+ *   command   sprintf-style template with exactly one %s
+ *   mount_id  mount handle (validated internally)
+ *
+ * Returns: OK on success, EBADPARAM on bad mount_id, or the OS_CLI error wrapped via MsgSetOSError.
+ */
+static err_t DoCLIop(char *command, int mount_id) {
+  NAMELIST *pNL = Validate(mount_id, M_VALID_TAG);
+
+  if (pNL == NULL) {
+    return EBADPARAM;
+  }
+
+  sprintf(name_buf, FilingSystemName "::%s", pNL->name);
+  sprintf(work_buf, command, name_buf);
+  return MsgSetOSError(_swix(OS_CLI, _IN(0), work_buf));
+}
+
+/* MountNameCpy() */
+/*---------------------------------*/
+
+/* Copy a user-supplied mount name into a sanitised form suitable for the mounts list.
+ *
+ * Drops spaces, '/' and '\', and stops at the first control character or RISC OS path
+ * metacharacter, so a name like "Public Folder" becomes "PublicFolder".  This normalisation runs at
+ * mount-creation time so Omni_GetDrvLetter can find the entry later with a literal-match lookup.
+ *
+ * Parameters:
+ *   d  destination buffer (must hold at least NAME_LIMIT bytes)
+ *   s  source name (caller-supplied; may contain spaces / unsafe chars)
+ */
+static void MountNameCpy(char *d, char *s) {
+  int n_written = 0, c;
+
+  while (n_written < (NAME_LIMIT - 1)) {
+    c = *s++;
+
+    /* Drop separators and path-style noise the user might have typed. */
+    if (c == ' ' || c == '/' || c == '\\') {
+      continue;
+    }
+
+    /* Stop on any control character or RISC OS path metacharacter ('.', '*', '$'). */
+    if (c < ' ' || c == '.' || c == '*' || c == '$') {
+      break;
+    }
+
+    *d++ = c;
+    n_written++;
+  }
+
+  *d = 0;
+}
+
+static int ReentryCount = 0;
+
+/* Mounts whose boot step was put off because the filing-system guard was held when they were made, most recent last.
+ * Omni_RunDeferredBoots works through them once the guarded command has released the guard.
+ */
+static int DeferredBoots[MAX_DRIVES];
+static int DeferredBootCount = 0;
+
+/* BootMount() */
+/*------------------------------------ */
+
+#ifdef CHECK_ARMBOOT_EXISTS
+/* Stat a file on the freshly-mounted share to decide whether to invoke !ArmBoot.
+ *
+ * Used by BootMount as the existence check before launching the boot file.  Returns ECANTFINDNAME
+ * when the file is absent (OS_File returns type 0).
+ *
+ * Parameters:
+ *   pNLmount  mount-list entry whose share to probe
+ *   leaf      leaf name to check (e.g. "!ARMBOOT")
+ *
+ * Returns: OK if the file exists, ECANTFINDNAME if absent, or another OS error.
+ */
+static err_t BootMount_check_file(NAMELIST *pNLmount, const char *leaf) {
+  int type;
+  static char filename[80];
+  err_t e;
+
+  sprintf(filename, FilingSystemName "::%s.$.%s", pNLmount->name, leaf);
+  e = MsgSetOSError(_swix(OS_File, _INR(0, 1) | _OUT(0), 23, filename, &type));
+  if (e == OK) {
+    if (type == 0) {
+      e = ECANTFINDNAME;
+    }
+  }
+  return e;
+}
+#endif
+
+/* Look for and execute a !ArmBoot file on a freshly-mounted share.
+ *
+ * Only a build with CHECK_ARMBOOT_EXISTS looks for the file; any other build returns OK without
+ * running anything.  Picks Filer_run (desktop) or Run (cmd-line) depending on Wimp state.  Re-entrant via OS_CLI: the
+ * !ArmBoot may issue further LMConnect commands, so this routine must not depend on any module
+ * static state surviving the DoCLIop call.  A guard counter caps recursion at MAX_DRIVES.  Boot
+ * failures are remapped to EBOOTERROR so the caller can distinguish them from connect failures.
+ *
+ * Parameters:
+ *   pNLmount  mount-list entry just created by Omni_MountServer
+ *
+ * With the filing-system guard held, the mount is queued for Omni_RunDeferredBoots instead and OK is returned.
+ *
+ * Returns: OK if SHIFT is held, no boot file is present, it ran cleanly or it was deferred; EBOOTREENTRY when the
+ * recursion guard trips or the deferred queue is full; EBOOTERROR if running the boot file fails.
+ */
+static err_t BootMount(NAMELIST *pNLmount) {
+  uint32_t in_desktop;
+  err_t res;
+
+  /* Attempts to run a !ArmBoot file or applicationn, if it exists */
+
+  if ((_kernel_osbyte(129, 255, 255) & 0xFF00) == 0xFF00) {
+    /* SHIFT was depressed, or an error occurred */
+    return OK;
+  }
+
+  /* Looking for the boot file and running it both go back through FileSwitch to this module, which would refuse them
+   * while a guarded command holds the guard.  Leave the boot until that command has released it.
+   */
+  if (lanmanfs_in_use) {
+    if (DeferredBootCount >= MAX_DRIVES) {
+      return EBOOTREENTRY;
+    }
+    DeferredBoots[DeferredBootCount++] = (int)pNLmount;
+    return OK;
+  }
+
+  /* If no such file or directory, we can stop now */
+#ifdef CHECK_ARMBOOT_EXISTS
+  if (BootMount_check_file(pNLmount, "!ARMBOOT") != OK) {
+    return OK;
+  }
+#else
+  return OK;
+#endif
+
+  /* Safety check */
+  if (ReentryCount >= MAX_DRIVES) {
+    return EBOOTREENTRY;
+  }
+
+  ++ReentryCount;
+  /* Wimp_ReadSysInfo with R0=0 returns the number of active tasks in R0; non-zero means we're in the desktop. */
+  if (_swix(Wimp_ReadSysInfo, _IN(0) | _OUT(0), 0, &in_desktop) == NULL && in_desktop > 0) {
+    res = DoCLIop("Filer_run %s.$.!ArmBoot", (int)pNLmount);
+  } else {
+    res = DoCLIop("Run %s.$.!ArmBoot", (int)pNLmount);
+  }
+  --ReentryCount;
+
+  /* To avoid confusion, use a different error for !ArmBoot errors */
+  if (res != OK) {
+    return EBOOTERROR;
+  }
+
+  return res;
+}
+
+err_t Omni_RunDeferredBoots(void) {
+  err_t res = OK;
+
+  /* Running a deferred boot with the guard held would only defer it again. */
+  if (lanmanfs_in_use) {
+    return OK;
+  }
+
+  /* Take each entry off before running it: a boot file that mounts further shares adds and runs its own entries. */
+  while (DeferredBootCount > 0) {
+    NAMELIST *pNLmount = Validate(DeferredBoots[--DeferredBootCount], M_VALID_TAG);
+    err_t boot_res;
+
+    if (pNLmount == NULL) {
+      continue; // Dismounted before its boot could run
+    }
+    boot_res = BootMount(pNLmount);
+    if (res == OK) {
+      res = boot_res;
+    }
+  }
+
+  return res;
+}
+
+err_t Omni_MountServer(char *servname, char *userID, char *passwd, char *mountname, char *mountpath, int *mount_id_out) {
+  err_t res;
+  char namebuf[NAME_LIMIT];
+  NAMELIST *pNLmount, *pNLsrv;
+
+  *mount_id_out = 0;
+
+  if (mountname == NULL || servname == NULL || mountpath == NULL) {
+    return EBADPARAM;
+  }
+
+  MountNameCpy(namebuf, mountname);
+
+  /* Reserve (or reuse) a slot under this mount name; allocation failure is "no room left". */
+  pNLmount = AddToList(&MountsList, M_VALID_TAG, namebuf);
+  if (pNLmount == NULL) {
+    return ECONNLIMIT;
+  }
+
+  /* Slot was previously occupied - drop the existing share so we can recycle it. */
+  if (pNLmount->u.mount.connected != 0) {
+    SMB_DeleteShare(pNLmount->u.mount.smb_lettr);
+  }
+
+  /* Hand off to the SMB layer, which negotiates the protocol and brings the connection up. */
+  res = SMB_CreateShare(SHR_DISK, CREATE_NEW_USER | CREATE_NEW_SHARE, servname, mountpath, userID, passwd, &(pNLmount->u.mount.smb_lettr),
+                        namebuf);
+  if (res != OK) {
+    /* Connection failed - roll the slot back so the name is free for the next attempt. */
+    DeleteFromList(&MountsList, pNLmount);
+    return res;
+  }
+
+  /* Connection up.  Cross-link the new mount into the known-servers / known-shares lists so the
+   * OmniClient browser sees it; OOM here is non-fatal (the mount still works, the browser is
+   * a little less helpful until the next refresh).
+   */
+  pNLmount->u.mount.connected = 1;
+  pNLsrv = AddToList(&ServerList, S_VALID_TAG, servname);
+  pNLmount->u.mount.servername = pNLsrv;
+  if (pNLsrv != NULL) {
+    pNLmount->u.mount.diskname = AddToList(&pNLsrv->u.server.known_disks, D_VALID_TAG, mountpath);
+  } else {
+    pNLmount->u.mount.diskname = NULL;
+  }
+
+  /* Publish the handle whether or not the bookkeeping above succeeded; !Omni only needs the ID. */
+  *mount_id_out = (int)(pNLmount);
+
+  /* The server might now be visible where it wasn't before - kick a browse-info refresh. */
+  Omni_RecheckInfo(RI_SERVERS);
+  Omni_RecheckInfo(RI_PRINTERS);
+
+  /* Honour any !ArmBoot file on the freshly-mounted share. */
+  return BootMount(pNLmount);
+}
+
+err_t Omni_DismountServer(int mount_id) {
+  NAMELIST *pNL = Validate(mount_id, M_VALID_TAG);
+
+  if (pNL == NULL) {
+    return EBADPARAM;
+  }
+
+  /* Make forward progress regardless of errors - stale mounts would otherwise be unkillable. */
+  DoCLIop("Filer_CloseDir %s.$", mount_id);
+  SMB_DeleteShare(pNL->u.mount.smb_lettr);
+  DeleteFromList(&MountsList, pNL);
+  return OK;
+}
+
+/* Omni_FreeSpace() */
+/*-------------------------------*/
+
+/* 32-bit clamp helper used by the Op-2 (free space) response: a wire byte count above 32-bit range
+ * saturates to 0xFFFFFFFF so OmniClient's int-typed display fields can't overflow.
+ */
+static uint size_clip(uint val, uint limit, uint blksize) {
+  return (val > limit) ? 0xFFFFFFFFU : val * blksize;
+}
+
+/* Validate the mount handle and issue the wire free-space query.
+ *
+ * Parameters:
+ *   mount_id  mount handle from Omni_MountServer
+ *   DSR       destination disk_size_response (block count + block size)
+ *
+ * Returns: OK on success, EBADPARAM for an invalid mount, or the SMB_GetFreeSpace error.
+ */
+static err_t Omni_DetermineFreeSpace(int mount_id, struct disk_size_response *DSR) {
+  NAMELIST *pNL = Validate(mount_id, M_VALID_TAG);
+
+  if (pNL == NULL) {
+    return EBADPARAM;
+  }
+
+  return SMB_GetFreeSpace(pNL->u.mount.smb_lettr, DSR);
+}
+
+/* 32-bit free-space query for OmniClient Op-2 (legacy SWI shape).
+ *
+ * Multiplies the server's block-count fields by the block size, saturating at 0xFFFFFFFF so the
+ * int-typed OmniClient fields don't overflow on terabyte-class shares.  Callers that care about
+ * the full range should use Omni_FreeSpace64 instead.
+ *
+ * Parameters:
+ *   mount_id        mount handle from Omni_MountServer
+ *   freespace_out   bytes free
+ *   usedspace_out   bytes in use
+ *   totspace_out    total bytes on the share
+ *
+ * Returns: OK on success, EBADPARAM for an invalid mount, or the SMB_GetFreeSpace error.
+ */
+static err_t Omni_FreeSpace(int mount_id, int *freespace_out, int *usedspace_out, int *totspace_out) {
+  struct disk_size_response DSR;
+  uint blklimit;
+  err_t res;
+
+  res = Omni_DetermineFreeSpace(mount_id, &DSR);
+  if (res != OK) {
+    return res;
+  }
+
+  /* The block size is the product of two figures from the server, either of which may be 0, and then so is every size. */
+  if (DSR.blksize == 0) {
+    *freespace_out = *totspace_out = *usedspace_out = 0;
+    return OK;
+  }
+
+  /* Make sure we don't overflow.
+   *
+   * Free space in bytes is DSR.blksize * DSR.freeblks
+   */
+
+  blklimit = 0xFFFFFFFFU / DSR.blksize;
+
+  *freespace_out = size_clip(DSR.freeblks, blklimit, DSR.blksize);
+  *totspace_out = size_clip(DSR.totalblks, blklimit, DSR.blksize);
+  *usedspace_out = size_clip(DSR.totalblks - DSR.freeblks, blklimit, DSR.blksize);
+
+  return OK;
+}
+
+/* Omni_FreeSpace64() */
+/*------------------------------*/
+
+/* 64-bit free-space query for a mounted share.
+ *
+ * Backs the 64-bit free-space reason of Omni_FreeOp_SWI further down; Omni_FreeSpace above is the
+ * 32-bit equivalent for the legacy Op-2 path that's still constrained to int-sized outputs.
+ *
+ * Parameters:
+ *   mount_id        mount handle
+ *   success         on success, written to 0 (signals the SWI's "no error" convention)
+ *   freespace_out   bytes free
+ *   usedspace_out   bytes in use
+ *   totspace_out    total bytes on the share
+ *
+ * Returns: OK on success, EBADPARAM for an invalid mount, or the SMB_GetFreeSpace error.
+ */
+static err_t Omni_FreeSpace64(int mount_id, int *success, uint64_t *freespace_out, uint64_t *usedspace_out, uint64_t *totspace_out) {
+  struct disk_size_response DSR;
+  err_t res;
+  uint used;
+
+  res = Omni_DetermineFreeSpace(mount_id, &DSR);
+  if (res != OK) {
+    return res;
+  }
+
+  /* uint32_t*uint32_t => uint64_t result */
+  *freespace_out = (uint64_t)DSR.freeblks * DSR.blksize;
+  *totspace_out = (uint64_t)DSR.totalblks * DSR.blksize;
+  used = DSR.totalblks - DSR.freeblks;
+  *usedspace_out = (uint64_t)used * DSR.blksize;
+  *success = 0;
+
+  return OK;
+}
+
+/* Subroutines to help enumeration routines ======================== */
+static char *enum_ptr;
+static int enum_bytes_left;
+
+/* Advance enum_ptr to the next word boundary, decrementing enum_bytes_left.
+ *
+ * Returns: true if the alignment fits in the remaining buffer, false on overflow.
+ */
+static bool enum_align_ptr(void) {
+  int p = (int)enum_ptr;
+  p = (-p) & 3; // Number of bytes needed to align pointer to a word
+
+  if (enum_bytes_left < p) {
+    return false;
+  }
+
+  enum_bytes_left -= p;
+  enum_ptr += p;
+  return true;
+}
+
+/* Append a 32-bit native-byte-order word to the enumeration buffer.
+ *
+ * Parameters:
+ *   val  value to write
+ *
+ * Returns: true on success, false if the buffer has < 4 bytes left.
+ */
+static bool enum_write_word(int val) {
+  if (enum_bytes_left < 4) {
+    return false;
+  }
+
+  *((int *)enum_ptr) = val;
+
+  enum_bytes_left -= 4;
+  enum_ptr += 4;
+  return true;
+}
+
+static bool enum_write_string(char *str, int maxlen)
+/* maxlen is maximum length including null terminator */
+{
+  int len = strlen(str) + 1;
+  if (len > maxlen) {
+    len = maxlen;
+  }
+
+  if (enum_bytes_left < len) {
+    return false;
+  }
+
+  memcpy(enum_ptr, str, len);
+  enum_ptr[len - 1] = 0;
+  enum_bytes_left -= len;
+  enum_ptr += len;
+  return true;
+}
+
+/* Omni_ListServers() */
+/*-----------------------------*/
+
+/* Enumerate known servers into a caller-supplied buffer - OmniClient Op 3 (LanMan_OmniOp reason 3).
+ *
+ * Token convention: token_in == 0 starts fresh, anything else is a pToken_out from a previous call
+ * (a pointer to the next server-list entry to emit).  When the buffer fills, returns with
+ * *pToken_out pointing at the unwritten entry so the caller can continue.
+ *
+ * Parameters:
+ *   buf_ptr        destination buffer
+ *   buf_size       buffer capacity in bytes
+ *   token_in       continuation token (0 to start)
+ *   pNextByte_out  on exit, points just past the last byte written
+ *   pToken_out     on exit, 0 if complete, else continuation token for the next call
+ *
+ * Returns: OK on success (overflow is reported via the continuation token, not an error),
+ * EBADPARAM if the token doesn't validate.
+ */
+static err_t Omni_ListServers(char *buf_ptr, int buf_size, int token_in, const char **pNextByte_out, int *pToken_out) {
+  /* If token_in is 0 we start from the beginning of the list; if not it should be a pToken_out which we previously supplied.
+   *
+   * Our tokens will be pointers to entries in the server list
+   */
+
+  NAMELIST *pNL;
+  char *next_byte_written;
+
+  /* Check token_in */
+
+  if (token_in == 0) {
+    if (LM_Vars.logged_on) {
+      RPC_EnumerateServers(LM_Vars.workgroup);
+    }
+    pNL = ServerList;
+  } else {
+    pNL = Validate(token_in, S_VALID_TAG);
+    if (pNL == NULL) {
+      return EBADPARAM;
+    }
+  }
+
+  /* Write data */
+
+  enum_ptr = buf_ptr;
+  enum_bytes_left = buf_size;
+  next_byte_written = buf_ptr;
+
+  while (pNL != NULL) {
+    if (enum_write_word((int)pNL) && enum_write_string(pNL->name, 16) && enum_write_string(pNL->name, 32) &&
+        enum_write_string(pNL->u.server.info_string, 64) && enum_align_ptr()) {
+      /* Record written OK */
+      next_byte_written = enum_ptr;
+      pNL = pNL->next;
+    } else { // Can't fit this record in!
+      break;
+    }
+  }
+
+  /* Done! pNL is the next record which would have been written, or NULL if we're all done */
+
+  *pNextByte_out = next_byte_written;
+  *pToken_out = (int)pNL;
+  return OK;
+}
+
+/* Omni_ListMounts() */
+/*------------------------------*/
+
+/* Enumerate shares published by a server - OmniClient Op 4 (LanMan_OmniOp reason 4).
+ *
+ * Either `server_id` (existing server-list entry handle) or `server_name` (raw name; will be
+ * resolved or added) identifies the target.  Tokens are pointers into the server's known_disks
+ * list; same continuation convention as Omni_ListServers.
+ *
+ * Parameters:
+ *   buf_ptr        destination buffer
+ *   buf_size       buffer capacity in bytes
+ *   token_in       continuation token (0 to start)
+ *   server_id      server handle, or 0 to use server_name instead
+ *   server_name    server name (used when server_id == 0)
+ *   pNextByte_out  on exit, points just past the last byte written
+ *   pToken_out     on exit, 0 if complete, else continuation token
+ *
+ * Returns: OK on success, EBADPARAM if the token / server handle doesn't validate.
+ */
+static err_t Omni_ListMounts(char *buf_ptr, int buf_size, int token_in, int server_id, char *server_name, const char **pNextByte_out,
+                             int *pToken_out) {
+  /* If token_in is 0 we start from the beginning of the list; if not it should be a pToken_out which we previously supplied.
+   *
+   * Here, tokens will be pointers to entries on the known_disks list for each server.
+   */
+
+  NAMELIST *pNLsrv;
+  NAMELIST *pNLdisk;
+  char *next_byte_written;
+
+  /* If token_in is non-NULL, we're in the middle */
+
+  if (token_in != 0) {
+    pNLdisk = Validate(token_in, D_VALID_TAG);
+    if (pNLdisk == NULL) {
+      return EBADPARAM;
+    }
+  } else if (server_id != 0) // Use given server ID
+  {
+    pNLsrv = Validate(server_id, S_VALID_TAG);
+    if (pNLsrv == NULL) {
+      return EBADPARAM;
+    }
+
+    /* Get disk/printer shares for this server */
+    if (LM_Vars.logged_on) {
+      RPC_EnumerateShares(pNLsrv->name);
+    }
+
+    pNLdisk = pNLsrv->u.server.known_disks;
+  } else // Use given server name
+  {
+    /* Attempt to contact server - it will be added to list if OK */
+    if (LM_Vars.logged_on) {
+      RPC_EnumerateShares(server_name);
+    }
+
+    pNLsrv = FindInList(ServerList, server_name);
+    if (pNLsrv == NULL) { // Not found - give zero results
+      pNLdisk = NULL;
+    } else {
+      pNLdisk = pNLsrv->u.server.known_disks;
+    }
+  }
+
+  /* Now list known mounts ------------ */
+
+  enum_ptr = buf_ptr;
+  enum_bytes_left = buf_size;
+  next_byte_written = buf_ptr;
+
+  while (pNLdisk != NULL) {
+    if (enum_write_word((int)FindActiveMount(pNLdisk)) && enum_write_string(pNLdisk->name, 16) && enum_write_string(pNLdisk->name, 32) &&
+        enum_align_ptr()) {
+      /* Record written OK */
+      next_byte_written = enum_ptr;
+      pNLdisk = pNLdisk->next;
+    } else { // Can't fit this record in!
+      break;
+    }
+  }
+
+  /* Done ! pNLdisk is the next record which would have been written, or NULL if we're all done */
+
+  *pNextByte_out = next_byte_written;
+  *pToken_out = (int)pNLdisk;
+  return OK;
+}
+
+/* Omni_ListActiveMounts() */
+/*------------------------*/
+
+/* Enumerate currently-active mounts - OmniClient Op 5 (LanMan_OmniOp reason 5).
+ *
+ * Tokens are pointers into MountsList; same continuation convention as Omni_ListServers.
+ *
+ * Parameters:
+ *   buf_ptr        destination buffer
+ *   buf_size       buffer capacity in bytes
+ *   token_in       continuation token (0 to start)
+ *   pNextByte_out  on exit, points just past the last byte written
+ *   pToken_out     on exit, 0 if complete, else continuation token
+ *
+ * Returns: OK on success, EBADPARAM if the token doesn't validate.
+ */
+static err_t Omni_ListActiveMounts(char *buf_ptr, int buf_size, int token_in, const char **pNextByte_out, int *pToken_out) {
+  /* Here, the token_in/token_out numbers will pointers to entries in the MountsList list. */
+
+  char *next_byte_written;
+  NAMELIST *pNL;
+
+  if (token_in == 0) {
+    pNL = MountsList;
+  } else {
+    pNL = Validate(token_in, M_VALID_TAG);
+    if (pNL == NULL) {
+      return EBADPARAM;
+    }
+  }
+
+  enum_ptr = buf_ptr;
+  enum_bytes_left = buf_size;
+  next_byte_written = buf_ptr;
+
+  while (pNL != NULL) {
+    if (enum_write_word((int)(pNL->u.mount.servername)) && // Server ID
+        enum_write_word((int)pNL) &&                       // Mount ID
+        enum_write_string(pNL->name, 16) && enum_align_ptr()) {
+      next_byte_written = enum_ptr; // Written OK
+      pNL = pNL->next;
+    } else { // Record wouldn't fit
+      break;
+    }
+  }
+
+  /* Search complete if pNL == NULL, or pNL = next record if not */
+
+  *pNextByte_out = next_byte_written;
+  *pToken_out = (int)pNL;
+  return OK;
+}
+
+/* Omni_ListPrinters() */
+/*------------------------*/
+
+/* Enumerate the printers of every known server - OmniClient Op 16 (LanMan_OmniOp reason 16).
+ *
+ * Flattens the per-server known_printers lists into one sequence; tokens point at a printer entry
+ * within whichever server's list it belongs to.  Same continuation convention as Omni_ListServers.
+ *
+ * Parameters:
+ *   buf_ptr        destination buffer
+ *   buf_size       buffer capacity in bytes
+ *   token_in       continuation token (0 to start)
+ *   pNextByte_out  on exit, points just past the last byte written
+ *   pToken_out     on exit, 0 if complete, else continuation token
+ *
+ * Returns: OK on success, EBADPARAM if the token doesn't validate.
+ */
+static err_t Omni_ListPrinters(char *buf_ptr, int buf_size, int token_in, const char **pNextByte_out, int *pToken_out) {
+  /* Here, the token_in/token_out numbers will be pointers to an entry on the known_printers list for each server.
+   *
+   * Unfortunately, we have to flatten the servers/ printers list, hence this may get a little slow.
+   */
+
+  NAMELIST *pNLsrv;   // Pointer in servers list
+  NAMELIST *pNLprn;   // Current printer
+  NAMELIST *pNLstart; // Printer at which to start enumerating
+
+  char *next_byte_written;
+
+  /* Check token_in */
+
+  if (token_in == 0) {
+    pNLstart = NULL;
+  } else {
+    pNLstart = Validate(token_in, P_VALID_TAG);
+    if (pNLstart == NULL) {
+      return EBADPARAM;
+    }
+  }
+
+  /* ------- */
+
+  enum_ptr = buf_ptr;
+  enum_bytes_left = buf_size;
+  next_byte_written = buf_ptr;
+  pNLprn = NULL; // In case no servers!
+
+  for (pNLsrv = ServerList; pNLsrv != NULL; pNLsrv = pNLsrv->next) {
+    for (pNLprn = pNLsrv->u.server.known_printers; pNLprn != NULL; pNLprn = pNLprn->next) {
+      /* Skip printers until the one the token names, then write every printer from there on. */
+      if (pNLprn == pNLstart) {
+        pNLstart = NULL;
+      }
+      if (pNLstart == NULL) {
+        /* Write record */
+        if (enum_write_word(0) &&                  // Flags
+            enum_write_string(pNLprn->name, 24) && // Printer name
+            enum_write_string(pNLsrv->name, 64) && // Server name
+            enum_align_ptr()) {
+          next_byte_written = enum_ptr;
+        } else {
+          goto out_of_buffer;
+        }
+
+        /* Record written OK */
+      }
+    }
+  }
+
+  /* Done ! pNLprn is NULL if we finished OK, or a pointer to the printer record which we were about to write when we ran out of
+   * buffer
+   */
+
+out_of_buffer:
+  *pNextByte_out = next_byte_written;
+  *pToken_out = (int)pNLprn;
+  return OK;
+}
+
+/* Omni_OpenRoot () */
+/*-------------------------------*/
+
+/* Triggers a filer_opendir on the root directory for a given mount */
+
+static err_t Omni_OpenRoot(int mount_id) {
+  return DoCLIop("Filer_OpenDir %s.$", mount_id);
+}
+
+/* Omni_OpenUserRoot () */
+/*---------------------------*/
+
+/* Triggers a filer_opendir on the user's home directory for a given mount */
+static err_t Omni_OpenUserRoot(int mount_id) {
+  return DoCLIop("Filer_OpenDir %s.$", mount_id);
+}
+
+/* Omni_GetNewMountInfo() */
+/*-------------------------*/
+
+/* Decide which credentials OmniClient needs to collect for a new mount on a known server.
+ *
+ * Called when the user double-clicks on an icon in the available-mounts window: we already know
+ * the server (it's in our list, with a credential established), so we can skip the user/password
+ * prompt and ask only for the share path.  If we're logged on we can do the same even for a brand
+ * new server; otherwise we need every credential field.
+ *
+ * Parameters:
+ *   server_id   server-list handle (S_VALID_TAG)
+ *   MountPath   unused
+ *   pFlags_out  on success, receives the RC_NEEDS_* mask
+ *
+ * Returns: OK on success, EBADPARAM if server_id doesn't validate.
+ */
+static err_t Omni_GetNewMountInfo(int server_id, char *MountPath, int *pFlags_out) {
+  const char *flags;
+  NAMELIST *pSrv, *pNL;
+
+  UNUSED(MountPath);
+
+  pSrv = Validate(server_id, S_VALID_TAG);
+
+  if (pSrv == NULL) {
+    return EBADPARAM;
+  }
+
+  for (pNL = MountsList; pNL != NULL; pNL = pNL->next) {
+    if (pNL->u.mount.servername == pSrv) {
+      /* This server is connected somewhere */
+      flags = SMB_GetConnInfo(pNL->u.mount.smb_lettr, GCI_LOGONTYPE);
+
+      if (flags == NULL) { // Never heard of it
+        return EBADPARAM;
+      }
+
+      /* Always user-level - no per-share password needed */
+      *pFlags_out = RC_NEEDS_MOUNTPATH | RC_DOES_FILES;
+
+      return OK;
+    }
+  }
+
+  /* No, we're not connected. Are we logged on ? */
+  if (LM_Vars.logged_on) {
+    *pFlags_out = RC_NEEDS_MOUNTPATH | RC_DOES_FILES;
+  } else {
+    *pFlags_out = RC_NEEDS_USERID | RC_NEEDS_PASSWD | RC_NEEDS_MOUNTPATH | RC_DOES_FILES;
+  }
+  return OK;
+}
+
+err_t Omni_GetMountInfo(int mount_id, const char **pServName, const char **pUserName, const char **pMountName, const char **pMountPath,
+                        int *pServerID) {
+  char smbletter;
+  NAMELIST *pNL = Validate(mount_id, M_VALID_TAG);
+
+  if (pNL == NULL) {
+    return EBADPARAM;
+  }
+
+  *pMountName = pNL->name;
+  *pServerID = (int)(pNL->u.mount.servername);
+
+  smbletter = pNL->u.mount.smb_lettr;
+
+  *pServName = SMB_GetConnInfo(smbletter, GCI_SERVER);
+  *pUserName = SMB_GetConnInfo(smbletter, GCI_USER);
+  *pMountPath = SMB_GetConnInfo(smbletter, GCI_SHARE);
+
+  return OK;
+}
+
+/* Exported functions */
+/*============================================== */
+
+static bool Omni_Registered = false;
+
+char Omni_GetDrvLetter(const char *name) {
+  NAMELIST *pNL = FindInList(MountsList, name);
+
+  if (pNL != NULL) {
+    return pNL->u.mount.smb_lettr;
+  }
+
+  return 0;
+}
+
+const char *Omni_GetMountName(char drvletter) {
+  NAMELIST *pNL;
+
+  for (pNL = MountsList; pNL != NULL; pNL = pNL->next) {
+    if (pNL->u.mount.smb_lettr == drvletter) {
+      return pNL->name;
+    }
+  }
+
+  return NULL;
+}
+
+int Omni_GetMountID(char *name) {
+  char lclname[NAME_LIMIT];
+  MountNameCpy(lclname, name);
+  return (int)FindInList(MountsList, lclname);
+}
+
+const char *Omni_GetSoleMountName(void) {
+  if (MountsList == NULL || MountsList->next != NULL) {
+    return NULL;
+  }
+
+  return MountsList->name;
+}
+
+err_t Omni_GetDefaultType(char *name, int *pType_out) {
+  char tmpbuf[NAME_LIMIT];
+  char tmpbuf2[NAME_LIMIT];
+  int filetype;
+
+  if (!Omni_Registered) {
+    return ENOTPRESENT;
+  }
+
+  /* tmpbuf gets the converted name (we discard it); tmpbuf2 gets the flags string. */
+  if (_swix(SWI_Omni_ConvertClientToAcorn, _INR(0, 3) | _OUT(0), LanMan_OmniOp, name, tmpbuf, tmpbuf2, &filetype) != NULL) {
+    return ENOTPRESENT;
+  }
+  if (filetype < 0) {
+    return ENOTPRESENT;
+  }
+
+  *pType_out = filetype;
+  return OK;
+}
+
+_kernel_oserror *OmniOp_SWI(_kernel_swi_regs *R) {
+  err_t res;
+
+  debug(" Omni Op(%d)\n", R->r[0]);
+
+#define Rin_int(a)  (R->r[a])
+#define Rout_int(a) &(R->r[a])
+#define Rin_chr(a)  (char *)(R->r[a])
+#define Rout_chr(a) (const char **)&(R->r[a])
+
+  /* A mount or dismount can free a share and its cache while a filing-system call suspended in a TaskWindow still uses them, so both
+   * are refused while one is in progress, as *LMConnect and *LMDisconnect are.
+   */
+  if ((R->r[0] == 0 || R->r[0] == 1) && lanmanfs_in_use) {
+    return MsgError(ELANMANFSINUSE);
+  }
+
+  switch (R->r[0]) {
+  case 0: // Mount
+    res = Omni_MountServer(Rin_chr(1), Rin_chr(2), Rin_chr(3), Rin_chr(4), Rin_chr(5), Rout_int(1));
+    break;
+
+  case 1: // Dismount
+    res = Omni_DismountServer(Rin_int(1));
+    break;
+
+  case 2: // Freespace
+    res = Omni_FreeSpace(Rin_int(1), Rout_int(1), Rout_int(2), Rout_int(3));
+    break;
+
+  case 3: // Enumerate servers
+    res = Omni_ListServers(Rin_chr(1), Rin_int(2), Rin_int(3), Rout_chr(1), Rout_int(3));
+    break;
+
+  case 4: // Enumerate mounts
+    res = Omni_ListMounts(Rin_chr(1), Rin_int(2), Rin_int(3), Rin_int(4), Rin_chr(5), Rout_chr(1), Rout_int(3));
+    break;
+
+  case 5: // Enumerate active mounts
+    res = Omni_ListActiveMounts(Rin_chr(1), Rin_int(2), Rin_int(3), Rout_chr(1), Rout_int(3));
+    break;
+
+  case 6: // Open root of mount
+    res = Omni_OpenRoot(Rin_int(1));
+    break;
+
+  case 7: // Open user root of mount
+    res = Omni_OpenUserRoot(Rin_int(1));
+    break;
+
+  case 8: // Get new mount info
+    res = Omni_GetNewMountInfo(Rin_int(1), Rin_chr(2), Rout_int(1));
+    break;
+
+  case 9: // Get active mount info
+    res = Omni_GetMountInfo(Rin_int(1), Rout_chr(1), Rout_chr(2), Rout_chr(3), Rout_chr(4), Rout_int(6));
+    R->r[5] = (int)""; // Auth server
+    break;
+
+  case 10:                            // Create print job
+    res = Prn_CreateJob(Rin_chr(1),   // Server name
+                        Rin_chr(2),   // Printer name
+                        Rin_chr(3),   // User name
+                        Rin_chr(4),   // Password
+                        Rout_int(1)); // Job handle
+    break;
+
+  case 11:                           // Send to print job
+    res = Prn_WriteData(Rin_int(1),  // Job ID
+                        Rin_chr(2),  // data pointer
+                        Rin_int(3)); // Data length
+
+    if (res == OK) {
+      R->r[3] = 0;
+    }
+    break;
+
+  case 12:                         // End print job
+    res = Prn_CloseJob(Rin_int(1), // Job ID
+                       false);
+    break;
+
+  case 13:                         // Abort print job
+    res = Prn_CloseJob(Rin_int(1), // Job ID
+                       true);
+    break;
+
+  case 14:                             // Get print job info
+    res = Prn_GetJobStatus(Rin_int(1), // Job ID
+                           (struct JobStatus *)&(R->r[1]));
+    /* Fill in R1 through R6 */
+    break;
+
+  case 15:                          // Clear print job
+    res = Prn_ClearJob(Rin_int(1)); // Job ID
+    break;
+
+  case 16: // Enumerate printers
+    res = Omni_ListPrinters(Rin_chr(1), Rin_int(2), Rin_int(3), Rout_chr(1), Rout_int(3));
+    break;
+
+  default:
+    res = ENOTPRESENT;
+  }
+
+  return MsgError(res);
+}
+
+/* Omni_FreeOp_SWI() */
+/*------------------------------*/
+
+/* Strip the filing-system prefix (everything up to and including the last ':') from a name.
+ *
+ * Used by the Free-module SWI dispatch: callers pass "LanMan::Public" and we want only "Public".
+ * Returns the original pointer when no ':' is present.
+ *
+ * Parameters:
+ *   s  NUL-terminated input string
+ *
+ * Returns: pointer into `s` at the character after the last ':', or `s` itself.
+ */
+static char *ExtractName(char *s) {
+  char *p = strrchr(s, ':'); // Finds last ':' in name
+  if (p != NULL) {
+    return p + 1;
+  } else {
+    return s;
+  }
+}
+
+_kernel_oserror *Omni_FreeOp_SWI(_kernel_swi_regs *R) {
+  switch (R->r[0]) {
+  case 0: // Bizarre no-op
+    return NULL;
+
+  case 1: // Get Device Name
+    /* On entry R->r[3] points to a "device name/id" string It seems we have to return a copy of the device name.
+     *
+     * As I don't know what this is supposed to be for, I'm going to copy the name.
+     */
+    {
+      char *s = (char *)(R->r[3]);
+      char *d = (char *)(R->r[2]);
+      sprintf(d, FilingSystemName "::%s", s);
+      R->r[0] = strlen(d) + 1 /* Terminator */;
+      return NULL;
+    }
+
+  case 2: // Get free space on device
+    /* R->r[3] on entry points to a device name.
+     *
+     * Methinks this is the same as returned from case 1
+     */
+    {
+      int m_id = Omni_GetMountID(ExtractName((char *)(R->r[3])));
+      if (m_id == 0) {
+        return MsgError(EBADDRV);
+      }
+
+      return MsgError(Omni_FreeSpace(m_id, (int *)(R->r[2] + 4) /* freespace_out */, (int *)(R->r[2] + 8) /* usedspace_out */,
+                                     (int *)(R->r[2]) /* totspace_out */));
+    }
+
+  case 3: // Compare device
+    /* I think we're given a file name & have to work out if it's on our device.
+     *
+     * Return R->r[1] = 1 if not, R->r[1] = 0 if so.
+     */
+    {
+      char *s, *d;
+      R->r[1] = 1; // Assume failure
+
+      s = ExtractName((char *)(R->r[2])); // File name
+      d = ExtractName((char *)(R->r[3])); // Our device name
+
+      while (*d != 0 && toupper(*s) == toupper(*d)) {
+        s++, d++;
+      }
+
+      if (*d == 0 && (*s == 0 || *s == '.')) {
+        R->r[1] = 0;
+      }
+
+      return NULL;
+    }
+
+  case 4: // Get free space on device (64 bit)
+    /* R->r[3] on entry points to a device name.
+     *
+     * Methinks this is the same as returned from case 1
+     */
+    /* This code can be entered directly by Cmd_FREE */
+    {
+      int m_id = Omni_GetMountID(ExtractName((char *)(R->r[3])));
+      if (m_id == 0) {
+        return MsgError(EBADDRV);
+      }
+
+      return MsgError(Omni_FreeSpace64(m_id, (int *)&(R->r[0]), // zero it on success
+                                       (uint64_t *)(R->r[2] + 8) /* freespace_out */, (uint64_t *)(R->r[2] + 16) /* usedspace_out */,
+                                       (uint64_t *)(R->r[2] + 0) /* totspace_out */));
+    }
+
+  default:
+    break;
+  }
+
+  return MsgError(EBADPARAM);
+}
+
+void Omni_RecheckInfo(int flags) {
+  if (Omni_Registered) {
+    (void)_swix(SWI_Omni_EnumerateMounts, _INR(0, 1), LanMan_OmniOp, flags);
+  }
+}
+
+/* Omni_Register() */
+/*--------------------------------*/
+
+static void Omni_Register(void) {
+  char titlebar[24];    // Title bar - 24 max
+  char infobox[3 * 32]; // Info box - 3x32 max
+
+  strcpy(titlebar, MsgLookup("_Version")); // Temp copy
+  sprintf(infobox,
+          "%s\n"
+          "\xA9 Acorn Computers Ltd, 1997\n"
+          "%s",
+          MsgLookup("WhoTCPIP"), titlebar);
+  strncpy(titlebar, MsgLookup("DispName"), sizeof(titlebar));
+
+  if (_swix(SWI_Omni_RegisterClient, _INR(0, 6), LanMan_OmniOp, // Client ID
+            RC_NEEDS_USERID | RC_NEEDS_PASSWD | RC_NEEDS_MOUNTPATH | RC_DOES_FILES | RC_EXTN_CHAR('.') | RC_DOES_PRINT | RC_NEEDS_PRINTPWD,
+            "lmicon", // Sprite name - 12 max
+            titlebar, // Title bar - 24 max
+            infobox,  // Info box - 3x32 max
+            0,        // Site ID (ignored)
+            FilingSystemName) == NULL) {
+    Omni_Registered = true;
+  }
+}
+
+/* Omni_Free_Register() */
+/*---------------------------*/
+
+/* Tracks whether we have a live registration with the Free module.
+ *
+ * Set when Free_Register succeeds, cleared on failure or by Omni_Free_Register(false).  The flag also makes
+ * registering with Omni_Free_Register idempotent, so callers can make it on every event that may mean Free has
+ * appeared (the Service_ModulePostInit handler in c.LanMan does exactly that) without paying for a duplicate
+ * Free_Register SWI when a registration is already held.
+ */
+static bool Omni_FreeRegistered = false;
+
+/* Register or deregister this module as a Free-module back-end.
+ *
+ * Idempotent both ways via the Omni_FreeRegistered flag: invoked at module init, at module
+ * finalise, and from the Service_ModulePostInit handler when the Free module loads after us
+ * (we then catch up on the registration).
+ *
+ * Parameters:
+ *   OnNotOff  true to register, false to deregister
+ */
+static void Omni_Free_Register(bool OnNotOff) {
+  if (OnNotOff) {
+    _kernel_oserror *err;
+
+    if (Omni_FreeRegistered) {
+      return;
+    }
+
+    err = _swix(Free_Register, _INR(0, 2), Our_FS_Number, Free_ServiceRoutine, 0);
+    if (err == NULL) {
+      Omni_FreeRegistered = true;
+      debug("Omni_Free_Register: registered with Free module\n");
+    } else {
+      /* Free not loaded yet; the Service_ModulePostInit handler will retry when it appears. */
+      Omni_FreeRegistered = false;
+      debug("Omni_Free_Register: Free_Register failed (%d/%s) - *ShowFree on this FS will return Unknown Filing "
+            "System until the Free module loads (we listen for Service_ModulePostInit and retry then)\n",
+            err->errnum, err->errmess);
+    }
+  } else {
+    if (Omni_FreeRegistered) {
+      (void)_swix(Free_DeRegister, _INR(0, 2), Our_FS_Number, Free_ServiceRoutine, 0);
+      Omni_FreeRegistered = false;
+    }
+  }
+}
+
+void Omni_StartUp(void) {
+  if (!Omni_Registered) {
+    Omni_Register();
+  }
+
+  Omni_Free_Register(true);
+}
+
+void Omni_Shutdown(void) {
+  /* Free memory */
+
+  FreeAllLists();
+  ServerList = NULL;
+  MountsList = NULL;
+
+  /* De-register if we're registered */
+
+  if (Omni_Registered) {
+    (void)_swix(SWI_Omni_DeregisterClient, _IN(0), LanMan_OmniOp);
+    Omni_Registered = false;
+  }
+
+  Omni_Free_Register(false);
+}
+
+void Omni_ClearLists(void) {
+  NAMELIST *pNLsrv, *pNLdisk, *pNLtmp;
+
+  pNLsrv = ServerList;
+  while (pNLsrv != NULL) {
+    /* Free disks that aren't in use */
+
+    pNLdisk = pNLsrv->u.server.known_disks;
+    while (pNLdisk != NULL) {
+      if (FindActiveMount(pNLdisk) == NULL) {
+        pNLtmp = pNLdisk->next;
+        DeleteFromList(&pNLsrv->u.server.known_disks, pNLdisk);
+        pNLdisk = pNLtmp;
+      } else {
+        pNLdisk = pNLdisk->next;
+      }
+    }
+
+    /* Free printers from list (keep deleting them 'til they don't come back) */
+    while (pNLsrv->u.server.known_printers != NULL) {
+      DeleteFromList(&(pNLsrv->u.server.known_printers), pNLsrv->u.server.known_printers);
+    }
+
+    while (pNLsrv->u.server.known_ipc != NULL) {
+      DeleteFromList(&(pNLsrv->u.server.known_ipc), pNLsrv->u.server.known_ipc);
+    }
+
+    while (pNLsrv->u.server.known_comms != NULL) {
+      DeleteFromList(&(pNLsrv->u.server.known_comms), pNLsrv->u.server.known_comms);
+    }
+
+    /* If the server has no active mounts left, delete it too */
+
+    if (pNLsrv->u.server.known_disks == NULL) {
+      pNLtmp = pNLsrv->next;
+      DeleteFromList(&ServerList, pNLsrv);
+      pNLsrv = pNLtmp;
+    } else {
+      pNLsrv = pNLsrv->next;
+    }
+  }
+}
+
+/* Foreground transient-callback that deletes this module.
+ *
+ * Used to defer self-removal out of a SWI handler so OS_Module RMKill happens at a safer point.
+ *
+ * Parameters:
+ *   r             register block (unused)
+ *   private_word  module private word (unused)
+ *
+ * Returns: NULL (callbacks can't surface errors via the cmhg ABI).
+ */
+_kernel_oserror *suicide_cb_handler(_kernel_swi_regs *r, void *private_word) {
+  /* Now request this module's deletion */
+  _swix(OS_Module, _INR(0, 1), ModHandReason_Delete, Module_Title);
+  UNUSED(r);
+  UNUSED(private_word);
+  return NULL;
+}
+
+void Omni_ServiceCall(_kernel_swi_regs *R, void *private_word) {
+  switch (R->r[0]) {
+  case 0: // OmniFiler is starting up
+    Omni_Register();
+    Lgn_Register();
+    break;
+
+  case 1: // Filer is dying. We should do so too
+    Omni_Registered = false;
+    _swix(OS_AddCallBack, _INR(0, 1), suicide_cb, private_word);
+    break;
+
+  default:
+    break;
+  }
+}
+
+/* Omni_AddInfo()----------------------------------*/
+
+void Omni_AddInfo(int flags, const char *serv_name, const char *string, const char *comment) {
+  NAMELIST *pNLsrv, **list;
+  unsigned int tag = 0u;
+
+  pNLsrv = AddToList(&ServerList, S_VALID_TAG, serv_name);
+  if (pNLsrv == NULL) { // Couldn't add it
+    return;
+  }
+
+  switch (flags) {
+  case OAI_SERVER:
+    /* Amend information about server */
+    if (string != NULL) {
+      strcpyn(pNLsrv->u.server.info_string, string, INFO_STR_LEN);
+    }
+    return;
+
+  case OAI_DISK:
+    tag = D_VALID_TAG;
+    list = &pNLsrv->u.server.known_disks;
+    break;
+
+  case OAI_PRINTER:
+    tag = P_VALID_TAG;
+    list = &pNLsrv->u.server.known_printers;
+    break;
+
+  case OAI_IPC:
+    tag = I_VALID_TAG;
+    list = &pNLsrv->u.server.known_ipc;
+    break;
+
+  case OAI_DEVICE:
+    tag = C_VALID_TAG;
+    list = &pNLsrv->u.server.known_comms;
+    break;
+
+  default:
+    return;
+  }
+
+  AddToList(list, tag, string);
+  pNLsrv = FindInList(*list, string);
+  if (pNLsrv != NULL) {
+    if (comment != NULL) {
+      strcpyn(pNLsrv->u.share.info_string, comment, INFO_STR_LEN);
+    } else {
+      pNLsrv->u.share.info_string[0] = '\0';
+    }
+  }
+}
+
+_kernel_oserror *Omni_DumpServers(void) {
+  err_t res;
+  int token;
+  const char *eptr;
+  res = Omni_ListServers(0, 0, 0, &eptr, &token);
+  if (res != OK) {
+    return MsgError(res);
+  }
+  Omni_Debug();
+  return NULL;
+}
+
+/* Omni_DumpSharesPrint() */
+/*-------------------------*/
+
+/* Print every entry in a shares-list (disk / printer / device) with its type and info string.
+ *
+ * Parameters:
+ *   pNL   head of the share list
+ *   type  human-readable label ("Disk", "Printer", "Device", "IPC")
+ */
+static void Omni_DumpSharesPrint(NAMELIST *pNL, const char *type) {
+  for (; pNL != NULL; pNL = pNL->next) {
+    printf("  %-16s  %-10s  %s\n", pNL->name, type, pNL->u.share.info_string);
+  }
+}
+
+/* Omni_DumpServersPrint() */
+/*------------------------*/
+
+/* Print every entry in the servers list with its info string.
+ *
+ * Parameters:
+ *   pNL  head of the servers list (typically ServerList)
+ */
+static void Omni_DumpServersPrint(NAMELIST *pNL) {
+  for (; pNL != NULL; pNL = pNL->next) {
+    printf("  %-16s  %s\n", pNL->name, pNL->u.server.info_string);
+  }
+}
+
+_kernel_oserror *Omni_DumpShares(char *server_name) {
+  err_t res;
+  int token;
+  char heading[2 + 16 /* Name */ + 2 + 10 /* Type */ + 2 + 16 /* Notes */ + 1 /* Term */];
+  char *score;
+  const char *eptr;
+  NAMELIST *pserv;
+
+  /* Don't care about the response stream here - drive Omni_ListMounts only for its side-effect of
+   * populating the server's share lists from the RPC call; we read the structured form back below.
+   */
+  res = Omni_ListMounts(0, 0, 0, 0, server_name, &eptr, &token);
+  if (res != OK) {
+    return MsgError(res);
+  }
+
+  pserv = FindInList(ServerList, server_name);
+  if (pserv != NULL && pserv->tag == S_VALID_TAG) {
+    /* Keep in sync with Omni_DumpSharesPrint() spacing */
+    sprintf(heading, "  %s", MsgLookup("HdrShares"));
+    printf("%s\n", heading);
+    score = heading; // Replace text with underscore
+    while (*score) {
+      if (*score != ' ') {
+        *score = '-';
+      }
+      score++;
+    }
+    printf("%s\n", heading);
+
+    Omni_DumpSharesPrint(pserv->u.server.known_disks, MsgLookup("Type0"));
+    Omni_DumpSharesPrint(pserv->u.server.known_printers, MsgLookup("Type1"));
+    Omni_DumpSharesPrint(pserv->u.server.known_ipc, MsgLookup("Type3"));
+    Omni_DumpSharesPrint(pserv->u.server.known_comms, MsgLookup("Type2"));
+
+    /* Keep in sync with Omni_DumpServersPrint() spacing */
+    sprintf(heading, "  %s", MsgLookup("HdrServrs"));
+    printf("\n%s\n", heading);
+    score = heading; // Replace text with underscore
+    while (*score) {
+      if (*score != ' ') {
+        *score = '-';
+      }
+      score++;
+    }
+    printf("%s\n", heading);
+
+    Omni_DumpServersPrint(ServerList);
+  }
+  return NULL;
+}
+
+/* Omni_Debug() */
+/*-----------------------------------*/
+
+/* Print one NAMELIST entry's name (or the "no user" message-file token if NULL).
+ *
+ * Parameters:
+ *   pNL  list entry, or NULL
+ */
+static void showname(NAMELIST *pNL) {
+  if (pNL == NULL) {
+    printf("%s ", MsgLookup("NoUser"));
+  } else {
+    printf("'%s' ", pNL->name);
+  }
+}
+
+/* Print the names in a NAMELIST chain, separated by spaces.
+ *
+ * Parameters:
+ *   pNL  head of the list (may be NULL)
+ */
+static void showlist(NAMELIST *pNL) {
+  while (1) {
+    showname(pNL); // Show something if pNL is NULL on entry
+    if (pNL == NULL) {
+      break;
+    }
+    pNL = pNL->next;
+    if (pNL == NULL) {
+      break;
+    }
+  }
+}
+
+void Omni_Debug(void) {
+  NAMELIST *pNL;
+  char fmt[12];
+  char temp[20];
+
+  /* Build a "label : value" format string sized to the longest message-file label. */
+  sprintf(fmt, "%%-%ds : %%s\n", (int)strlen(MsgLookup("NameL")));
+
+  /* Module-level state: identity, registration, and which workgroup (if any) we're logged on to. */
+  printf(fmt, MsgLookup("NameH"), LM_Vars.machinename);
+  printf(fmt, MsgLookup("NameD"), LM_Vars.drivername);
+  sprintf(temp, "%d", LM_Vars.namemode);
+  printf(fmt, MsgLookup("NameM"), temp);
+  strcpy(temp, Omni_Registered ? MsgLookup("Start") : MsgLookup("NotStart"));
+  printf(fmt, MsgLookup("NameO"), temp);
+  strcpy(temp, LM_Vars.logged_on ? LM_Vars.workgroup : MsgLookup("NotLogon"));
+  printf(fmt, MsgLookup("NameW"), temp);
+
+  /* Domain-logon extras: username, primary DC, home directory placement. */
+  if (LM_Vars.logged_on) {
+    printf(fmt, MsgLookup("NameU"), LM_Vars.username);
+
+    if (Lgn_PrimaryDCName[0] != 0) {
+      printf(fmt, MsgLookup("NameP"), Lgn_PrimaryDCName);
+    }
+
+    strcpy(temp, MsgLookup("NoHome"));
+    printf(fmt, MsgLookup("NamHD"), (Lgn_HomeDirName[0] != 0) ? Lgn_HomeShareName : temp);
+    if (Lgn_HomeDirName[0] != 0) {
+      printf(fmt, MsgLookup("NamHS"), Lgn_HomeServerName);
+      printf(fmt, MsgLookup("NamHP"), Lgn_HomeDirName);
+    }
+  }
+
+  /* Browser view: every known server with its visible disk and printer shares. */
+  for (pNL = ServerList; pNL != NULL; pNL = pNL->next) {
+    printf("\n%s '%s': '%s'", MsgLookup("Serv"), pNL->name, pNL->u.server.info_string);
+    printf("\n  %s : ", MsgLookup("Drvs"));
+    showlist(pNL->u.server.known_disks);
+    printf("\n  %s : ", MsgLookup("Prns"));
+    showlist(pNL->u.server.known_printers);
+  }
+  if (ServerList != NULL) {
+    printf("\n");
+  }
+
+  /* Active mounts: mount name -> (disk, server, user) on the SMB connection backing it. */
+  for (pNL = MountsList; pNL != NULL; pNL = pNL->next) {
+    printf("\n%s '%s': ", MsgLookup("Mnt"), pNL->name);
+    showname(pNL->u.mount.diskname);
+    printf("%s ", MsgLookup("On"));
+    showname(pNL->u.mount.servername);
+    printf("%s '%s'", MsgLookup("User"), SMB_GetConnInfo(pNL->u.mount.smb_lettr, GCI_USER));
+
+    /* *LMCache only affects mounts made after it, so say which this one got.  MsgLookup shares one buffer: print each in turn. */
+    printf(", %s ", MsgLookup("CchMnt"));
+#ifdef LM_CACHE
+    printf("%s", MsgLookup(SMB_GetCacheFromDrv(pNL->u.mount.smb_lettr) != NULL ? "CchOn" : "CchOff"));
+#else
+    printf("%s", MsgLookup("CchNone"));
+#endif
+  }
+  if (MountsList != NULL) {
+    printf("\n");
+  }
+
+#ifdef DEBUG
+  /* Internal-only: the SMB-layer A..Z connection slots, including any not exposed as mounts. */
+  {
+    int i;
+
+    printf("\n");
+    for (i = 'A'; i <= 'Z'; i++) {
+      if (SMB_GetConnInfo(i, GCI_SERVER) != NULL) {
+        printf("Connection %c: %s share on \\\\%s\\%s, user %s [%s]\n", i, SMB_GetConnInfo(i, GCI_SHARETYPE),
+               SMB_GetConnInfo(i, GCI_SERVER), SMB_GetConnInfo(i, GCI_SHARE), SMB_GetConnInfo(i, GCI_USER),
+               SMB_GetConnInfo(i, GCI_LIVENESS));
+      }
+    }
+  }
+#endif
+
+  /* Trailing RPC-error summary so a recent enumeration failure is visible at a glance. */
+  if (RPC_ErrorCount > 0) {
+    printf("\n%d %s\n", RPC_ErrorCount, MsgLookup("LocProb"));
+    printf("%s - %s\n", MsgLookup("LocDesc"), RPC_DebugMsg);
+  }
+}

@@ -1,0 +1,380 @@
+; Copyright 2002 Tematic Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+RAMAlloc
+        Push    "r1-r5,lr"
+        LDR     lr, mempool_base_log
+        TEQ     lr, #0
+        BLEQ    InitDA
+        Pull    "r1-r5,pc",VS
+ [ DebugMemory
+        DREG    r0, "Requested size ",cc
+        DREG    r1, ", alignment ",cc
+        DREG    r2, ", boundary limitation "
+ ]
+        LDRB    r3, osheap8_supported
+        CMP     r3, #0
+        BEQ     NoOSHeap8
+        MOV     r4, r2
+        MOV     r3, r0
+        MOV     r2, r1
+        MOV     r0, #HeapReason_GetSkewAligned
+        LDR     r1, mempool_base_log
+        LDR     r5, mempool_base_phys
+        SWI     XOS_Heap
+        BVC     GotAlloced
+        LDR     r14, [r0]
+        TEQ     r14, #ErrorNumber_HeapFail_Alloc
+        Pull    "r1-r5,pc",NE
+        ; Grow heap
+        LDR     r0, [r1, #8]  ; heap base offset
+        ADD     r0, r0, r5    ; converted to physical address
+        ; Add some breathing room to ensure a free block plus used block header will fit
+        ADD     r0, r0, #12
+        ; Round up heap base ptr to required alignment
+        LDR     r2, [sp]      ; Recover alignment (OS_Heap will have zero'd it)
+        CMP     r2, #4
+        MOVLT   r2, #4
+        SUB     r2, r2, #1
+        ADD     r0, r0, r2
+        BIC     r0, r0, r2
+        ; Check boundary
+        SUBS    r4, r4, #1
+        BLT     BoundaryOK
+        AND     r2, r0, r4
+        ADD     r2, r2, r3
+        SUB     r2, r2, #1
+        CMP     r2, r4
+        BLS     BoundaryOK
+        ; Round up heap base ptr to required boundary
+        ADD     r0, r0, r4
+        BIC     r0, r0, r4
+BoundaryOK
+        ADD     r0, r0, r3    ; required physical end addr of heap
+        SUB     r0, r0, r5    ; required heap size
+        LDR     r2, [r1, #12] ; current heap end offset
+        ADD     r4, r4, #1
+        SUB     r1, r0, r2    ; Grow amount
+        LDR     r0, mempool_da_number
+        SWI     XOS_ChangeDynamicArea
+        ; Try again
+        MOVVC   r0, #HeapReason_GetSkewAligned
+        LDRVC   r1, mempool_base_log
+        LDRVC   r2, [sp]
+        SWIVC   XOS_Heap
+      [ DebugMemory
+        BVC     %FT90
+        LDR     r1,[r0],#4
+        DREG    r1,"Error ",cc
+        DSTRING r0
+        SUB     r0,r0,#4
+90
+      ]
+        Pull    "r1-r5,pc",VS
+
+GotAlloced
+ [ DebugMemory
+        DREG    r2, "Allocated block at ",cc
+        DREG    r3, ", size = "
+ ]
+        LDR     r3, mempool_base_phys
+        SUB     lr, r2, r1
+        MOV     r0, r2
+        ADD     r1, r3, lr
+ [ DebugMemory
+        DREG    r0, "Returned logical address = ",cc
+        DREG    r1, ", physical address = "
+ ]
+        ADD     sp, sp, #4
+        Pull    "r2-r5,pc"
+
+NoOSHeap8
+        ; Check requested alignment against the alignment of the memory we
+        ; reserved - anything larger than the memory alignment can't be dealt
+        ; with by this fallback implementation
+        LDR     r3, mempool_alignment
+        MOVS    lr, r1, LSR r3
+        BNE     BadAlign
+        CMP     r2, r1
+        MOVLO   r2, r1          ; cheaty cheaty
+        LDR     r1, mempool_base_log
+        MOV     r4, r2
+        CMP     r4, #4
+        ADDLS   r3, r0, #4
+        ADDHI   r3, r0, r4
+        MOV     r0, #HeapReason_Get
+        SWI     XOS_Heap
+        BVC     GotAllocedNoOSHeap8
+        LDR     r14, [r0]
+        TEQ     r14, #ErrorNumber_HeapFail_Alloc
+        Pull    "r1-r5,pc",NE
+        ; Grow heap
+        LDR     r0, [r1, #8]    ; heap base offset
+        LDR     r1, [r1, #12]   ; heap end offset
+        SUB     r1, r1, r0      ; bytes free
+        SUB     r1, r3, r1      ; bytes needed
+        ADD     r1, r1, #8      ; safety factor
+
+        LDR     r0, mempool_da_number
+        SWI     XOS_ChangeDynamicArea
+
+        MOVVC   r0, #HeapReason_Get
+        LDRVC   r1, mempool_base_log
+        SWIVC   XOS_Heap
+        Pull    "r1-r5,pc",VS
+
+
+GotAllocedNoOSHeap8
+ [ DebugMemory
+        DREG    r2, "Allocated block at ",cc
+        DREG    r3, ", size = "
+ ]
+        ADD     r0, r2, #4
+        CMP     r4, #4
+        SUBHI   lr, r2, r1      ; align relative to heap start
+        SUBHI   r3, r4, #1
+        ADDHI   r0, lr, r3
+        BICHI   r0, r0, r3
+        ADDHI   r0, r0, r1
+        STR     r2, [r0, #-4]
+        LDR     r3, mempool_base_phys
+        SUB     lr, r0, r1
+        ADD     r1, r3, lr
+ [ DebugMemory
+        DREG    r0, "Returned logical address = ",cc
+        DREG    r1, ", physical address = "
+ ]
+        ADD     sp, sp, #4
+        Pull    "r2-r5,pc"
+
+BadAlign
+        ; Mimic error that's generated if the heap isn't big enough
+        Pull    "r1-r5,lr"
+        ADRL    r0, ErrorBlock_ChDynamNotAllMoved
+        B       copy_error_zero
+
+RAMFree
+        Push    "r1,r2,lr"
+        ; If OS_Heap 8 is supported, all pointers are to heap blocks
+        ; Else the word before the pointer points to the heap block
+        LDRB    r2, osheap8_supported
+        CMP     r2, #0
+        LDREQ   r2, [r0, #-4]
+        MOVNE   r2, r0
+ [ DebugMemory
+        DREG    r2, "Freeing block at "
+ ]
+        LDR     r1, mempool_base_log
+        MOV     r0, #HeapReason_Free
+        SWI     XOS_Heap
+        Pull    "r1,r2,pc"
+
+InitDA
+        Push    "r0-r8,lr"
+        MOV     r3, #0
+        STR     r3, mempool_base_log
+        BL      open_message_file
+        ADRVC   r0, message_file_block
+        ADRVC   r1, Token_DAName
+        ADRVC   r2, name_buffer
+        MOVVC   r3, #?name_buffer
+        MOVVC   r4, #0
+        MOVVC   r5, #0
+        MOVVC   r6, #0
+        MOVVC   r7, #0
+        SWIVC   XMessageTrans_Lookup
+        BVS     %FT19
+        MOV     r0, #0
+        STRB    r0, [r2, r3]
+        MOV     r8, r2
+
+        MOV     r1, #32*1024*1024               ; Try for 32M, 4M aligned
+        MOV     r2, #22
+02      LDR     r0, =OSMemReason_RecommendPage+256 ; Request DMAable memory
+        SWI     XOS_Memory
+        BVC     %FT30
+        MOV     r1, r1, LSR #1                  ; If we can't get it, halve both
+        SUB     r2, r2, #1                      ; until down to 32K, 4K aligned
+        TST     r1, #16*1024                    ; preserve V flag in loop test
+        BEQ     %BT02
+19
+        STRVS   r0, [sp]
+        Pull    "r0-r8,pc",VS
+
+30
+ [ DebugMemory
+        DREG    r3, "PPN suggested ",,Integer
+ ]
+        STR     r1, mempool_max_size
+        STR     r2, mempool_alignment
+        STR     r3, mempool_base_ppn
+        MOV     r5, r1
+
+        ; See if we can reserve the physical pages, to ensure they're available
+        ; when we need them
+        MOV     r0, #OSMemReason_ReservePages
+        MOV     r1, r3
+        MOV     r2, r5, LSR #12
+        SWI     XOS_Memory
+        MOVVS   r0, #0
+        MOVVC   r0, #1
+        STRB    r0, osmemory23_supported
+
+        ; Get physical addr of memory
+        MOV     r0, #(2_100001:SHL:8) + OSMemReason_Convert
+        ADR     r1, mempool_base_ppn
+        MOV     r2, #1
+        SWI     XOS_Memory
+        BVS     %FT90
+ [ DebugMemory
+        LDR     r0, mempool_base_phys
+        DREG    r0, "Physical address "
+ ]
+
+        MOV     r0, #DAReason_Create
+        MOV     r1, #-1
+        MOV     r2, #4096
+        MOV     r3, #-1
+        LDR     r4, =2+DynAreaFlags_NotCacheable+DynAreaFlags_NeedsSpecificPages ; SVC only, B, ~C, draggable, requires specific physical pages
+        ADR     r6, DynAreaHandler
+        MOV     r7, wp
+        SWI     XOS_DynamicArea
+        BVS     %FT90
+ [ DebugMemory
+        DREG    r1, "Dynamic area ",,Integer
+        DREG    r3, "Logical address "
+ ]
+        STR     r1, mempool_da_number
+        STR     r3, mempool_base_log
+        ; Init the heap
+        MOV     r0, #HeapReason_Init
+        MOV     r1, r3
+        MOV     r3, r2
+        SWI     XOS_Heap
+        Pull    "r0-r8,pc",VC
+90
+; error case
+        STR     r0,[sp]
+        BL      KillDA
+        SETV
+        Pull    "r0-r8,pc"
+
+KillDA
+        Push    "r0-r2,lr"
+        ; Release the pages we reserved
+        LDRB    r0, osmemory23_supported
+        CMP     r0, #0
+        MOVNE   r0, #0
+        STRNEB  r0, osmemory23_supported
+        LDRNE   r0, =OSMemReason_ReservePages+256
+        LDRNE   r1, mempool_base_ppn
+        LDRNE   r2, mempool_max_size
+        MOVNE   r2, r2, LSR #12
+        SWINE   XOS_Memory
+        ; Kill the DA
+        MOV     r0, #DAReason_Remove
+        LDR     r1, mempool_da_number
+        CMP     r1, #0
+ [ DebugMemory
+        BEQ     %FT01
+        DREG    r1, "Removing dynamic area ",,Integer
+01
+ ]
+        SWINE   XOS_DynamicArea
+        MOV     r1, #0
+        STR     r1, mempool_da_number
+        STR     r1, mempool_base_log
+        STRVS   r0, [sp]
+        Pull    "r0-r2,pc"
+
+Token_DAName
+        =       "DAName", 0
+        ALIGN
+
+DynAreaHandler
+        CMP     r0, #4
+        ADDCC   pc, pc, R0, LSL #2
+        B       UnknownHandlerError
+        B       PreGrow
+        B       PostGrow
+        B       PreShrink
+        B       PostShrink
+
+UnknownHandlerError
+        ADRL    r0, ErrorBlock_UnknownAreaHandler
+        B       copy_error_zero
+
+;Pregrow entry parameters
+; R0 = 0 (reason code)
+; R1 -> page block (entries set to -1)
+; R2 = number of entries in page block == number of pages area is growing by
+; R3 = number of bytes area is growing by (r2 * pagesize)
+; R4 = current size (bytes)
+; R5 = page size
+;
+; exit with V clear, R0=0 or DAHandler_RESV
+
+PreGrow Entry   "r1-r3"
+
+        LDR     r3, mempool_base_ppn
+        MOV     lr, #0
+ [ DebugMemory
+        DREG    r4, "Current size ",cc
+        DREG    r5, ", page size "
+ ]
+10      CMP     lr, r4
+        ADDLO   r3, r3, #1
+        ADDLO   lr, lr, r5
+        BLO     %BT10
+
+20      STR     r3, [r1], #12
+ [ DebugMemory :LAND: {FALSE}
+        DREG    r3, "Requesting page ",,Integer
+ ]
+        SUBS    r2, r2, #1
+        ADDNE   r3, r3, #1
+        BNE     %BT20
+
+        LDRB    r0, osmemory23_supported
+        CMP     r0, #0
+        LDRNE   r0, =DAHandler_RESV ; Allow use of the pages we reserved
+        EXIT
+
+PostGrow
+PostShrink
+        LDR     r12, mempool_base_log
+        TEQ     r12, #0
+        STRNE   r4, [r12, #12]
+        MOV     pc, lr
+
+PreShrink
+        LDR     r12, mempool_base_log
+        TEQ     r12, #0
+        MOVEQ   pc, lr
+        Push    "r0, lr"
+        PHPSEI                          ; disable IRQs round this bit
+        LDR     r0, [r12, #8]           ; get minimum size
+        SUB     r0, r4, r0              ; r0 = current-minimum = max shrink
+        CMP     r3, r0                  ; if requested shrink > max
+        MOVHI   r3, r0                  ; then limit it
+        SUB     r0, r5, #1              ; r0 = page mask
+        BIC     r3, r3, r0              ; round size change down to page multiple
+        SUB     r0, r4, r3              ; area size after shrink
+        STR     r0, [r12, #12]          ; update size
+
+        PLP                             ; restore IRQ status
+        CLRV
+        Pull    "r0, pc"
+
+        END

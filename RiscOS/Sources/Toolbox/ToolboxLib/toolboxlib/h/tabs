@@ -1,0 +1,299 @@
+/*
+ * Copyright (c) 2003, Rik Griffin
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+
+
+/*
+ * Name        : tabs.h
+ * Description : C veneers to the Methods provided by the Tabs gadget
+ */
+
+
+
+#ifndef __tabs_h
+#define __tabs_h
+
+
+#ifndef __kernel_h
+#include "kernel.h"
+#endif
+
+#ifndef __toolbox_h
+#include "toolbox.h"
+#endif
+
+#ifndef __window_h
+#include "window.h"
+#endif
+
+
+/****************************************************************************
+ * Tabs Templates                                                           *
+ ****************************************************************************/
+
+/*-- gadget flags --*/
+
+#define Tabs_AllowScrollArrows          0x00000001
+
+
+/*-- templates --*/
+
+typedef struct
+{
+  GadgetHeader  hdr;
+  unsigned int  foreground_wimp;
+  unsigned int  background_wimp;
+  char          *text;
+} Tabs;
+
+
+/****************************************************************************
+ * Tabs Methods                                                             *
+ ****************************************************************************/
+
+#define Tabs_Base               0x402C
+#define Tabs_Type               (sizeof(Tabs)) << 16 | Tabs_Base
+#define Tabs_SWIBase            0x1402C0
+
+#define Tabs_SetState           (Tabs_Base + 0)
+#define Tabs_GetState           (Tabs_Base + 1)
+#define Tabs_SetSelected        (Tabs_Base + 2)
+#define Tabs_GetSelected        (Tabs_Base + 3)
+#define Tabs_TabFromWindow      (Tabs_Base + 4)
+#define Tabs_WindowFromTab      (Tabs_Base + 5)
+#define Tabs_SetLabel           (Tabs_Base + 6)
+#define Tabs_GetLabel           (Tabs_Base + 7)
+#define Tabs_HideTab            (Tabs_Base + 8)
+
+
+/****************************************************************************
+ * Tabs Toolbox Events                                                      *
+ ****************************************************************************/
+
+#define TabsEvent_Selection     (Tabs_SWIBase + 0)
+
+/*-- selection event block --*/
+
+typedef struct
+{
+  ToolboxEventHeader  hdr;
+  unsigned int        flags;
+  int                 selected;
+  int                 previous;
+} TabsSelectionEvent;
+
+
+/****************************************************************************
+ * The following functions provide veneers to the methods that are          *
+ * associated with this particular class.  Please read the User Interface   *
+ * Toolbox manual for more detailed information on their functionality.     *
+ ****************************************************************************/
+
+
+
+#ifdef __cplusplus
+  extern "C" {
+#endif
+
+
+/*
+ * Name        : tabs_get_state
+ * Description : Gets the gadget flags for the given tab
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : unsigned int *state
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_get_state ( unsigned int flags,
+                                         ObjectId window,
+                                         ComponentId gadget,
+                                         unsigned int *state
+                                       );
+
+
+/*
+ * Name        : tabs_set_state
+ * Description : Sets the gadget flags for the given tab
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               unsigned int state
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_set_state ( unsigned int flags,
+                                         ObjectId window,
+                                         ComponentId gadget,
+                                         unsigned int state
+                                       );
+
+
+/*
+ * Name        : tabs_get_selected
+ * Description : Reads which tab index is the one currently selected
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ * Out         : int *tab_index
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_get_selected ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            int *tab_index
+                                          );
+
+
+/*
+ * Name        : tabs_set_selected
+ * Description : Sets which tab index is currently selected equivalent to having clicked on it
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ * Out         : int *previous_index
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_set_selected ( unsigned int flags,
+                                            ObjectId window,
+                                            ComponentId gadget,
+                                            int tab_index,
+                                            int *previous_index
+                                          );
+
+
+/*
+ * Name        : tabs_tab_from_window
+ * Description : Reads the index of the tab which has the given window associated with it
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               ObjectId nested_window
+ * Out         : int *tab_index
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_tab_from_window ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget,
+                                               ObjectId nested_window,
+                                               int *tab_index
+                                             );
+
+
+/*
+ * Name        : tabs_window_from_tab
+ * Description : Reads the window object which has the given tab is associated with it
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ * Out         : ObjectId *nested_window
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_window_from_tab ( unsigned int flags,
+                                               ObjectId window,
+                                               ComponentId gadget,
+                                               int tab_index,
+                                               ObjectId *nested_window
+                                             );
+
+
+/*
+ * Name        : tabs_get_label
+ * Description : Gets the tab name of the given tab
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ *               char *buffer
+ *               int buffsize
+ * Out         : int *nbytes
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_get_label ( unsigned int flags,
+                                         ObjectId window,
+                                         ComponentId gadget,
+                                         int tab_index,
+                                         char *buffer,
+                                         int buffsize,
+                                         int *nbytes
+                                       );
+
+
+/*
+ * Name        : tabs_set_label
+ * Description : Sets the tab name of the given tab
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ *               const char *text
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_set_label ( unsigned int flags,
+                                         ObjectId window,
+                                         ComponentId gadget,
+                                         int tab_index,
+                                         const char *text
+                                       );
+
+
+/*
+ * Name        : tabs_hide_tab
+ * Description : Hides or reveals the tab of the given index
+ * In          : unsigned int flags
+ *               ObjectId window
+ *               ComponentId gadget
+ *               int tab_index
+ *               int hide
+ * Out         : None
+ * Returns     : pointer to error block
+ */
+
+extern _kernel_oserror *tabs_hide_tab ( unsigned int flags,
+                                        ObjectId window,
+                                        ComponentId gadget,
+                                        int tab_index,
+                                        int hide
+                                      );
+
+
+#ifdef __cplusplus
+  }
+#endif
+
+
+
+#endif

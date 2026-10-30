@@ -1,0 +1,19 @@
+| Perl Boot File
+
+If "<Perl$Path>"="" Then Set Run$Path <Run$Path>,Perl:
+
+Set Perl$Dir <Obey$Dir>
+Set Perl$Path <Perl$Dir>.
+
+Set PerlPrivLib$Dir <Perl$Dir>.lib
+Set PerlArchLib$Dir <Perl$Dir>.riscos
+Set PerlScript$Dir <Perl$Dir>.scripts
+
+| This just enables printing out of filenames passed to fopen atm.
+| Set PERLTEST 1
+
+IconSprites <Perl$Dir>.!Sprites
+
+Set File$Type_102 Perl
+|Set Alias$@RunType_102 Taskwindow |"<Perl$Dir>.Perl %%*0|" -wimpslot 896k -name Perl -display -quit
+Set Alias$@RunType_102 Taskwindow |"<Perl$Dir>.Perl %%*0|" -wimpslot 2048k -name Perl -display -quit

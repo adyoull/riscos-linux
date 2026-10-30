@@ -1,0 +1,4152 @@
+/* Copyright 1996 Acorn Computers Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* > c.Tools
+ *
+ *  Paint: Arthur 2 sprite editor
+ *   Tools to paint all over sprites
+ *
+ *  Author: A.P. Thompson
+ *
+ *  Upgraded to RISCOSlib - DAHE - 16 Aug 1989
+ *  DAHE, 28 Aug  89 - internationalisation
+ *  DAHE,  4 Sept 89 - flood fill amended to handle transparent better
+ *  JAB,   18 Oct 90 - Fixed bug in floodfill routine
+ */
+
+#include <limits.h>
+#include <math.h>
+#include <signal.h>
+#include <swis.h>
+#include "Global/VduExt.h"
+#include "Global/OsBytes.h"
+#include "Global/Sprite.h"
+
+#include "bbc.h"
+#include "colourtran.h"
+#include "flex.h"
+#include "font.h"
+#include "visdelay.h"
+#include "werr.h"
+#include "wimpt.h"
+
+#include "ftrace.h"
+#include "m.h"
+#include "main.h"
+#include "PSprite.h"
+#include "SprWindow.h"
+#include "ToolWindow.h"
+#include "Tools.h"
+#include "Colours.h"
+#include "Menus.h"
+#include "guard.h"
+#include "PaintLib.h"
+
+#define MUNGE_PIXEL(x, y, c, gcol, sa, sp, sb) \
+  { if (toolwindow_current_mode != 0 || gcol.ecf) \
+      domungepixel (x, y, c, gcol, sa, sp, sb); \
+  }
+
+#define MIX_PIXEL(n, o, chshr, chmsk) ((((n.colour >> chshr) & chmsk) * opacity) + \
+                                       (((o.colour >> chshr) & chmsk) * (256 - opacity)))
+
+static void Set_Marked_Extent (main_sprite *);
+
+/*************************
+ *  Static variables     *
+ *************************/
+
+wimp_i      tools_icons [tools_bicon_Max];
+static wimp_box Marked_Extent;
+
+/* Text tool */
+char        tools_text_buffer [256] = "";
+static char curr_text_buffer [256];
+char        tools_fontname_buffer [64];
+char        tools_text_xsize [6] = "8";
+char        tools_text_ysize [6] = "8";
+char        tools_text_units [5];
+BOOL        tools_system_font = TRUE,
+            tools_fonts_blend = FALSE,
+            tools_font_changed = FALSE;
+int         textxsize;
+int         textysize;
+main_sprite *tools_textstencil_ptr = NULL;
+
+/* Spray tool */
+char        tools_spray_density [5] = "100";
+char        tools_spray_radius [5]  = "30";
+static int  spraydensity;
+static int  sprayradius;
+static int  spraytime = 0;
+
+/* Brush tool */
+char        tools_brushsprite [NAME_LIMIT + 1]  = "circle";    /* This is a message token, not a */
+char        tools_newbrushsprite [NAME_LIMIT + 1]  = "circle"; /* direct sprite name             */
+char        tools_brush_nxscalem [3] = "1";
+char        tools_brush_nxscaled [3] = "1";
+char        tools_brush_nyscalem [3] = "1";
+char        tools_brush_nyscaled [3] = "1";
+char        tools_brush_cxscalem [3] = "1";
+char        tools_brush_cxscaled [3] = "1";
+char        tools_brush_cyscalem [3] = "1";
+char        tools_brush_cyscaled [3] = "1";
+main_scaling_block tools_brushscale = { 1, 1, 1, 1 };
+main_sprite *tools_brushsprite_ptr = NULL;
+main_sprite *tools_brushmouse_ptr = NULL;
+main_file tools_brushfile = {NULL, NULL, NULL, NULL, ~0, ~0, 0, 0, 1, 0, NULL};
+int tools_brush_use_gcol = 1; /* 0: Sprite stamp, 1: Shape, 2: Tinted sprite stamp */
+
+/* Flood tool */
+BOOL tools_flood_local      = TRUE;
+
+/* Move and copy block tools */
+BOOL tools_exporting_sprite = FALSE;
+
+/* Grabber tool */
+BOOL tools_grabber_wrap = FALSE;
+
+/*************************
+ * Data tables           *
+ *************************/
+
+static char circledata [] = {bbc_CircleFill + bbc_DrawAbsFore, 0};
+static char linedata [] = {bbc_SolidBoth + bbc_DrawAbsFore, 0};
+static char circleoutlinedata [] = {bbc_Circle + bbc_DrawAbsFore, 0};
+static char triangledata [] = {bbc_SolidBoth + bbc_DrawAbsFore,
+             bbc_TriangleFill + bbc_DrawAbsFore, 0 };
+static char ellipsedata [] = {bbc_SolidBoth + bbc_DrawAbsFore,
+             bbc_EllipseFill + bbc_DrawAbsFore, 0 };
+static char ellipseoutlinedata [] = {bbc_SolidBoth + bbc_DrawAbsFore,
+             bbc_Ellipse + bbc_DrawAbsFore, 0 };
+static char segmentdata [] = {bbc_SolidBoth + bbc_DrawAbsFore,
+             bbc_Segment + bbc_DrawAbsFore, 0 };
+static char sectordata [] = {bbc_SolidBoth + bbc_DrawAbsFore,
+             bbc_Sector + bbc_DrawAbsFore, 0 };
+static char arcdata [] = {bbc_SolidBoth + bbc_DrawAbsFore,
+             bbc_CircleArc + bbc_DrawAbsFore, 0 };
+static char parallelogramdata [] = {bbc_SolidBoth + bbc_DrawAbsFore,
+             bbc_ParallelFill + bbc_DrawAbsFore, 0 };
+static char rectangledata [] = {bbc_RectangleFill + bbc_DrawAbsFore, 0 };
+
+
+int tools_extent_to_pixel_x(const main_sprite_window *window, int x)
+{
+  x *= window->blobsize.scale_xdiv;
+  x /= window->blobsize.scale_xmul;
+  x /= window->sprite->mode.scale_xmul;
+  return x;
+}
+
+static int  tools_pixel_to_extent_x(const main_sprite_window *window, int x)
+{
+  x *= window->sprite->mode.scale_xmul;
+  x *= window->blobsize.scale_xmul;
+  x /= window->blobsize.scale_xdiv;
+  return x;
+}
+
+static int  tools_pixel_to_extent_centre_x(const main_sprite_window *window, int x)
+{
+  x *= window->sprite->mode.scale_xmul;
+  x *= window->blobsize.scale_xmul;
+  x += (window->sprite->mode.scale_xmul*window->blobsize.scale_xmul)/2;
+  x /= window->blobsize.scale_xdiv;
+  return x;
+}
+
+int tools_extent_to_pixel_y(const main_sprite_window *window, int y)
+{
+  y *= window->blobsize.scale_ydiv;
+  y /= window->blobsize.scale_ymul;
+  y /= window->sprite->mode.scale_ymul;
+  return y;
+}
+
+
+static int  tools_pixel_to_extent_y(const main_sprite_window *window, int y)
+{
+  y *= window->blobsize.scale_ymul;
+  y *= window->sprite->mode.scale_ymul;
+  y /= window->blobsize.scale_ydiv;
+  return y;
+}
+
+static int  tools_pixel_to_extent_centre_y(const main_sprite_window *window, int y)
+{
+  y *= window->sprite->mode.scale_ymul;
+  y *= window->blobsize.scale_ymul;
+  y += (window->sprite->mode.scale_ymul*window->blobsize.scale_ymul)/2;
+  y /= window->blobsize.scale_ydiv;
+  return y;
+}
+
+static int tools_pixel_to_point_x(const main_sprite_window *window, int x)
+{
+  x *= window->sprite->mode.scale_xmul;
+  return x;
+}
+
+static int tools_pixel_to_point_y(const main_sprite_window *window, int y)
+{
+  y *= window->sprite->mode.scale_ymul;
+  return y;
+}
+
+static void tools_get_sprite_info_pixels(main_sprite *sprite, sprite_info *sin)
+{
+  sprite_id sid;
+  sid.tag    = sprite_id_addr;
+  sid.s.addr = psprite_address(sprite);
+  wimpt_noerr (sprite_readsize (sprite->file->spritearea, &sid, sin));
+}
+
+/********************************************************
+ * Convert mouse pos to the row or column that it is in *
+ *   (0 <= x < width, 0 <= y < height)                  *
+ ********************************************************/
+
+void tools_mouse_to_pixel(main_window *window, wimp_mousestr *mpos,
+                            int *cx, int *cy)
+{
+  /* Original code clamps coordinates overflowing the sprite bounds, so pass
+  NULL for new overflowx and overflowy args */
+  tools_mouse_to_pixel_overflow(window, mpos, cx, cy, NULL, NULL);
+}
+
+/********************************************************
+ * Convert mouse pos to the row or column that it is in *
+ *   (0 <= x < width, 0 <= y < height)                  *
+ * If outside or near sprite bounds, an offset is       *
+ * returned using overflowx and overflowy.              *
+ ********************************************************/
+
+void tools_mouse_to_pixel_overflow(main_window *window, wimp_mousestr *mpos,
+                            int *cx, int *cy, int *overflowx, int *overflowy)
+{
+  sprite_info sin;
+  main_sprite *sprite = window->data->sprite.sprite;
+  wimp_winfo curr;
+  ftracef0 ("tools_mouse_to_pixel\n");
+
+  /* Default values for optional overflow parameters */
+  if (overflowx)
+    *overflowx = 0;
+  if (overflowy)
+    *overflowy = 0;
+
+  curr.w = window->handle;
+  wimpt_noerr (paintlib_get_wind_info (&curr));
+
+  tools_get_sprite_info_pixels(sprite,&sin);
+
+  /* See if we have dragged close to the edge of the window */
+  if (overflowx)
+  {
+    if (mpos->x >= curr.info.box.x1 - 10)
+      *overflowx = 1;
+    else if (mpos->x - curr.info.box.x0 < 10)
+      *overflowx = -1;
+  }
+  if (overflowy)
+  {
+    if (mpos->y >= curr.info.box.y1 - 10)
+      *overflowy = 1;
+    else if (mpos->y - curr.info.box.y0 < 10)
+      *overflowy = -1;
+  }
+
+  if (cx)
+  {
+    int x=tools_extent_to_pixel_x(&window->data->sprite, mpos->x - curr.info.box.x0 + curr.info.scx);
+    if (x>=sin.width) x=sin.width-1;
+    if (x<0) x=0;
+    *cx=x;
+  }
+
+  if (cy)
+  {
+    int y=tools_extent_to_pixel_y(&window->data->sprite,-curr.info.ex.y0 + curr.info.scy + mpos->y - curr.info.box.y1);
+                                                                    /* offset from bottom left of sprite window */
+    if (y>=sin.height) y=sin.height-1;
+    if (y<0) y=0;
+    *cy=y;
+  }
+}
+
+/************************************
+ does a wimp_update_wind and returns
+ bottom left of sprite in the window,
+ and output from wimp_wind_update.
+*************************************/
+
+static void sprite_update_window(main_sprite_window *swind, int *x0, int *y0, wimp_redrawstr *rds, int *more)
+{
+  wimp_winfo curr;
+
+  curr.w = swind->window->handle;
+  wimpt_noerr (paintlib_get_wind_info (&curr));
+
+  rds->w = swind->window->handle;
+  rds->box = main_big_extent;
+  wimpt_noerr (wimp_update_wind (rds, more));
+
+  if (x0) *x0 = rds->box.x0 - rds->scx;
+  if (y0) *y0 = rds->box.y1 - rds->scy + curr.info.ex.y0;
+}
+
+/********************************
+ * EORed table-driven plotter   *
+ ********************************/
+
+static void tabledriven_drawEOR(main_sprite_window *swind, int *toolspace, int x0, int y0)
+{
+  int i, *coords = &toolspace [2];
+
+  os_swi2 (OS_SetColour, 3, -1);
+#if 0
+  /*replaces the following, avoiding need to check full-palette bit*/
+  bbc_gcol (3, 127);
+  bbc_tint (2, 3); /*10 Sept 1991*/
+#endif
+
+  for (i = toolspace [0] & 0xFF; i; i--)
+  {
+     bbc_move (x0 + tools_pixel_to_extent_centre_x(swind, coords [0]),
+               y0 + tools_pixel_to_extent_centre_y(swind, coords [1]));
+    coords += 2;
+  }
+
+  bbc_plot (((char *) toolspace [1]) [(toolspace [0] & 0xFF) - 1],
+              x0 + tools_pixel_to_extent_centre_x(swind, coords [0]),
+              y0 + tools_pixel_to_extent_centre_y(swind, coords [1]));
+
+}
+
+
+static void tabledrivenEOR (main_sprite *sprite)
+
+{ main_sprite_window *swind;
+
+  ftracef0 ("tabledrivenEOR\n");
+  for (swind = sprite->windows; swind != NULL; swind = swind->link)
+  { int more, x0, y0;
+    wimp_redrawstr rds;
+
+    sprite_update_window(swind,&x0,&y0,&rds,&more);
+    while (more)
+    {
+      tabledriven_drawEOR(swind, sprite->toolspace, x0, y0);
+      wimpt_noerr (wimp_get_rectangle (&rds, &more));
+    }
+  }
+}
+
+/***********************************************************
+ * Null events: if pointer is over a window on the sprite, *
+ *    then eor new shape.                                  *
+ ***********************************************************/
+
+static void tabledriven_null (main_window *window, wimp_mousestr *mpos)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int point, coord, x, y;
+
+  ftracef0 ("tabledriven_null\n");
+  if ((mpos->bbits & wimp_BRIGHT) == 0)     /* has adjust been released? */
+    sprite->toolspace [0] = sprite->toolspace [0] & 0xFF;
+                                  /*  then clear to just state */
+  ftracef2 ("0x%X->toolspace [0]: 0x%X\n", sprite, sprite->toolspace [0]);
+
+  if (sprite->toolspace [0] < 0)
+    point = (sprite->toolspace [0] & 0x00FF0000) >> 16;
+  else
+    point = sprite->toolspace [0] & 0xFF;
+
+  coord = point*2 + 2;
+  tools_mouse_to_pixel (window, mpos, &x, &y);
+
+  if (x != sprite->toolspace [coord] || y != sprite->toolspace [coord + 1])
+  { tabledrivenEOR (sprite);       /* unplot it */
+
+    sprite->toolspace [coord] = x;
+    sprite->toolspace [coord  + 1] = y;
+
+    tabledrivenEOR (sprite);       /* replot it at new size */
+  }
+}
+
+/***************************************************************************
+ * Redraw tool: most of EORing routine, rehashed to just do current window *
+ **************************************************************************/
+
+static void tabledriven_redraw (main_window *window, int x0, int y0)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+
+  ftracef0 ("tabledriven_redraw\n");
+  if (sprite->needsnull)
+      tabledriven_drawEOR(&window->data->sprite, sprite->toolspace, x0, y0);
+}
+
+/**************
+ * Stop tool  *
+ **************/
+
+static void tabledriven_stop (main_sprite *sprite)
+
+{ ftracef0 ("tabledriven_stop\n");
+  if (sprite->needsnull)
+  { tabledrivenEOR (sprite);   /* unplot outline */
+    sprite->toolspace [0] = 0; /* and restart state */
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n", sprite, sprite->toolspace [0]);
+    sprwindow_release_idle_events (sprite);
+  }
+}
+
+static void tabledriven_click (main_window *window,
+    wimp_mousestr *mpos, char *table)
+
+{ ftracef1 ("tabledriven_click: bits 0x%X\n", mpos->bbits);
+  if (mpos->bbits & (wimp_BRIGHT | wimp_BLEFT)) /* ignore drags */
+  { main_sprite *sprite = window->data->sprite.sprite;
+    int x, y, state;
+
+    tools_mouse_to_pixel (window, mpos, &x, &y);
+
+    state = sprite->toolspace [0] &= 0xFF;
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n", sprite, sprite->toolspace [0]);
+
+    if (mpos->bbits & wimp_BRIGHT)
+    { /* adjust: select a point and move it */
+      int point = 0, bdist = INT_MAX, i;
+
+      for (i = 1; i <= (state & 0xFF); i++)
+      { /* Adjust pressed: adjust point closest to mouse */
+        int dx = sprite->toolspace [i*2]     - x;
+        int dy = sprite->toolspace [i*2 + 1] - y;
+
+        if (dx*dx + dy*dy < bdist) bdist = dx*dx + dy*dy, point = i - 1;
+      }
+
+      sprite->toolspace [0] = state & ~0xFF00 | point << 16 | 0x80000000;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+      ftracef1 ("selected adjust point %d\n", point);
+    }
+    else if (state == 0 || table [state] != 0)
+    { /*another state to pass through*/
+      if (state == 0)
+      { sprwindow_claim_idle_events (window);
+        sprite->toolspace [4] = sprite->toolspace [2] = x;
+        sprite->toolspace [5] = sprite->toolspace [3] = y;
+        sprite->toolspace [1] = (int) table;
+      }
+      else
+      { tabledrivenEOR (sprite);           /* unplot old */
+        ftracef3 ("Add coordinates %d, %d at %d\n", x, y, state*2 + 2);
+        sprite->toolspace [state*2 + 2] = x;
+        sprite->toolspace [state*2 + 3] = y;
+
+        if (state*2 + 5 < TOOLSPACESIZE)
+        { sprite->toolspace [state*2 + 4] = x;
+          sprite->toolspace [state*2 + 5] = y;
+        }
+      }
+
+      sprite->toolspace [0]++;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+      tabledrivenEOR (sprite);
+    }
+    else
+    { main_colour gcol = sprite->gcol;
+      int *c = &sprite->toolspace [2];
+      main_sprite_window *swind=&window->data->sprite;
+
+      sprwindow_release_idle_events (sprite);
+      tabledrivenEOR (sprite);         /* unplot old */
+
+      BOOL write_image = gcol.alpha || (psprite_transparency_type(sprite) == transparency_type_alphachannel);
+      if (write_image)
+      { int *coords = c;
+        int scopy;
+
+        sprwindow_swap_output_to_sprite (sprite);
+        colours_set_sprite_gcol (gcol, sprite, 0);
+
+        for (scopy = state; scopy; scopy--)
+        {
+           bbc_move (tools_pixel_to_point_x(swind, coords [0]),
+                     tools_pixel_to_point_y(swind, coords [1]));
+          coords += 2;
+        }
+        bbc_plot (table [sprite->toolspace [0] - 1],
+                   tools_pixel_to_point_x(swind, x),
+                   tools_pixel_to_point_y(swind, y));
+      }
+
+      if (sprwindow_swap_output_to_mask (sprite, write_image))
+      { int *coords = c;
+
+        colours_set_gcol (gcol.alpha, 0, 0);
+
+        for (; state; state--)
+        { bbc_move (tools_pixel_to_point_x(swind, coords [0]),
+                    tools_pixel_to_point_y(swind, coords [1]));
+          coords += 2;
+        }
+        bbc_plot (table [sprite->toolspace [0] - 1],
+                   tools_pixel_to_point_x(swind, x),
+                   tools_pixel_to_point_y(swind, y));
+      }
+
+      sprite->toolspace [0] = 0;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+
+      Set_Marked_Extent (sprite);
+      sprwindow_swap_output_to_screen ();
+
+      psprite_recalculate_offsets (sprite->file);
+      sprwindow_redisplay (sprite, &Marked_Extent);
+    }
+
+    ftracef1 ("state after click is 0x%X\n", sprite->toolspace [0]);
+  }
+}
+
+/************************************************************
+ *  Data driven tools                                       *
+ ************************************************************/
+
+static void circlepaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("circlepaint_click\n");
+  tabledriven_click (window, mpos, circledata);
+}
+
+static void linepaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("linepaint_click\n");
+  tabledriven_click (window, mpos, linedata);
+}
+
+static void circleoutlinepaint_click (main_window *window,
+                                     wimp_mousestr *mpos)
+
+{ ftracef0 ("circleoutlinepaint_click\n");
+  tabledriven_click (window, mpos, circleoutlinedata);
+}
+
+static void trianglepaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("trianglepaint_click\n");
+  tabledriven_click (window, mpos, triangledata);
+}
+
+static void ellipsepaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("ellipsepaint_click\n");
+  tabledriven_click (window, mpos, ellipsedata);
+}
+
+static void ellipseoutlinepaint_click (main_window *window,
+                                      wimp_mousestr *mpos)
+
+{ ftracef0 ("ellipseoutlinepaint_click\n");
+  tabledriven_click (window, mpos, ellipseoutlinedata);
+}
+
+static void segmentpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("segmentpaint_click\n");
+  tabledriven_click (window, mpos, segmentdata);
+}
+
+static void sectorpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("sectorpaint_click\n");
+  tabledriven_click (window, mpos, sectordata);
+}
+
+static void arcpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("arcpaint_click\n");
+  tabledriven_click (window, mpos, arcdata);
+}
+
+static void parallelogrampaint_click (main_window *window,
+                                     wimp_mousestr *mpos)
+
+{ ftracef0 ("parallelogrampaint_click\n");
+  tabledriven_click (window, mpos, parallelogramdata);
+}
+
+static void rectanglepaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("rectanglepaint_click\n");
+  tabledriven_click (window, mpos, rectangledata);
+}
+
+/********************************
+ * Pixelpaint tool: plot points *
+ ********************************/
+
+static void domungepixel (int x, int y, sprite_colour *c, main_colour *mc,
+    sprite_area *sarea, sprite_id *sid, main_sprite *sb)
+
+{ ftracef0 ("domungepixel\n");
+
+  if (mc->ecf)
+  { sprite_id cyd;
+    sprite_area *sa = sb->ECFs [mc->colour].sarea;
+    int h = y - 1 & 7;  /* row number of ECF */
+      /*was (psprite_address (sb)->height - y) & 7. JRC 13th Feb 1995*/
+
+    /*pick pixel out of appropriate ECF, noting that this will be aligned
+      with the top of both sprites */
+    /*but we want the bottoms aligned See psprte_setup_ecf(). JRC 13th Feb 1995*/
+    cyd.tag = sprite_id_addr;
+    cyd.s.addr = (char *) sa + sizeof (sprite_area);
+
+    /*h = ((sprite_header *) cyd.s.addr)->height + h - 7;*/
+      /*don't align to top of ECF sprite JRC 13th Feb 1995*/
+
+    main_read_pixel (sa, &cyd, x & 7, h, c);
+  }
+
+  ftracef3 ("domungepixel: c->colour %d, c->tint %d; "
+      "toolwindow_current_mode %d\n",
+      c->colour, c->tint, toolwindow_current_mode);
+
+  if (toolwindow_current_mode != 0)
+  { sprite_colour there;
+
+    main_read_pixel (sarea, sid, x, y, &there);
+
+    switch (toolwindow_current_mode)
+    { case 1: /* OR */
+        c->colour |= there.colour;
+        c->tint   |= there.tint;
+      break;
+
+      case 2: /* AND */
+        c->colour &= there.colour;
+        c->tint   &= there.tint;
+      break;
+
+      case 3: /* EOR */
+        c->colour ^= there.colour;
+        c->tint   ^= there.tint;
+      break;
+    }
+  }
+
+  ftracef2 ("domungepixel: c->colour %d, c->tint %d\n", c->colour, c->tint);
+}
+
+/***********************************************************
+ *  Actual pixel zapper                                    *
+ ***********************************************************/
+
+static void pixelpaint_splot (main_window *window, wimp_mousestr *mpos)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int x, y;
+  main_colour gcol = mpos->bbits == wimp_BRIGHT ? sprite->gcol2 : sprite->gcol;
+        /* adjust clears to 0, select uses current gcol */
+
+  ftracef2 ("pixelpaint_splot: sprite %.12s, gcol 0x%X\n",
+      psprite_address (sprite)->name, gcol);
+
+  tools_mouse_to_pixel(window, mpos,&x,&y);
+
+  if (x != sprite->toolspace [0] || y != sprite->toolspace [1])
+  {
+    wimp_box redraw_area;
+    sprite_id sid;
+    sprite_area *sarea = sprite->file->spritearea;
+
+    sprite->toolspace [0] = x;
+    sprite->toolspace [1] = y;
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n", sprite, sprite->toolspace [0]);
+
+    sid.s.addr = psprite_address (sprite);
+    sid.tag = sprite_id_addr;
+
+    BOOL write_image = gcol.alpha || (psprite_transparency_type(sprite) == transparency_type_alphachannel);
+
+    if (write_image)
+    { sprite_colour colour;
+
+      ftracef3 ("gcol 0x%X %d %d\n", gcol.colour, gcol.alpha, gcol.ecf);
+      colour = colours_pack_colour(sprite,gcol);
+
+      MUNGE_PIXEL (x, y, &colour, &gcol, sarea, &sid, sprite)
+      ftracef2 ("sprite_writepixel (GCOL 0x%X, TINT 0x%X)\n",
+          colour.colour, colour.tint);
+      sprite_writepixel (sarea, &sid, x, y, &colour);
+    }
+
+    if (psprite_hasmask (sprite))
+    { sprite_maskstate mask = colours_pack_mask(sprite,gcol);
+
+      sprite_writemask (sarea, &sid, x, y, &mask);
+    }
+
+
+    redraw_area.x0=tools_pixel_to_point_x(&window->data->sprite, x);
+    redraw_area.x1=tools_pixel_to_point_x(&window->data->sprite, x+1);
+    redraw_area.y0=tools_pixel_to_point_y(&window->data->sprite, y);
+    redraw_area.y1=tools_pixel_to_point_y(&window->data->sprite, y+1);
+
+    sprwindow_redisplay (sprite, &redraw_area);
+  }
+}
+
+/***********************************************************
+ *  Start point plotting                                   *
+ ***********************************************************/
+
+static void pixelpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("pixelpaint_click\n");
+  if (mpos->bbits & (wimp_BRIGHT | wimp_BLEFT)) /* ignore drags */
+  { main_sprite *sprite = window->data->sprite.sprite;
+
+    sprwindow_claim_idle_events (window);    /* start tracking */
+    main_set_modified (sprite->file);
+    sprite->toolspace [0] = sprite->toolspace [1] = -1;
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+        sprite, sprite->toolspace [0]);
+
+    pixelpaint_splot (window, mpos);
+  }
+}
+
+/***********************************************************
+ * Null events: if pointer is over a window on the sprite, *
+ *    then plot a point                                    *
+ ***********************************************************/
+
+static void pixelpaint_null (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("pixelpaint_null\n");
+  if (mpos->bbits == 0) /*if the mouse button is now up, stop tracking*/
+    sprwindow_release_idle_events (window->data->sprite.sprite);
+  else
+    pixelpaint_splot (window, mpos);
+}
+
+/********************************
+ * EORed parallelogram plotter  *
+ ********************************/
+
+static void parallelogram_drawEOR(main_sprite_window *swind, int *toolspace, int x0, int y0)
+{
+  os_swi2 (OS_SetColour, 3, -1);
+  int drawline=0;
+  int *point=&toolspace[2];
+#if 0
+  /*replaces the following, avoiding need to check full-palette bit*/
+  bbc_gcol (3, 127);
+  bbc_tint (2, 3); /*10 Sept 1991*/
+#endif
+
+  /* draw a line if parallelogram points all lie on a straight line
+     so that it doesnt disappear */
+  if ((toolspace [0] & 0xFF) == 2)
+  {
+    int dx1=point[2]-point[0];
+    int dy1=point[3]-point[1];
+    int dx2=point[4]-point[0];
+    int dy2=point[5]-point[1];
+    if (point[0]==point[4] && point[1]==point[5])
+    {
+      dx2=point[4]-point[2];
+      dy2=point[5]-point[3];
+    }
+
+    if (dy1==0 && dy2==0)
+      drawline=1;/* horizontal line */
+    else if (dx1==0 && dx2==0)
+      drawline=2;/* vertical line */
+    else if (dy1 && dy2 && abs(dx1)>abs(dy1) && dx1*4096/dy1==dx2*4096/dy2)
+      drawline=1;
+    else if (dx1 && dx2 && abs(dy1)>=abs(dx1) && dy1*4096/dx1==dy2*4096/dx2)
+      drawline=2;
+  }
+
+  if (drawline)
+  {
+     int i, xa, ya, xb, yb;
+
+     /* find endpoints */
+     if (drawline==1)
+     {
+        xa=point[4] + point[0] - point[2];
+        ya=point[5] + point[1] - point[3];
+        for (i=0;i<6;i+=2) {if (point[i]<xa) xa=point[i], ya=point[i+1];}
+        xb=point[4] + point[0] - point[2];
+        yb=point[5] + point[1] - point[3];
+        for (i=0;i<6;i+=2) {if (point[i]>xb) xb=point[i], yb=point[i+1];}
+     }
+     else
+     {
+        xa=point[4] + point[0] - point[2];
+        ya=point[5] + point[1] - point[3];
+        for (i=0;i<6;i+=2) {if (point[i+1]<ya) xa=point[i], ya=point[i+1];}
+        xb=point[4] + point[0] - point[2];
+        yb=point[5] + point[1] - point[3];
+        for (i=0;i<6;i+=2) {if (point[i+1]>yb) xb=point[i], yb=point[i+1];}
+     }
+     bbc_move (x0 + tools_pixel_to_extent_centre_x(swind, xa),
+               y0 + tools_pixel_to_extent_centre_y(swind, ya));
+     bbc_draw (x0 + tools_pixel_to_extent_centre_x(swind, xb),
+               y0 + tools_pixel_to_extent_centre_y(swind, yb));
+
+
+  }
+  else
+  {
+    bbc_move (x0 + tools_pixel_to_extent_centre_x(swind, point[0]),
+              y0 + tools_pixel_to_extent_centre_y(swind, point[1]));
+    bbc_draw (x0 + tools_pixel_to_extent_centre_x(swind, point[2]),
+              y0 + tools_pixel_to_extent_centre_y(swind, point[3]));
+
+    if ((toolspace [0] & 0xFF) == 2)
+    { bbc_draw (x0 + tools_pixel_to_extent_centre_x(swind, point[4]),
+                y0 + tools_pixel_to_extent_centre_y(swind, point[5]));
+      bbc_drawby (tools_pixel_to_extent_x(swind, point[0] - point[2]),
+                  tools_pixel_to_extent_y(swind, point[1] - point[3]));
+      bbc_draw (x0 + tools_pixel_to_extent_centre_x(swind, point[0]),
+                y0 + tools_pixel_to_extent_centre_y(swind, point[1]));
+    }
+  }
+}
+
+static void parallelogramEOR (main_sprite *sprite)
+
+{ main_sprite_window *swind;
+
+  ftracef0 ("parallelogramEOR\n");
+  for (swind = sprite->windows; swind != NULL; swind = swind->link)
+  { int more, x0, y0;
+    wimp_redrawstr rds;
+
+    sprite_update_window(swind,&x0,&y0,&rds,&more);
+    while (more)
+    {
+      parallelogram_drawEOR(swind, sprite->toolspace, x0, y0);
+      wimpt_noerr (wimp_get_rectangle (&rds, &more));
+    }
+  }
+}
+
+/***********************************************************
+ * Null events: if pointer is over a window on the sprite, *
+ *    then eor new pgram.                                  *
+ ***********************************************************/
+
+static void parallelogramoutlinepaint_null (main_window *window,
+                                           wimp_mousestr *mpos)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int point, coord, x, y;
+
+  ftracef0 ("parallelogramoutlinepaint_null\n");
+  if ((mpos->bbits & wimp_BRIGHT) == 0)     /* has adjust been released? */
+  sprite->toolspace [0] = sprite->toolspace [0] & 0xFF;
+                                 /*  then clear to just state */
+  ftracef2 ("0x%X->toolspace [0]: 0x%X\n", sprite, sprite->toolspace [0]);
+
+
+ if (sprite->toolspace [0] < 0)
+      point = (sprite->toolspace [0] & 0x00FF0000) >> 16;
+ else point = sprite->toolspace [0] & 0xFF;
+
+ coord = point*2 + 2;
+
+ tools_mouse_to_pixel(window, mpos, &x, &y);
+
+ if (x != sprite->toolspace [coord] || y != sprite->toolspace [coord + 1])
+ { parallelogramEOR (sprite);       /* unplot it */
+
+  sprite->toolspace [coord] = x;
+  sprite->toolspace [coord  + 1] = y;
+
+  parallelogramEOR (sprite);       /* replot it at new size */
+ }
+}
+
+/****************************************************************************
+ * Redraw tool: most of EORing routine, rehashed to just do current window  *
+ ****************************************************************************/
+
+static void parallelogramoutlinepaint_redraw (main_window *window,
+                                             int x0, int y0)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+
+  ftracef0 ("parallelogramoutlinepaint_redraw\n");
+  if (sprite->needsnull)
+    parallelogram_drawEOR(&window->data->sprite, window->data->sprite.sprite->toolspace, x0, y0);
+}
+
+/**************
+ * Stop tool  *
+ **************/
+
+static void parallelogramoutlinepaint_stop (main_sprite *sprite)
+
+{ ftracef0 ("parallelogramoutlinepaint_stop\n");
+  if (sprite->needsnull)
+  { parallelogramEOR (sprite);   /* unplot outline */
+    sprite->toolspace [0] = 0; /* and restart state */
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n", sprite, sprite->toolspace [0]);
+    sprwindow_release_idle_events (sprite);
+  }
+}
+
+static void parallelogramoutlinepaint_click (main_window *window,
+    wimp_mousestr *mpos)
+
+{ ftracef0 ("parallelogramoutlinepaint_click\n");
+  if (mpos->bbits & (wimp_BRIGHT | wimp_BLEFT)) /* ignore drags */
+  { main_sprite *sprite = window->data->sprite.sprite;
+    int x, y;
+    tools_mouse_to_pixel (window, mpos, &x, &y);
+
+    if (mpos->bbits & wimp_BRIGHT)   /* adjust: select a point and move it */
+    { int point = 0, bdist = INT_MAX, i;
+
+      for (i = 1; i <= (sprite->toolspace [0] & 0xFF); i++)
+      { /*adjust pressed: adjust point closest to mouse*/
+        int dx = sprite->toolspace [i*2] - x;
+        int dy = sprite->toolspace [i*2 + 1] - y;
+
+        if (dx*dx + dy*dy < bdist) bdist = dx*dx + dy*dy, point = i-1;
+      }
+
+      sprite->toolspace [0] = sprite->toolspace [0] & ~0x00FF00 |
+          point << 16 | 0x80000000;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+    }
+    else
+      switch (sprite->toolspace [0] & 0xFF /*low byte only. JRC 6 July 1991*/)
+      { case 0:
+          sprwindow_claim_idle_events (window);    /* start tracking */
+          sprite->toolspace [4] = sprite->toolspace [2] = x;
+          sprite->toolspace [5] = sprite->toolspace [3] = y;
+          sprite->toolspace [0] = 1;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+          parallelogramEOR (sprite);
+        break;
+
+        case 1:
+          parallelogramEOR (sprite);           /* unplot old */
+          sprite->toolspace [6] = sprite->toolspace [4] = x;
+          sprite->toolspace [7] = sprite->toolspace [5] = y;
+          sprite->toolspace [0] = 2;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+          parallelogramEOR (sprite);
+        break;
+
+        case 2:
+        { main_sprite_window *swind=&window->data->sprite;
+
+          main_colour gcol = sprite->gcol;
+
+          sprwindow_release_idle_events (sprite);
+          parallelogramEOR (sprite);         /* unplot old */
+
+          BOOL write_image = gcol.alpha || (psprite_transparency_type(sprite) == transparency_type_alphachannel);
+
+          if (write_image)
+          { sprwindow_swap_output_to_sprite (sprite);
+            colours_set_sprite_gcol (gcol, sprite, 0);
+
+            bbc_move (tools_pixel_to_point_x(swind, sprite->toolspace [2]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [3]));
+            bbc_draw (tools_pixel_to_point_x(swind, sprite->toolspace [4]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [5]));
+            bbc_draw (tools_pixel_to_point_x(swind, sprite->toolspace [6]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [7]));
+            bbc_drawby (tools_pixel_to_point_x(swind, sprite->toolspace [2] - sprite->toolspace [4]),
+                        tools_pixel_to_point_y(swind, sprite->toolspace [3] - sprite->toolspace [5]));
+            bbc_draw (tools_pixel_to_point_x(swind, sprite->toolspace [2]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [3]));
+          }
+
+          if (sprwindow_swap_output_to_mask (sprite, write_image))
+          { colours_set_gcol (gcol.alpha, 0, 0);
+
+            bbc_move (tools_pixel_to_point_x(swind, sprite->toolspace [2]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [3]));
+            bbc_draw (tools_pixel_to_point_x(swind, sprite->toolspace [4]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [5]));
+            bbc_draw (tools_pixel_to_point_x(swind, sprite->toolspace [6]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [7]));
+            bbc_drawby (tools_pixel_to_point_x(swind, sprite->toolspace [2] - sprite->toolspace [4]),
+                        tools_pixel_to_point_y(swind, sprite->toolspace [3] - sprite->toolspace [5]));
+            bbc_draw (tools_pixel_to_point_x(swind, sprite->toolspace [2]),
+                      tools_pixel_to_point_y(swind, sprite->toolspace [3]));
+          }
+
+          sprite->toolspace [0] = 0;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+
+          Set_Marked_Extent (sprite);
+          sprwindow_swap_output_to_screen ();
+
+          psprite_recalculate_offsets (sprite->file);
+          sprwindow_redisplay (sprite, &Marked_Extent);
+        }
+        break;
+      }
+  }
+}
+
+/********************************
+ * EORed rectangle plotter  *
+ ********************************/
+
+static void rectangle_drawEOR(main_sprite_window *swind, int *points, int x0, int y0)
+{
+  os_swi2 (OS_SetColour, 3, -1);
+#if 0
+  /*replaces the following, avoiding need to check full-palette bit*/
+  bbc_gcol (3, 127);
+  bbc_tint (2, 3); /*10 Sept 1991*/
+#endif
+
+
+
+  if (points[0] == points[2] || points[1] == points[3])
+  {
+    bbc_move (x0 + tools_pixel_to_extent_centre_x(swind, points [0]),
+              y0 + tools_pixel_to_extent_centre_y(swind, points [1]));
+    bbc_drawby (tools_pixel_to_extent_x(swind, points [2] - points [0]),
+                tools_pixel_to_extent_y(swind, points [3] - points [1]));
+  }
+  else
+    bbc_rectangle (x0 + tools_pixel_to_extent_centre_x(swind, points [0]),
+                   y0 + tools_pixel_to_extent_centre_y(swind, points [1]),
+                   tools_pixel_to_extent_x(swind, points [2] - points [0]),
+                   tools_pixel_to_extent_y(swind, points [3] - points [1]));
+
+}
+
+static void rectangleEOR (main_sprite *sprite, int coord)
+
+{ main_sprite_window *swind;
+
+  ftracef1 ("rectangleEOR rect at toolspace [%d])\n", coord);
+  for (swind = sprite->windows; swind != NULL; swind = swind->link)
+  { int more, x0, y0;
+    wimp_redrawstr rds;
+
+    sprite_update_window(swind,&x0,&y0,&rds,&more);
+    while (more)
+    {
+      rectangle_drawEOR(swind,&sprite->toolspace [coord], x0, y0);
+      wimpt_noerr (wimp_get_rectangle (&rds, &more));
+    }
+  }
+}
+
+/***********************************************************
+ * Null events: if pointer is over a window on the sprite, *
+ *    then eor new pgram.                                  *
+ ***********************************************************/
+
+static void rectangleoutlinepaint_null (main_window *window,
+                                       wimp_mousestr *mpos)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int coord, x, y;
+
+  ftracef0 ("rectangleoutlinepaint_null\n");
+  if ((mpos->bbits & 1) == 0)     /* has adjust been released? */
+  sprite->toolspace [0] = sprite->toolspace [0] & 0xFF;
+                                 /*  then clear to just state */
+  ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+      sprite, sprite->toolspace [0]);
+
+ if (sprite->toolspace [0] < 0)
+      coord = 2;
+ else coord = 4;
+
+ tools_mouse_to_pixel (window, mpos, &x, &y);
+
+ if (x != sprite->toolspace [coord] || y != sprite->toolspace [coord + 1])
+ { rectangleEOR (sprite, 2);       /* unplot it */
+
+  sprite->toolspace [coord] = x;
+  sprite->toolspace [coord  + 1] = y;
+
+  rectangleEOR (sprite, 2);       /* replot it at new size */
+ }
+}
+
+/****************************************************************************
+ * Redraw tool: most of EORing routine, rehashed to just do current window  *
+ ****************************************************************************/
+
+static void rectangleoutlinepaint_redraw (main_window *window,
+    int x0, int y0)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+
+  ftracef0 ("rectangleoutlinepaint_redraw\n");
+  ftracef3 ("sprite is %d toolspace [0] is %d needsnull is %d\n", sprite, sprite->toolspace[0], sprite->needsnull);
+  if (sprite->needsnull)
+    rectangle_drawEOR(&window->data->sprite,&sprite->toolspace [2], x0, y0);
+}
+
+/**************
+ * Stop tool  *
+ **************/
+
+static void rectangleoutlinepaint_stop (main_sprite *sprite)
+
+{ ftracef0 ("rectangleoutlinepaint_stop\n");
+  if (sprite->needsnull)
+  { rectangleEOR (sprite, 2);   /* unplot outline */
+    sprite->toolspace [0] = 0; /* and restart state */
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+        sprite, sprite->toolspace [0]);
+    sprwindow_release_idle_events (sprite);
+  }
+}
+
+static void rectangleoutlinepaint_click (main_window *window,
+    wimp_mousestr *mpos)
+
+{ ftracef0 ("rectangleoutlinepaint_click\n");
+  if (mpos->bbits & (wimp_BRIGHT | wimp_BLEFT)) /* ignore drags */
+  { main_sprite *sprite = window->data->sprite.sprite;
+    int x, y;
+    tools_mouse_to_pixel (window, mpos, &x, &y);
+
+    if (mpos->bbits & 1)   /* adjust: select a point and move it */
+    { int point = 0, bdist = INT_MAX, i;
+
+      for (i = 1; i <= (sprite->toolspace [0] & 0xFF); i++)
+      { /* adjust pressed: adjust point closest to mouse */
+        int dx = sprite->toolspace [i*2] - x;
+        int dy = sprite->toolspace [i*2 + 1] - y;
+
+        if (dx*dx + dy*dy < bdist)  bdist = dx*dx + dy*dy, point = i - 1;
+      }
+
+      sprite->toolspace [0] = sprite->toolspace [0] & ~0x00FF00 |
+          point << 16 | 0x80000000;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+    }
+    else
+      switch (sprite->toolspace [0] & 0xFF /*low byte only. JRC 6 July 1991*/)
+      { case 0:
+          sprwindow_claim_idle_events (window);    /* start tracking */
+          sprite->toolspace [4] = sprite->toolspace [2] = x;
+          sprite->toolspace [5] = sprite->toolspace [3] = y;
+
+          sprite->toolspace [0] = 1;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+          rectangleEOR (sprite, 2);
+        break;
+
+        case 1:
+        { main_sprite_window *swind=&window->data->sprite;
+          main_colour gcol = sprite->gcol;
+
+          sprwindow_release_idle_events (sprite);
+          rectangleEOR (sprite, 2);         /* unplot old */
+
+          BOOL write_image = gcol.alpha || (psprite_transparency_type(sprite) == transparency_type_alphachannel);
+          if (write_image)
+          { sprwindow_swap_output_to_sprite (sprite);
+            colours_set_sprite_gcol (gcol, sprite, 0);
+
+            bbc_rectangle (tools_pixel_to_point_x(swind, sprite->toolspace [2]),
+                           tools_pixel_to_point_y(swind, sprite->toolspace [3]),
+                           tools_pixel_to_point_x(swind, sprite->toolspace [4] - sprite->toolspace [2]),
+                           tools_pixel_to_point_y(swind, sprite->toolspace [5] - sprite->toolspace [3]));
+          }
+
+          if (sprwindow_swap_output_to_mask (sprite, write_image))
+          { colours_set_gcol (gcol.alpha, 0, 0);
+
+            bbc_rectangle (tools_pixel_to_point_x(swind, sprite->toolspace [2]),
+                           tools_pixel_to_point_y(swind, sprite->toolspace [3]),
+                           tools_pixel_to_point_x(swind, sprite->toolspace [4] - sprite->toolspace [2]),
+                           tools_pixel_to_point_y(swind, sprite->toolspace [5] - sprite->toolspace [3]));
+          }
+
+          sprite->toolspace [0] = 0;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+
+          Set_Marked_Extent (sprite);
+          sprwindow_swap_output_to_screen ();
+
+          psprite_recalculate_offsets (sprite->file);
+          sprwindow_redisplay (sprite, &Marked_Extent);
+        }
+        break;
+      }
+  }
+}
+
+/********************
+ * Flood fill tool  *
+ ********************/
+
+static volatile sig_atomic_t Escape_Pressed;
+
+static void Escape_Handler (int type)
+
+{ ftracef0 ("Escape_Handler\n");
+  type = type; /*for Norcroft*/
+
+  signal (SIGINT, &Escape_Handler);
+  Escape_Pressed = TRUE;
+}
+
+/* Version with improved transparent handling */
+static void floodfillpaint_click (main_window *window,
+    wimp_mousestr *mpos)
+
+{ ftracef0 ("floodfillpaint_click\n");
+  if (mpos->bbits & (wimp_BRIGHT | wimp_BLEFT)) /* ignore drags */
+  { main_sprite *sprite = window->data->sprite.sprite;
+    int x, y, nc = colours_count (sprite);
+    main_colour gcol = mpos->bbits & 4? sprite->gcol: sprite->gcol2;
+    BOOL to_transparent = !gcol.alpha && psprite_hasmask(sprite), from_transparent;
+    sprite_area *sarea = sprite->file->spritearea;
+    sprite_id sid;
+    sprite_colour col;
+    sprite_maskstate mask;
+
+    ftracef4 ("floodfillpaint_click: w 0x%X, mpos {(%d, %d), bbits 0x%X}\n",
+        window, mpos->x, mpos->y, mpos->bbits);
+
+    ftracef2 ("Flood Filling at (%d, %d)\n", mpos->x, mpos->y);
+
+    sid.tag    = sprite_id_addr;
+    sid.s.addr = psprite_address (sprite);
+
+    /* Find pixel location in sprite */
+    tools_mouse_to_pixel (window, mpos, &x,&y);
+
+    /* Read colour and mask from it */
+    ftracef0 ("Reading colour and mask from sprite\n");
+    if (main_read_pixel (sarea, &sid, x, y, &col) != NULL ||
+        sprite_readmask (sarea, &sid, x, y, &mask) != NULL)
+      return; /*Fix MED-04614. Do not report any error - it's probably
+          'Invalid row or column. J R C 31st Jan 1995*/
+    ftracef2 ("(gcol, tint) read from sprite (%d, %d)\n",
+        col.colour, col.tint);
+
+    from_transparent = mask == sprite_masktransparent;
+
+    /* Do nothing if changing from transparent to transparent */
+    if (to_transparent && from_transparent)
+      return;
+
+    sprwindow_swap_output_to_sprite (sprite);
+    colours_set_sprite_gcol (gcol, sprite, 0);
+
+    if (!tools_flood_local)
+    { /* IF flood global */
+
+      int x, y, r1, r2;
+      int sx = tools_pixel_to_point_x(&window->data->sprite, 1);
+      int sy = tools_pixel_to_point_y(&window->data->sprite, 1);
+      sprite_info sin;
+      sprite_maskstate sms =
+          from_transparent? sprite_masksolid: sprite_masktransparent;
+      void (*old_escape_handler) (int);
+      ftracef0 ("Global colour change\n");
+
+      wimpt_noerr (sprite_readsize (sarea, &sid, &sin));
+      visdelay_begin ();
+      /*Install a new escape handler*/
+      Escape_Pressed = FALSE;
+      old_escape_handler = signal (SIGINT, &Escape_Handler);
+      ftracef0 ("Enable Escape events\n");
+      wimpt_noerr (os_byte (OsByte_RW_EscapeKeyEffects, (r1 = 0, &r1), (r2 = 0, &r2)));
+
+      ftracef4 ("FloodFill: width %d, height %d, mask %d, mode %d\n",
+          sin.width, sin.height, sin.mask, sin.mode);
+      for (y = 0; y < sin.height; y++)
+      {
+        visdelay_percent (y*100/sin.height);
+
+        /*Check escape*/
+        if (Escape_Pressed)
+        { /*Report error*/
+          werr (FALSE, msgs_lookup ("PntHH"));
+          break;
+        }
+
+        for (x = 0; x < sin.width; x++)
+        { if (from_transparent)
+          { sprite_maskstate mask;
+
+            wimpt_noerr (sprite_readmask (sarea, &sid, x, y, &mask));
+
+            /* Don't change pixel if transparent */
+            if (mask != sprite_masktransparent)
+              continue;
+            else /* Not transparent: clear mask on it */
+              wimpt_noerr (sprite_writemask (sarea, &sid, x, y, &sms));
+          }
+          else /* Changing from a colour */
+          { sprite_colour sc;
+
+            wimpt_noerr (main_read_pixel (sarea, &sid, x, y, &sc));
+            if (!(sc.colour == col.colour && sc.tint == col.tint))
+              continue;
+            else if (to_transparent) /*Changing to transparent: set mask*/
+            { wimpt_noerr (sprite_writemask (sarea, &sid, x, y, &sms));
+              continue;
+            }
+          }
+          /* If we get here, the pixel is to be changed to a colour */
+          bbc_plot (bbc_Point | bbc_DrawAbsFore, x*sx, y*sy);
+        }
+      }
+      ftracef0 ("disable Escape events\n");
+      wimpt_noerr (os_byte (OsByte_RW_EscapeKeyEffects, (r1 = 1, &r1), (r2 = 0, &r2)));
+      /*Replace escape handler*/
+      (void) signal (SIGINT, old_escape_handler);
+      visdelay_end ();
+    }
+    else
+    { /* Flood local */
+      int x, y;
+
+      tools_mouse_to_pixel (window, mpos, &x, &y);
+      x=tools_pixel_to_point_x(&window->data->sprite, x);
+      y=tools_pixel_to_point_y(&window->data->sprite, y);
+      ftracef2 ("Point Coords: x %d, y %d\n", x, y);
+
+      if (!to_transparent)
+      { /* Set colours in local region */
+        BOOL mode8bpp = nc == 256 && !psprite_hastruecolpal (sprite);
+        sprite_colour scol = colours_pack_colour(sprite,gcol);
+
+        if (!from_transparent)
+        { /* IF not from_transparent */
+          ftracef4 ("sgc %d, gcol %d, st %d, tint %d\n",
+              scol.colour, col.colour, scol.tint, col.tint >> 6);
+
+          /*Check that the proposed action does have an effect.*/
+          if
+          (!( ( toolwindow_current_mode == 0? /*Set*/ scol.colour:
+                toolwindow_current_mode == 1? /*OR*/  scol.colour | col.colour:
+                toolwindow_current_mode == 2? /*AND*/ scol.colour & col.colour:
+                toolwindow_current_mode == 3? /*EOR*/ scol.colour ^ col.colour: 0
+              ) == col.colour &&
+              ( toolwindow_current_mode == 0? /*Set*/ scol.tint:
+                toolwindow_current_mode == 1? /*OR*/  scol.tint | col.tint >> 6:
+                toolwindow_current_mode == 2? /*AND*/ scol.tint & col.tint >> 6:
+                toolwindow_current_mode == 3? /*EOR*/ scol.tint ^ col.tint >> 6: 0
+              ) == col.tint >> 6
+          ) )
+          { /*Set the background colour to the pixel selected.*/
+            if (nc != 256 || psprite_hastruecolpal (sprite))
+            { ftracef1 ("deep sprite - setting bg to %d\n", col.colour);
+              os_swi2 (OS_SetColour, 1 << 4, col.colour);
+            }
+            else
+            { bbc_gcol (0, 128 | col.colour);
+              bbc_tint (3, col.tint >> 6);
+            }
+
+            ftracef0 ("flooding to non-bg ...\n");
+            bbc_plot (bbc_FloodToBack | bbc_DrawAbsFore, x, y);
+            ftracef0 ("flooding to non-bg ... done\n");
+          }
+        }
+        else
+        { /* from_transparent */
+
+          /*The plan is:
+            (j) Plot the transparent parts of the mask onto the sprite in
+               the colour - this is invisible so far.
+            (ij) Local fill the mask with 1's in the area to be changed.
+               This exposes the colour just written to the sprite.
+          */
+          sprwindow_swap_output_to_screen (),
+          sprwindow_swap_output_to_mask (sprite, 0);
+
+          os_swi2 (OS_SetColour, 4 | 1 << 4, 0);
+          bbc_clg (); /*invert the mask*/
+
+          sprwindow_swap_output_to_screen (),
+          sprwindow_swap_output_to_sprite (sprite);
+          if (mode8bpp)
+            bbc_gcol (0, 128 | scol.colour), bbc_tint (3, scol.tint);
+          else
+            os_swi2 (OS_SetColour, 1 << 4, scol.colour);
+          sprite_put_mask_given (sarea, &sid, 0, 0);
+
+          sprwindow_swap_output_to_screen (),
+          sprwindow_swap_output_to_mask (sprite, 0);
+
+          os_swi2 (OS_SetColour, 4, 0);
+          bbc_plot (bbc_FloodToFore | bbc_DrawAbsFore, x, y);
+
+          os_swi2 (OS_SetColour, 4 | 1 << 4, 0);
+          bbc_clg (); /*invert back again*/
+        }
+      }
+      else
+      { /* local to_transparent */
+
+        /* Always trying to change to transparent so there are two cases:
+           changing from transparent - no action required, flooding nothing with nothing leaves nothing
+           changing to transparent - remember what the sprite currently looks like
+           and local flood fill the foreground using the OS flood fill routine (no point
+           reinventing the wheel).
+           Diff the resulting sprites, and for each changed pixel poke the mask with a
+           see through blob */
+
+        char tempname [NAME_LIMIT + 1], realname [NAME_LIMIT + 1], *msg = NULL;
+        sprite_info      sin;
+        psprite_info     sinfo;
+        sprite_id        sid, sid2;
+        sprite_colour    was, now;
+        sprite_maskstate sms = sprite_masktransparent;
+        BOOL             hourglass = FALSE, created_sprite = FALSE, seenachange=FALSE, seenthisline=FALSE;
+        os_error        *error;
+        main_colour      temp;
+
+        ftracef0 ("local fill sprite with transparent\n");
+        strcpy (realname, psprite_address (sprite)->name);
+
+        sid.tag    = sprite_id_name;
+        sid.s.name = realname;
+
+        wimpt_noerr (sprite_readsize (sarea, &sid, &sin)); /* Get dimensions */
+        psprite_read_full_info(sprite, &sinfo);            /* Get number of bytes of RAM reqd */
+
+        /*ensure room for copy*/
+        if (!menus_ensure_size (&sprite->file->spritearea, sinfo.size))
+        { msg = msgs_lookup ("PntEG");
+          goto finish;
+        }
+
+        Temporary_Name (sprite->file->spritearea, tempname);
+        if ((error = sprite_copy (sprite->file->spritearea, &sid, tempname))
+            != NULL)
+        { msg = error->errmess;
+          goto finish;
+        }
+
+        created_sprite = TRUE;
+        sid2.tag    = sprite_id_name;
+        sid2.s.name = tempname;
+
+        visdelay_begin ();
+        hourglass = TRUE;
+
+        /* Not really bothered what colour is locally filled with, so long as it's different
+           to the one under the mouse */
+        temp = colours_unpack_colour(sprite,col);
+        temp.colour ^= 1;
+        colours_set_sprite_gcol (temp, sprite, 0);
+
+        /* Set the bg colour for the OS to flood up to */
+        if (nc != 256 || psprite_hastruecolpal (sprite))
+        { ftracef1 ("deep sprite - setting bg to %d\n", col.colour);
+          os_swi2 (OS_SetColour, 1 << 4, col.colour);
+        }
+        else
+        { bbc_gcol (0, 128 | col.colour);
+          bbc_tint (3, col.tint >> 6);
+        }
+
+        ftracef0 ("flooding to non-bg ...\n");
+        bbc_plot (bbc_FloodToBack | bbc_DrawAbsFore, x, y);
+        ftracef0 ("flooding to non-bg ... done\n");
+
+        for (y = 0; (y < sin.height) && !(!seenthisline && seenachange); y++)
+            {
+            seenthisline = FALSE;
+            visdelay_percent (y*100/sin.height);
+            for (x = 0; x < sin.width; x++)
+                {
+                /* Diff */
+                wimpt_noerr (main_read_pixel (sarea, &sid, x, y, &was));
+                wimpt_noerr (main_read_pixel (sarea, &sid2, x, y, &now));
+                if ((was.colour != now.colour) || (was.tint != now.tint))
+                   {
+                   seenthisline = seenachange = TRUE; /* Prevent a quick exit */
+                   wimpt_noerr (sprite_writepixel (sarea, &sid, x, y, &col));
+                   wimpt_noerr (sprite_writemask (sarea, &sid, x, y, &sms));
+                   }
+                }
+            }
+
+      finish:
+        if (hourglass) visdelay_end ();
+        if (created_sprite) sprite_delete (sprite->file->spritearea, &sid2);
+        menus_ensure_size (&sprite->file->spritearea, 0);
+        if (msg != NULL)
+           {
+           sprwindow_swap_output_to_screen ();
+           werr (FALSE, msg);
+           }
+      }
+    }
+
+    sprwindow_swap_output_to_screen ();
+    psprite_recalculate_offsets (sprite->file);
+
+    ftracef0 ("redisplaying after fill\n");
+    sprwindow_redisplay (sprite, NULL);
+  }
+}
+
+/*****************************************
+ * Helpers to make temporary sprite copy *
+ * for use by scissor export and wrap    *
+ * option of Move Whole Sprite           *
+ *****************************************/
+
+static void make_temporary_sprite (main_window *window, wimp_box region,
+    main_sprite *tempspriteptr, main_file *fileptr, char *spritename,
+    BOOL forcemask, BOOL forcepalette, BOOL maketransparent)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int width, height, smode, dx, x0, log2bpp;
+  BOOL needmask;
+  int whichpal;
+
+  ftracef0 ("make_temporary_sprite\n");
+
+  smode = psprite_address (sprite)->mode;
+  log2bpp = bbc_modevar (smode, bbc_Log2BPC);
+  dx = bbc_modevar (smode, bbc_XEigFactor);
+  x0 = region.x0 &
+      ~(((32 >> log2bpp) << dx) - 1);
+                        /* round down to word boundary */
+  width = ((region.x1 - x0) >> dx) + 2;
+  /* For height, we need to convert from OS units back to pixels */
+  height = (region.y1 - region.y0) / sprite->mode.scale_ymul;
+  if (height < 0)
+        height = -height;
+  height += 2;
+  needmask = (forcemask || psprite_hasmask (sprite)) &&
+             !psprite_hasalphachannel (sprite);
+  whichpal = !psprite_haspal (sprite)? 0:
+             !psprite_hastruecolpal (sprite)? 1: 2;
+  /* Don't try to force a palette if > 256 colours */
+  if (log2bpp > 3) forcepalette = FALSE;
+  if (forcepalette && whichpal == 0)
+  { /* Force a "standard" palette */
+    whichpal = 1/*1 Actually full 256 entry: 2*/;
+  }
+
+  ftracef1 ("need %d bytes\n", psprite_size (width, height, smode,
+      psprite_hasmask (sprite), whichpal));
+  flex_alloc ((flex_ptr) &fileptr->spritearea,
+      psprite_size (width, height, smode, needmask,
+      whichpal) + sizeof (sprite_area) + 256);
+
+  if (fileptr->spritearea != 0)
+  { sprite_id sid;
+    os_error *error;
+
+    sprite_area_initialise (fileptr->spritearea,
+        flex_size ((flex_ptr) &fileptr->spritearea));
+
+    sprwindow_swap_output_to_sprite (sprite);
+    error = sprite_get_given (fileptr->spritearea, spritename,
+        psprite_haspal (sprite),
+        region.x0,
+        region.y0,
+        region.x1,
+        region.y1);
+    sprwindow_swap_output_to_screen ();
+    wimpt_noerr (error);
+    sid.tag = sprite_id_name;
+    sid.s.name = spritename;
+    wimpt_noerr (sprite_select_rp (fileptr->spritearea, &sid, &sid.s.addr));
+
+    /*fake main_sprite*/
+    tempspriteptr->file = fileptr;
+    tempspriteptr->offset = (int) sid.s.addr - (int) fileptr->spritearea;
+    ftracef2 ("addr: %x offset: %d\n", sid.s.addr, tempspriteptr->offset);
+    sid.tag = sprite_id_addr;
+
+    if (needmask)
+    { sprite_id ssid;
+
+      ftracef0 ("Creating mask\n");
+
+      wimpt_noerr (sprite_create_mask (fileptr->spritearea, &sid));
+      ssid.tag = sprite_id_addr;
+      ssid.s.addr = psprite_address (sprite);
+
+      sprwindow_swap_output_to_screen ();
+      sprwindow_swap_output_to_mask (tempspriteptr, 0);
+      os_swi2 (OS_SetColour, 1 << 4, 0);  /* set empty gcol */
+      bbc_clg ();                         /* clear it all out */
+      os_swi2 (OS_SetColour, 1 << 4, -1); /* set solid gcol */
+
+      if (!maketransparent && psprite_hasmask (sprite))
+      { error = sprite_put_mask_scaled (sprite->file->spritearea, &ssid,
+                                        -region.x0, -region.y0, 0);
+      }
+      sprwindow_swap_output_to_screen ();
+      wimpt_noerr (error);
+    }
+
+    if (psprite_haspal (sprite))
+    { int *s, *d, *e;
+      sprite_header *saddr = psprite_address (sprite);
+
+      s = &saddr->mode + 1;
+      e = (int *) ((char *)saddr + saddr->image);
+      d = &psprite_address (tempspriteptr)->mode + 1;
+      for (; s < e; *d++ = *s++);
+    }
+    else if (forcepalette)
+    { int *d = &psprite_address (tempspriteptr)->mode + 1;
+      const int *palette = psprite_std_palettes[sprite->file->use_current_palette? 0: 1][log2bpp];
+      int i, entries = ENTRIES(log2bpp);
+      for (i = 0; i < entries; i++)
+      { *d = *(d + 1) = palette [i];
+        d += 2;
+      }
+      /* We have to update the pointers */
+      sprite_header *header = psprite_address (tempspriteptr);
+      int old_size = MIN (header->image, header->mask) - sizeof (sprite_header);
+      int new_size = 2 * sizeof (int) * entries;
+      int diff = new_size - old_size;
+      header->image     += diff;
+      header->mask      += diff;
+      header->next      += diff;
+      fileptr->spritearea->freeoff += diff;
+    }
+    ftracef2 ("Source sprite xeig: %d yeig: %d ", dx, bbc_modevar (smode,
+        bbc_YEigFactor));
+    smode = psprite_address (sprite)->mode;
+    ftracef2 ("Dest sprite xeig: %d yeig: %d\n", bbc_modevar (smode,
+        bbc_XEigFactor), bbc_modevar (smode, bbc_YEigFactor));
+  }
+  else
+    main_NO_ROOM ("Temporary sprite buffer");
+
+  return;
+}
+
+static void copy_to_temporary_sprite (main_window *window, wimp_box region,
+    main_sprite *tempspriteptr, main_file *fileptr, char *spritename)
+
+{ ftracef0 ("copy_to_temporary_sprite\n");
+  make_temporary_sprite (window, region, tempspriteptr, fileptr,
+      spritename, FALSE, FALSE, FALSE);
+}
+
+static void delete_temporary_sprite (main_sprite *tempspriteptr, main_file *fileptr)
+{ ftracef0 ("delete_temporary_sprite\n");
+  sprite_id sid;
+  if (tempspriteptr == NULL || fileptr == NULL || fileptr->spritearea == NULL)
+  { ftracef2 ("Cannot delete. Null pointer. tempspriteptr: %x fileptr: %x\n",
+        tempspriteptr, fileptr);
+    return;
+  }
+  sid.s.addr = psprite_address (tempspriteptr);
+  sprite_delete (fileptr->spritearea, &sid);
+  flex_free ((flex_ptr) &fileptr->spritearea);
+}
+
+/* For paletted modes ensure there is at least a default palette present *
+ * before switching output to a sprite, otherwise the translucency       *
+ * doesn't blend in the right colours. Also required for outline font    *
+ * colour selection so ColourTrans can find the nearest painting colour. */
+static BOOL ensure_sprite_has_palette (main_sprite *sprite, int *oldoffset)
+
+{ int lb_bpp;
+  sprite_header *hdr = psprite_address (sprite);
+  static struct
+  { sprite_header hdr;
+    int palette [16 * 2];
+  } clone;
+
+  lb_bpp = bbc_modevar (hdr->mode, bbc_Log2BPP);
+  if (lb_bpp <= 3 && !psprite_haspal (sprite))
+  { int *std_pal, *e, i, ne, diffoffset;
+    /* Copy over the sprite header, adjusting the image/mask offsets */
+    clone.hdr = *hdr;
+    diffoffset = (int)hdr - (int)&clone;
+    clone.hdr.image += diffoffset; /* These now point at the sprite */
+    clone.hdr.mask  += diffoffset; /* and mask data held elsewhere. */
+    /* Copy in a standard palette */
+    ne = ENTRIES(lb_bpp);
+    e = (int *)&clone.palette;
+    std_pal = psprite_std_palettes [sprite->file->use_current_palette? 0: 1][lb_bpp];
+    for (i = 0; i < ne; i++)
+    { e[0] = e[1] = std_pal[i];
+      e += 2;
+    }
+    /* Now adjust psprite's view to see the cloned sprite block */
+    *oldoffset = sprite->offset;
+    sprite->offset = (int)&clone - (int)sprite->file->spritearea;
+    return TRUE; /* Cloned */
+  }
+  return FALSE; /* None added */
+}
+
+/* This changes the RGB colour of transparent pixels to the specified    *
+ * value. It's a workaround for the fact that translucent painting using *
+ * BlendTable / InverseTable only blends with RGB values of pixels       *
+ * regardless of whether they're transparent in the mask, which could    *
+ * make transparent regions appear the wrong colour when painting over   *
+ * them at reduced opacity. The same thing can happen with the way the   *
+ * OS currently blends alpha mask / alpha channel sprites over           *
+ * transparent pixels.                                                   */
+static void set_transparent_RGB (main_sprite *sprite, sprite_colour *scol)
+
+{ sprite_id sid;
+  sid.tag    = sprite_id_addr;
+  sid.s.addr = psprite_address (sprite);
+  sprite_area **sarea = &sprite->file->spritearea;
+  int nc = colours_count (sprite);
+  BOOL mode8bpp = nc == 256 && !psprite_hastruecolpal (sprite);
+  BOOL convertedalpha = FALSE;
+  psprite_info sinfo;
+  char *msg = NULL;
+  os_error *error = NULL;
+  ftracef0 ("set_transparent_RGB\n");
+  ftracef4 ("sarea: %x sprite: %x image: %x mask: %x\n", *sarea, sid.s.addr, psprite_address (sprite)->image, psprite_address (sprite)->mask);
+
+  visdelay_begin ();
+  if (psprite_hasalphachannel (sprite))
+  { int flags = 0x80000000;
+    int smode;
+    int size_needed, space_needed = 0;
+    psprite_read_full_info (sprite, &sinfo);
+    smode = sinfo.mode | 0x80000000;
+    ftracef4 ("Size with alpha chan: %d size with alpha mask: %d width: %d height: %d\n", sinfo.size, psprite_size (sinfo.width, sinfo.height,
+        smode, 1, !sinfo.palette? 0: !sinfo.truepalette? 1: 2), sinfo.width, sinfo.height);
+    size_needed = psprite_size (sinfo.width, sinfo.height, smode, 1, !sinfo.palette? 0: !sinfo.truepalette? 1: 2) - sinfo.size;
+    if (!menus_ensure_size (&sprite->file->spritearea, size_needed))
+    { msg = msgs_lookup ("PntEG");
+      goto finish;
+    }
+    /* Flex may have moved the sprite */
+    psprite_recalculate_offsets (sprite->file);
+    sid.s.addr = psprite_address (sprite);
+    /* Convert temporarily to an alpha mask */
+    error = os_swix4r (OS_SpriteOp, SpriteReason_CreateRemoveAlpha | 0x200, *sarea, (int)psprite_address (sprite), flags,
+                                    NULL, NULL, NULL, &space_needed);
+    if (error != NULL)
+    { /* If r3 > 0 it will give amount of extra space needed in area */
+      if (space_needed > 0)
+        ftracef1 ("More space needed for alpha mask: %d\n", space_needed);
+      msg = error->errmess;
+      goto finish;
+    }
+    ftracef0 ("Alpha conversion succeeded.\n");
+    convertedalpha = TRUE;
+  }
+  sprwindow_swap_output_to_screen (),
+  sprwindow_swap_output_to_mask (sprite, 0);
+
+  os_swi2 (OS_SetColour, 4 | 1 << 4, 0);
+  bbc_clg (); /*invert the mask*/
+
+  sprwindow_swap_output_to_screen (),
+  sprwindow_swap_output_to_sprite (sprite);
+  if (mode8bpp)
+    bbc_gcol (0, 128 | scol->colour), bbc_tint (3, scol->tint);
+  else
+    os_swi2 (OS_SetColour, 1 << 4, scol->colour);
+  sprite_put_mask_scaled (*sarea, &sid, 0, 0, 0);
+
+  sprwindow_swap_output_to_screen (),
+  sprwindow_swap_output_to_mask (sprite, 0);
+
+  os_swi2 (OS_SetColour, 4 | 1 << 4, 0);
+  bbc_clg (); /*invert back again*/
+  sprwindow_swap_output_to_screen ();
+
+  if (convertedalpha)
+  { int flags = 0xC0000080;
+    /* Convert it back to an alpha channel */
+    int space_needed = 0;
+    error = os_swix4r (OS_SpriteOp, SpriteReason_CreateRemoveAlpha | 0x200, (int)*sarea, (int)psprite_address (sprite), flags,
+                                    NULL, NULL, NULL, &space_needed);
+    if (error != NULL)
+    { /* If r3 > 0 it will give amount of extra space needed in area */
+      if (space_needed > 0)
+        ftracef1 ("More space needed for alpha mask: %d\n", space_needed);
+      msg = error->errmess;
+      goto finish;
+    }
+    /* Now shrink sprite area back */
+    menus_ensure_size (&sprite->file->spritearea, 0);
+    /* Flex may have moved the sprite */
+    psprite_recalculate_offsets (sprite->file);
+    ftracef0 ("Alpha channel conversion succeeded.\n");
+  }
+finish:
+  visdelay_end ();
+  if (msg != NULL) werr (FALSE, msg);
+}
+
+/********************
+ * Scissor tool     *
+ ********************/
+
+static void order_rect (int *c)
+
+{ ftracef0 ("order_rect\n");
+  if (c [2] < c [0]) {int t = c [0]; c [0]  = c [2]; c [2]  = t;}
+  if (c [3] < c [1]) {int t = c [1]; c [1]  = c [3]; c [3]  = t;}
+}
+
+/* Bound_Pointer() and Unbound_Pointer() were taken from Draw, to constrain
+ * the mouse pointer to the window bounds during auto scrolling */
+static void Bound_Pointer (int x0, int y0, int x1, int y1)
+
+{ int ox, oy;
+  char buf [20];
+
+  ftracef0 ("Tools: Bound_Pointer\n");
+
+  ox = bbc_vduvar (bbc_OrgX);
+  oy = bbc_vduvar (bbc_OrgY);
+
+  x0 -= ox, y0 -= oy;
+  x1 -= ox, y1 -= oy;
+
+  buf [0] = 1;
+
+  buf [1] = x0;
+  buf [2] = x0 >> 8;
+  buf [3] = y0;
+  buf [4] = y0 >> 8;
+
+  buf [5] = x1;
+  buf [6] = x1 >> 8;
+  buf [7] = y1;
+  buf [8] = y1 >> 8;
+
+  os_swi2 (OS_Word, 21, (int) buf);
+}
+
+static void Unbound_Pointer (void)
+
+{ ftracef0 ("Tools: Unbound_Pointer\n");
+  Bound_Pointer
+   (  0,
+      0,
+      bbc_vduvar (bbc_XWindLimit) << bbc_vduvar (bbc_XEigFactor),
+      bbc_vduvar (bbc_YWindLimit) << bbc_vduvar (bbc_YEigFactor)
+   );
+}
+
+static void scissorpaint_null (main_window *window, wimp_mousestr *mpos)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int state, x, y, coord = 3;
+  int overflowx, overflowy, scrollx, scrolly;
+
+  ftracef0 ("scissorpaint_null\n");
+  if (sprite->toolspace [0] < 0) return;    /* we're inside an export */
+
+  tools_mouse_to_pixel_overflow (window, mpos, &x, &y, &overflowx, &overflowy);
+
+  /* Auto scroll if the rectangle was dragged to the edge of the window */
+  if ((sprite->toolspace [0] == 1 || sprite->toolspace [0] == 3) &&
+      (mpos->bbits & wimp_BLEFT))
+  { wimp_wstate state;
+
+    /* Bound the mouse to this window while dragging / auto-scrolling, as Draw does */
+    wimpt_noerr (wimp_get_wind_state (window->handle,
+        &state));
+    Bound_Pointer (state.o.box.x0, state.o.box.y0,
+        state.o.box.x1, state.o.box.y1);
+
+    scrollx = scrolly = 0;
+    if (overflowx != 0)
+      scrollx = (overflowx>0)?20:-20;
+    if (overflowy != 0)
+      scrolly = (overflowy>0)?20:-20;
+
+    if (scrollx || scrolly)
+    { /* Auto-scroll the window at a fixed speed */
+      sprwindow_scroll (window, scrollx, scrolly);
+      tools_mouse_to_pixel (window, mpos, &x, &y);
+    }
+    else
+    { /* Reset the auto-scroll timer */
+      sprwindow_stop_scroll ();
+    }
+  }
+  else
+  { /* Unbound the mouse */
+    Unbound_Pointer ();
+    /* Reset the auto-scroll timer */
+    sprwindow_stop_scroll ();
+  }
+
+  if ((state = sprite->toolspace [0]) == 1 && (mpos->bbits & 4) == 0)
+  { /* button gone up on initial rect entry: step state */
+    rectangleEOR (sprite, 1);
+    sprite->toolspace [3] = sprite->toolspace [5] = x;
+    sprite->toolspace [4] = sprite->toolspace [6] = y;
+    sprite->toolspace [7] = sprite->toolspace [1];
+    sprite->toolspace [8] = sprite->toolspace [2];
+    state = sprite->toolspace [0] = 2;
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+        sprite, sprite->toolspace [0]);
+    rectangleEOR (sprite, 1);
+
+    if (tools_exporting_sprite)
+    { main_sprite tempsprite;
+      main_file file;
+      wimp_box region;
+
+      order_rect (&sprite->toolspace [1]);
+      sprite->toolspace [0] = -1;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+
+      region.x0 = tools_pixel_to_point_x(&window->data->sprite, sprite->toolspace [1]);
+      region.y0 = tools_pixel_to_point_y(&window->data->sprite, sprite->toolspace [2]);
+      region.x1 = tools_pixel_to_point_x(&window->data->sprite, sprite->toolspace [3]);
+      region.y1 = tools_pixel_to_point_y(&window->data->sprite, sprite->toolspace [4]);
+
+      copy_to_temporary_sprite (window, region, &tempsprite, &file, "Export");
+
+      if (file.spritearea != 0)
+      { sprite_id sid;
+        sid.tag = sprite_id_name;
+        sid.s.name = "Export";
+        ftracef3 ("export sprite @ %x (%x, size %d)\n",
+           sid.s.addr, psprite_address (sprite),
+           ((sprite_header *) sid.s.addr)->next);
+        menus_save_sprite (&tempsprite); /* save via xfersend */
+        delete_temporary_sprite (&tempsprite, &file);
+      }
+
+      sprwindow_release_idle_events (sprite);
+      rectangleEOR (sprite, 1);
+      sprite->toolspace [0] = 0;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+      return;
+    }
+
+    rectangleEOR (sprite, 5);
+  }
+
+  if (state >= 2) coord = 5;
+
+  if (x != sprite->toolspace [coord] || y != sprite->toolspace [coord + 1])
+  {
+    if (state == 3)
+    {
+      if (sprite->toolspace [5]==x-sprite->toolspace [1] &&
+          sprite->toolspace [6]==y-sprite->toolspace [2]) return;
+    }
+
+    if (state != 3) rectangleEOR (sprite, 1);
+                                    /* unplot source clip outline */
+
+    if (state >= 2)
+    { rectangleEOR (sprite, 5);       /* unplot dest clip outline */
+      if (state == 3)
+      { sprite->toolspace [5] = x-sprite->toolspace [1];
+        sprite->toolspace [6] = y-sprite->toolspace [2];
+        sprite->toolspace [7] = sprite->toolspace [5] + sprite->toolspace [3];
+        sprite->toolspace [8] = sprite->toolspace [6] + sprite->toolspace [4];
+      }
+      else
+      { sprite->toolspace [7] = x + sprite->toolspace [7] -
+            sprite->toolspace [5];
+        sprite->toolspace [8] = y + sprite->toolspace [8] -
+            sprite->toolspace [6];
+        sprite->toolspace [5] = x;
+        sprite->toolspace [6] = y;
+      }
+      rectangleEOR (sprite, 5);       /* replot dest clip outline */
+    }
+    else
+    { sprite->toolspace [coord] = x;
+      sprite->toolspace [coord  + 1] = y;
+    }
+
+    if (state != 3) rectangleEOR (sprite, 1);
+                               /* replot source clip outline */
+  }
+}
+
+/***************************************************************************
+ * Redraw tool: most of EORing routine, rehashed to just do current window *
+ **************************************************************************/
+
+static void scissorpaint_redraw (main_window *window, int x0, int y0)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+
+  ftracef0 ("scissorpaint_redraw\n");
+  if (sprite->needsnull)
+  {
+    if (sprite->toolspace [0] != 3)
+      rectangle_drawEOR(&window->data->sprite,&sprite->toolspace [1], x0, y0);
+
+    if (sprite->toolspace [0] >= 2)
+      rectangle_drawEOR(&window->data->sprite,&sprite->toolspace [5], x0, y0);
+  }
+}
+
+/**************
+ * Stop tool  *
+ **************/
+
+static void scissorpaint_stop (main_sprite *sprite)
+
+{ ftracef0 ("scissorpaint_stop\n");
+  if (sprite->needsnull)
+  { if (sprite->toolspace [0] != 3) rectangleEOR (sprite, 1);
+      /* unplot outline */
+    if (sprite->toolspace [0] >= 2) rectangleEOR (sprite, 5);
+    sprite->toolspace [0] = 0; /* and restart state */
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+        sprite, sprite->toolspace [0]);
+    sprwindow_release_idle_events (sprite);
+  }
+  /* Unbound the mouse */
+  Unbound_Pointer ();
+  /* Reset the auto-scroll timer */
+  sprwindow_stop_scroll ();
+}
+
+static void copymovepaint_click (main_window *window, wimp_mousestr *mpos,
+    int move)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+  int x, y;
+
+  tools_mouse_to_pixel (window, mpos, &x, &y);
+
+  ftracef0 ("copymovepaint_click\n");
+  if ((mpos->bbits & 1) == 0) /*ignore adjust: done in nulls*/
+    switch (sprite->toolspace [0] & 0xFF /*low byte only. JRC 6 July 1991*/)
+    { case 0:
+        if ((mpos->bbits & wimp_BDRAGLEFT) != 0) /*have to drag to start*/
+        { sprwindow_claim_idle_events (window);    /* start tracking */
+          sprite->toolspace [3] = sprite->toolspace [1] = x;
+          sprite->toolspace [4] = sprite->toolspace [2] = y;
+          sprite->toolspace [0] = 1;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+          rectangleEOR (sprite, 1);
+        }
+      break;
+
+      case 2:
+        rectangleEOR (sprite, 1);         /* unplot old */
+      case 3:
+      { int code = move? bbc_BMoveRectAbs: bbc_BCopyRectAbs;
+        int x, y;
+        main_sprite_window *swind=&window->data->sprite;
+        if (move) sprwindow_release_idle_events (sprite);
+        rectangleEOR (sprite, 5);
+
+        sprwindow_swap_output_to_sprite (sprite);
+        x = sprite->toolspace [5];
+        if (x>sprite->toolspace [7]) x = sprite->toolspace [7];
+        y = sprite->toolspace [6];
+        if (y>sprite->toolspace [8]) y = sprite->toolspace [8];
+
+        bbc_move (tools_pixel_to_point_x(swind, sprite->toolspace [1]),
+                  tools_pixel_to_point_y(swind, sprite->toolspace [2]));
+        bbc_move (tools_pixel_to_point_x(swind, sprite->toolspace [3]),
+                  tools_pixel_to_point_y(swind, sprite->toolspace [4]));
+        bbc_plot (bbc_Block + code, tools_pixel_to_point_x(swind, x),
+                                    tools_pixel_to_point_y(swind, y));
+
+        if (sprwindow_swap_output_to_mask (sprite, 1))
+        {
+          bbc_move (tools_pixel_to_point_x(swind, sprite->toolspace [1]),
+                    tools_pixel_to_point_y(swind, sprite->toolspace [2]));
+          bbc_move (tools_pixel_to_point_x(swind, sprite->toolspace [3]),
+                    tools_pixel_to_point_y(swind, sprite->toolspace [4]));
+          bbc_plot (bbc_Block + code, tools_pixel_to_point_x(swind, x),
+                                      tools_pixel_to_point_y(swind, y));
+        }
+
+        Set_Marked_Extent (sprite);
+        sprwindow_swap_output_to_screen ();
+
+        if (move)
+        { sprite->toolspace [0] = 0;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+        }
+        else
+        { rectangleEOR (sprite, 1);
+          rectangleEOR (sprite, 5);
+        }
+
+        psprite_recalculate_offsets (sprite->file);
+        sprwindow_redisplay (sprite, &Marked_Extent);
+      }
+    break;
+  }
+}
+
+
+static void camerapaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("camerapaint_click\n");
+
+  if (mpos->bbits & 1)
+  {
+    scissorpaint_stop(window->data->sprite.sprite);
+    return;
+  }
+
+  copymovepaint_click (window, mpos, 0);
+}
+
+static void scissorpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("scissorpaint_click\n");
+
+  if (mpos->bbits & 1)
+  {
+    scissorpaint_stop(window->data->sprite.sprite);
+    return;
+  }
+
+  copymovepaint_click (window, mpos, 1);
+}
+
+static void grabberpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+
+  ftracef0 ("grabberpaint_click\n");
+
+  if (mpos->bbits & 1)
+  {
+    scissorpaint_stop(window->data->sprite.sprite);
+    return;
+  }
+
+  if (sprite->toolspace [0] == 0)
+  { if (mpos->bbits & wimp_BDRAGLEFT)
+    { sprite_info sid;
+      int x, y;
+
+      tools_mouse_to_pixel (window, mpos, &x, &y);
+      sprwindow_claim_idle_events (window);
+      tools_get_sprite_info_pixels(sprite,&sid);
+      sprite->toolspace [1] = x;             /* start pos */
+      sprite->toolspace [2] = y;
+      sprite->toolspace [3] = sid.width-1;     /* box size */
+      sprite->toolspace [4] = sid.height-1;
+      sprite->toolspace [5] = 0;  /* curr rectangle */
+      sprite->toolspace [6] = 0;
+      sprite->toolspace [7] = sprite->toolspace [3] + sprite->toolspace [5];
+      sprite->toolspace [8] = sprite->toolspace [4] + sprite->toolspace [6];
+      sprite->toolspace [0] = 3;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+      rectangleEOR (sprite, 5);
+    }
+  }
+}
+
+static void grabberpaint_null (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("grabberpaint_null\n");
+  main_sprite tempsprite;
+  main_sprite *sprite = window->data->sprite.sprite;
+  main_file file;
+  os_error *err = NULL;
+  sprite_area *sarea = NULL;
+
+  if (tools_grabber_wrap && ((mpos->bbits & 4) == 0))
+  { wimp_box region;
+    region.x0 = 0;
+    region.y0 = 0;
+    region.x1 = tools_pixel_to_point_x (&window->data->sprite,
+        sprite->toolspace [3]);
+    region.y1 = tools_pixel_to_point_y (&window->data->sprite,
+        sprite->toolspace [4]);
+
+    copy_to_temporary_sprite (window, region, &tempsprite, &file, "Grabber");
+    sarea = file.spritearea;
+
+    if (sarea != NULL)
+    { sprite_id sid;
+      sid.tag = sprite_id_name;
+      sid.s.name = "Grabber";
+      ftracef3 ("grabber temp sprite @ %x (%x, size %d)\n",
+        sid.s.addr, psprite_address (sprite),
+        ((sprite_header *) sid.s.addr)->next);
+    }
+  }
+
+  scissorpaint_null (window, mpos);
+
+  if ((mpos->bbits & 4) == 0)           /* if button gone up do move */
+  { int dx = 0, dy = 0;
+
+    sprite->toolspace [1] = 0;
+    sprite->toolspace [2] = 0;
+    copymovepaint_click (window, mpos, ((tools_grabber_wrap)?3 : 2));
+
+    if (tools_grabber_wrap && sarea != NULL)
+    { int x0 = tools_pixel_to_point_x (&window->data->sprite,
+          sprite->toolspace [5]);
+      int y0 = tools_pixel_to_point_y (&window->data->sprite,
+          sprite->toolspace [6]);
+      /* We need x1 and y1 to be points just outside the centre sprite, so
+         add one pixel to each */
+      int x1 = tools_pixel_to_point_x (&window->data->sprite,
+          sprite->toolspace [7] + 1);
+      int y1 = tools_pixel_to_point_y (&window->data->sprite,
+          sprite->toolspace [8] + 1);
+      /* whereas the dimensions for bbc_rectanglefill() are one less */
+      int bbc_width = tools_pixel_to_point_x (&window->data->sprite,
+          sprite->toolspace [7]) - x0;
+      int bbc_height = tools_pixel_to_point_y (&window->data->sprite,
+          sprite->toolspace [8]) - y0;
+      int width = x1 - x0;
+      int height = y1 - y0;
+      dx = x0;
+      dy = y0;
+      sprite_id sid;
+      sid.tag    = sprite_id_addr;
+      sid.s.addr = psprite_address (&tempsprite);
+
+      /* Wrap the sprite */
+      sprwindow_swap_output_to_sprite (sprite);
+
+      if (dx < 0)
+      { /* Plot to the right */
+        err = sprite_put_given (sarea, &sid, 0, x1, y0);
+        if (err != NULL)
+          goto finish;
+
+        if (dy > 0)
+        { /* Plot on bottom right corner */
+          err = sprite_put_given (sarea, &sid, 0, x1, y0 - height);
+          if (err != NULL)
+            goto finish;
+        }
+        else if (dy < 0)
+        { /* Plot on top right corner */
+          err = sprite_put_given (sarea, &sid, 0, x1, y1);
+          if (err != NULL)
+            goto finish;
+        }
+      }
+      else if (dx > 0)
+      { /* Plot to the left */
+        err = sprite_put_given (sarea, &sid, 0, x0 - width, y0);
+        if (err != NULL)
+          goto finish;
+
+        if (dy > 0)
+        { /* Plot on bottom left corner */
+          err = sprite_put_given (sarea, &sid, 0, x0 - width, y0 - height);
+          if (err != NULL)
+            goto finish;
+        }
+        else if (dy < 0)
+        { /* Plot on top left corner */
+          err = sprite_put_given (sarea, &sid, 0, x0 - width, y1);
+          if (err != NULL)
+            goto finish;
+        }
+      }
+
+      if (dy > 0)
+      { /* Plot to the bottom */
+        err = sprite_put_given (sarea, &sid, 0, x0, y0 - height);
+        if (err != NULL)
+          goto finish;
+      }
+      else if (dy < 0)
+      { /* Plot to the top */
+        err = sprite_put_given (sarea, &sid, 0, x0, y1);
+        if (err != NULL)
+          goto finish;
+      }
+
+      Set_Marked_Extent (sprite);
+
+      /* Wrap the mask */
+      if (sprwindow_swap_output_to_mask (sprite, 1))
+      { os_swi2 (OS_SetColour, 0, 0); /* set transparent foreground */
+        os_swi2 (OS_SetColour, 1 << 4, -1); /* set solid background */
+
+        /* For each block we need to plot the mask into, we'll first fill a
+          rectangle in the foreground colour, to clear it to transparent */
+        if (dx < 0)
+        { /* Plot to the right */
+          bbc_rectanglefill (x1, y0, bbc_width, bbc_height);
+          err = sprite_put_mask_scaled (sarea, &sid, x1, y0, 0);
+          if (err != NULL)
+            goto finish;
+
+          if (dy > 0)
+          { /* Plot on bottom right corner */
+            bbc_rectanglefill (x1, y0 - height, bbc_width, bbc_height);
+            err = sprite_put_mask_scaled (sarea, &sid, x1, y0 - height, 0);
+            if (err != NULL)
+              goto finish;
+          }
+          else if (dy < 0)
+          { /* Plot on top right corner */
+            bbc_rectanglefill (x1, y1, bbc_width, bbc_height);
+            err = sprite_put_mask_scaled (sarea, &sid, x1, y1, 0);
+            if (err != NULL)
+              goto finish;
+          }
+        }
+        else if (dx > 0)
+        { /* Plot to the left */
+          bbc_rectanglefill (x0 - width, y0, bbc_width, bbc_height);
+          err = sprite_put_mask_scaled (sarea, &sid, x0 - width, y0, 0);
+          if (err != NULL)
+            goto finish;
+
+          if (dy > 0)
+          { /* Plot on bottom left corner */
+            bbc_rectanglefill (x0 - width, y0 - height, bbc_width, bbc_height);
+            err = sprite_put_mask_scaled (sarea, &sid, x0 - width, y0 - height, 0);
+            if (err != NULL)
+              goto finish;
+          }
+          else if (dy < 0)
+          { /* Plot on top left corner */
+            bbc_rectanglefill (x0 - width, y1, bbc_width, bbc_height);
+            err = sprite_put_mask_scaled (sarea, &sid, x0 - width, y1, 0);
+            if (err != NULL)
+              goto finish;
+          }
+        }
+
+        if (dy > 0)
+        { /* Plot to the bottom */
+          bbc_rectanglefill (x0, y0 - height, bbc_width, bbc_height);
+          err = sprite_put_mask_scaled (sarea, &sid, x0, y0 - height, 0);
+          if (err != NULL)
+            goto finish;
+        }
+        else if (dy < 0)
+        { /* Plot to the top */
+          bbc_rectanglefill (x0, y1, bbc_width, bbc_height);
+          err = sprite_put_mask_scaled (sarea, &sid, x0, y1, 0);
+          if (err != NULL)
+            goto finish;
+        }
+      }
+
+finish:
+        sprwindow_swap_output_to_screen ();
+        psprite_recalculate_offsets (sprite->file);
+        sprwindow_redisplay (sprite, &Marked_Extent);
+        delete_temporary_sprite (&tempsprite, &file);
+
+        if (err != NULL)
+          werr (FALSE, err->errmess);
+    }
+  }
+}
+
+
+/********************
+ * The text tool    *
+ ********************/
+
+typedef struct
+{ int xspace;
+  int yspace;
+  int xletter;
+  int yletter;
+  int splitat;
+  font_info box;
+} font_scaninfo; /* For Font_ScanString */
+
+static main_sprite *make_text_stencil (const main_sprite *dest, BOOL redrawing)
+
+{ /* Make a sprite with the current text painted into it.
+     As there could be several stencils the sprites are kept in a list
+     and we either create a new one or return a previously computed one.
+     If dest is NULL cached stencils are deleted.
+     Create assumes: tools_system_font or tools_fontname_buffer
+                     tools_text_buffer
+                     dest is the sprite into which this would be painted, needed to
+                               account for variation of dithering with eigen factor
+                     redrawing is TRUE if lookup is mid Wimp redraw and hence
+                               inappropriate to put up an error box
+     Returns: sprite to use from tools_textstencil_ptr list */
+  static main_file parent = {NULL, NULL, NULL, NULL, ~0, ~0, 0, 0, 1, 0, NULL};
+  main_sprite *stencil, *link;
+  os_error *err;
+  font_info box;
+  font handle = -1;
+  int txsz, tysz;
+  int width, height, mode, spacereqd;
+  sprite_ptr hdr;
+  sprite_id sid;
+  char sname [8];
+
+  if (dest == NULL)
+  { /* Drop old stencils */
+    stencil = tools_textstencil_ptr;
+    tools_textstencil_ptr = NULL; /* Empty list head */
+    ftracef0 ("free old text stencils\n");
+    while (stencil != NULL)
+    { link = stencil->link;
+      psprite_drop_translation (&stencil->transtab);
+      m_FREE (stencil, sizeof (main_sprite));
+      stencil = link;
+    }
+    parent.sprites = NULL;
+    if (parent.spritearea) flex_free ((flex_ptr) &parent.spritearea);
+    return NULL;
+  }
+
+  /* See if a suitable one already exists */
+  for (stencil = tools_textstencil_ptr;
+       stencil != NULL;
+       stencil = stencil->link)
+    if (dest->mode.scale_xmul == stencil->mode.scale_xmul &&
+        dest->mode.scale_ymul == stencil->mode.scale_ymul)
+      return stencil;
+
+  /* Have to render a new one */
+  err = NULL;
+  stencil = NULL;
+  if (strlen (tools_text_buffer) == 0 || !textxsize || !textysize)
+  { ftracef0 ("stencil would be empty\n");
+    goto abandon;
+  }
+  if (tools_system_font)
+  { txsz = textxsize / 1000;
+    tysz = textysize / 1000;
+    box.minx = 0;
+    box.miny = -tysz * dest->mode.scale_ymul;
+    box.maxx = txsz * strlen (tools_text_buffer) * dest->mode.scale_xmul;
+    box.maxy = 0;
+  }
+  else
+  { font_scaninfo sinfo;
+
+    txsz = (textxsize * 16) / 1000;
+    tysz = (textysize * 16) / 1000;
+    err = font_find (tools_fontname_buffer, txsz, tysz,
+                     180 / dest->mode.scale_xmul,
+                     180 / dest->mode.scale_ymul, &handle);
+    if (!err)
+    { memset (&sinfo, 0, sizeof (sinfo));
+      sinfo.splitat = -1;
+      err = os_swi6 (Font_ScanString, handle, tools_text_buffer,
+                     (1<<5) | (1<<8) | (1<<18), INT_MAX, INT_MAX, &sinfo);
+      if (err) goto abandon;
+      font_converttoos (sinfo.box.minx, sinfo.box.miny, &box.minx, &box.miny);
+      font_converttoos (sinfo.box.maxx, sinfo.box.maxy, &box.maxx, &box.maxy);
+      /* Add 1 pixel all round to allow for Font_ConverttoOS rounding */
+      box.minx -= dest->mode.scale_xmul;
+      box.miny -= dest->mode.scale_ymul;
+      box.maxx += dest->mode.scale_xmul;
+      box.maxy += dest->mode.scale_ymul;
+    }
+  }
+  ftracef4 ("stencil is (%d,%d) to (%d,%d) OSU\n", box.minx, box.miny, box.maxx, box.maxy);
+
+  /* OS units to pixels */
+  width  = (box.maxx - box.minx) / dest->mode.scale_xmul;
+  height = (box.maxy - box.miny) / dest->mode.scale_ymul;
+  ftracef2 ("  sprite %d x %d pixels\n", width, height);
+
+  /* Check for space in the area for this new stencil */
+  mode = (SpriteType_New8bpp << 27) | ((180 / dest->mode.scale_xmul) << 1) |
+                                      ((180 / dest->mode.scale_ymul) << 14) | 1;
+  spacereqd = psprite_size (width, height, mode, TRUE, FALSE);
+  ftracef1 ("  requires %d bytes of store\n", spacereqd);
+  if (parent.spritearea == NULL)
+  { /* Create */
+    spacereqd += sizeof (sprite_area);
+    ftracef1 ("flex_alloc %d for new area\n", spacereqd);
+    if (!flex_alloc ((flex_ptr) &parent.spritearea, spacereqd)) goto abandon;
+    sprite_area_initialise(parent.spritearea, spacereqd);
+  }
+  else
+  { /* Grow */
+    spacereqd += flex_size ((flex_ptr) &parent.spritearea);
+    ftracef1 ("flex_extend to %d for existing area\n", spacereqd);
+    if (!flex_extend ((flex_ptr) &parent.spritearea, spacereqd)) goto abandon;
+    parent.spritearea->size = spacereqd;
+  }
+
+  /* Create the sprite and add a mask */
+  sprintf (sname, "txt%d%d", dest->mode.scale_xmul, dest->mode.scale_ymul);
+  err = sprite_create_rp (parent.spritearea, sname, sprite_nopalette, width, height, mode, &hdr);
+  if (!err)
+  { sid.s.addr = hdr;
+    sid.tag = sprite_id_addr;
+    err = sprite_create_mask (parent.spritearea, &sid);
+    if (err) goto abandon;
+    stencil = psprite_new ((int) hdr - (int) parent.spritearea, parent.spritearea->number - 1, &parent);
+  }
+  if (stencil)
+  { char *image, *mask;
+    int x, y;
+
+    ftracef2 ("stencil %s new main_sprite at %p\n", sname, (void *)stencil);
+    stencil->transtab = psprite_ttab_for_sprite (stencil, -1, (int *)-1, NULL, NULL);
+    stencil->mode = dest->mode;
+    *(font_info *)&stencil->iconsize = box;
+#define STENCIL_FILL 0xC0 /* bg colour number (not one used by antialiasing) */
+
+    /* Plot the text into the stencil sprite */
+    sprwindow_swap_output_to_sprite (stencil);
+    os_swi2 (OS_SetColour, 1 << 4, STENCIL_FILL);
+    bbc_vdu (bbc_ClearGraph);
+    if (tools_system_font)
+    { os_swi2 (OS_SetColour, 1 << 4, 255); /* White */
+      bbc_vdu (bbc_TextToGraph);
+      bbc_vduq (bbc_MultiPurpose, 17, 7, 2,
+          txsz, txsz>>8, tysz, tysz>>8, 0, 0);
+      bbc_vduq (bbc_MultiPurpose, 17, 7, 4, /* Spacing == size */
+          txsz, txsz>>8, tysz, tysz>>8, 0, 0);
+      bbc_move (0, (height - 1 /* exclusive */) * dest->mode.scale_ymul);
+      puts (curr_text_buffer);
+    }
+    else
+    { wimp_paletteword fg, bg;
+      int offset = 14;
+
+      fg.word = (int)0xFFFFFF00; /* White */
+      bg.word = (int)0x80808000; /* Mid grey */
+      colourtran_setfontcolours (&handle, &bg, &fg, &offset);
+      font_paint (curr_text_buffer, font_OSCOORDS, -box.minx, -box.miny);
+    }
+    sprwindow_swap_output_to_screen ();
+
+    /* Post process; anything still in the fill colour should be transparent */
+    sid.s.name = sname;
+    sid.tag = sprite_id_name;
+    sprite_select_rp (parent.spritearea, &sid, &hdr);
+    image = (char *)((int)hdr + ((sprite_header *)hdr)->image);
+    mask = (char *)((int)hdr + ((sprite_header *)hdr)->mask);
+    for (y = 0; y < height; y++)
+    { for (x = 0; x < width; x++)
+        if (image [x] == STENCIL_FILL)
+          mask [x >> 3] &= ~(1 << (x & 7));
+      /* End of a scanline, adjust pointers to next whole word */
+      image = (char *)(((int)image + width + 3) & ~3);
+      mask  = (char *)(((int)mask + ((width + 7) >> 3) + 3) & ~3);
+    }
+
+    /* Add this new main_sprite to list head */
+    stencil->link = parent.sprites;
+    tools_textstencil_ptr = parent.sprites = stencil;
+  }
+abandon:
+  if (err && !redrawing) werr (FALSE, err->errmess);
+  if (handle != -1) font_lose (handle);
+  return stencil;
+}
+
+static void text_drawEOR(main_sprite_window *swind, int *toolspace, int x0, int y0)
+
+{ main_sprite *stencil;
+  int x, y;
+  main_scaling_block scale;
+  sprite_info sbi;
+  sprite_id sid;
+  int mul, div;
+
+  stencil = make_text_stencil (swind->sprite, TRUE);
+  if (stencil == NULL) return; /* No match or no memory, draw nothing */
+
+  sid.s.addr = psprite_address (stencil);
+  sid.tag = sprite_id_addr;
+
+  sprite_readsize (stencil->file->spritearea, &sid, &sbi);
+
+  scale.scale_xmul =
+      1*swind->blobsize.scale_xmul;
+  scale.scale_xdiv =
+      1*swind->blobsize.scale_xdiv;
+  scale.scale_ymul =
+      1*swind->blobsize.scale_ymul;
+  scale.scale_ydiv =
+      1*swind->blobsize.scale_ydiv;
+
+  /* find bottom left of stencil. Pixel over pointer is aligned
+     to pixel grid. */
+
+  x = tools_pixel_to_extent_x(swind, toolspace [3]);
+  mul=stencil->mode.scale_xmul*1;
+  div=swind->sprite->mode.scale_xmul*1;
+  x -= tools_pixel_to_extent_x(swind,(sbi.width*mul/div)/2);
+
+  y = tools_pixel_to_extent_y(swind, toolspace [4]);
+  mul=stencil->mode.scale_ymul*1;
+  div=swind->sprite->mode.scale_ymul*1;
+  y -= tools_pixel_to_extent_y(swind,(sbi.height*mul/div)/2);
+
+  psprite_plot_scaled (x+x0, y+y0, stencil, &scale, 4 /* Invert */);
+}
+
+static void textEOR (main_sprite *sprite)
+
+{ main_sprite_window *swind;
+
+  ftracef0 ("textEOR\n");
+  for (swind = sprite->windows; swind != NULL; swind = swind->link)
+  {
+    int more, x0, y0;
+    wimp_redrawstr rds;
+
+    sprite_update_window(swind,&x0,&y0,&rds,&more);
+    while (more)
+    {
+      text_drawEOR(swind, sprite->toolspace, x0, y0);
+      wimpt_noerr (wimp_get_rectangle (&rds, &more));
+    }
+  }
+}
+
+static void set_text_parameters (void)
+
+{ char *str;
+  int tx, ty;
+
+  ftracef0 ("set_text_parameters\n");
+  /* ensure termination */
+  for (str = tools_text_buffer; *str >= ' '; str++);
+  *str = '\0';
+
+  /* get size in milli-units */
+  toolwindow_readtextsize (&tx, &ty);
+
+  /* need to regenerate the stencil if text or font (size) changed */
+  if (strcmp (tools_text_buffer, curr_text_buffer) || tools_font_changed ||
+      (textxsize != tx || textysize != ty))
+  { main_window *window;
+
+    ftracef0 ("set_text_parameters, something changed\n");
+
+    /* remove any EORed text on screen */
+    for (window = main_windows; window != NULL; window = window->link)
+      if (window->tag == main_window_is_file)
+      { main_sprite *sprite;
+        for (sprite = window->data->file.sprites;
+            sprite != NULL;
+            sprite = sprite->link)
+          if (sprite->toolspace [0] == 1) textEOR (sprite);
+      }
+
+    /* free old stencil(s) */
+    make_text_stencil (NULL, FALSE);
+
+    /* update the current data */
+    strcpy (curr_text_buffer, tools_text_buffer);
+    textxsize = tx;
+    textysize = ty;
+    tools_font_changed = FALSE;
+
+    /* create stencils suitable for each open sprite in each open file */
+    for (window = main_windows; window != NULL; window = window->link)
+      if (window->tag == main_window_is_file)
+      { main_sprite *sprite;
+        for (sprite = window->data->file.sprites;
+            sprite != NULL;
+            sprite = sprite->link)
+          make_text_stencil (sprite, FALSE);
+      }
+
+    /* put the text back */
+    for (window = main_windows; window != NULL; window = window->link)
+      if (window->tag == main_window_is_file)
+      { main_sprite *sprite;
+        for (sprite = window->data->file.sprites;
+            sprite != NULL; sprite = sprite->link)
+          if (sprite->toolspace [0] == 1) textEOR (sprite);
+      }
+  }
+}
+
+static void textpaint_splot (main_window *window, wimp_mousestr *mpos)
+
+{ int x0, y1;
+  main_sprite_window *spritew = &window->data->sprite;
+  main_sprite *sprite = spritew->sprite;
+
+  ftracef0 ("textpaint_splot\n");
+  tools_mouse_to_pixel (window, mpos, &x0, &y1);
+
+  if (x0 != sprite->toolspace [3] || y1 != sprite->toolspace [4])
+  { main_colour gcol = mpos->bbits & wimp_BRIGHT? sprite->gcol2: sprite->gcol;
+    font_info box;
+    main_sprite *stencil;
+    int txsz, tysz, width, height;
+    int oldoffset = 0;
+    os_error *err;
+    BOOL restore = FALSE, addpal = FALSE;
+    BOOL write_image = gcol.alpha ||
+                       (psprite_transparency_type (sprite) == transparency_type_alphachannel);
+
+    /* Only write once at this location */
+    sprite->toolspace [3] = x0;
+    sprite->toolspace [4] = y1;
+
+    /* Recover original bounding box and stencil sprite sizes */
+    stencil = make_text_stencil (sprite, FALSE);
+    if (!stencil) return;
+    box = *(font_info *)&stencil->iconsize;
+    width  = (box.maxx - box.minx) / stencil->mode.scale_xmul;
+    height = (box.maxy - box.miny) / stencil->mode.scale_ymul;
+    ftracef2 ("  stencil was %d x %d pixels\n", width, height);
+
+    /* Back calculate the text origin (the stencil was centred on mpos */
+    x0 = tools_pixel_to_point_x (spritew, x0 - width/2);
+    y1 = tools_pixel_to_point_y (spritew, y1 - height/2);
+
+    if (tools_system_font)
+    { /* System font case */
+      txsz = textxsize / 1000;
+      tysz = textysize / 1000;
+      y1 += (height * stencil->mode.scale_ymul); /* Origin at top */
+      ftracef2 ("Text splot system font at %d,%d\n", x0, y1);
+
+      if (write_image)       /* if not "transparent" */
+      { restore = TRUE;
+        sprwindow_swap_output_to_sprite (sprite);
+        colours_set_sprite_gcol (gcol, sprite, 0);
+        bbc_vdu (bbc_TextToGraph);
+        bbc_vduq (bbc_MultiPurpose, 17, 7, 2,
+            txsz, txsz>>8, tysz, tysz>>8, 0, 0);
+        bbc_vduq (bbc_MultiPurpose, 17, 7, 4, /* Spacing == size */
+            txsz, txsz>>8, tysz, tysz>>8, 0, 0);
+        bbc_move (x0, y1 - 1);
+        puts (curr_text_buffer);
+      }
+      if (sprwindow_swap_output_to_mask (sprite, write_image))
+      { restore = TRUE;      /* duplicate paint into mask to reveal */
+        colours_set_gcol (gcol.alpha, 0, 0);
+        bbc_vdu (bbc_TextToGraph);
+        bbc_vduq (bbc_MultiPurpose, 17, 7, 2,
+            txsz, txsz>>8, tysz, tysz>>8, 0, 0);
+        bbc_vduq (bbc_MultiPurpose, 17, 7, 4, /* Spacing == size */
+            txsz, txsz>>8, tysz, tysz>>8, 0, 0);
+        bbc_move (x0, y1 - 1);
+        puts (curr_text_buffer);
+      }
+    }
+    else
+    { /* Outline font case */
+      wimp_paletteword fg, bg;
+      int offset = 14, options;
+      font handle;
+
+      txsz = (textxsize * 16) / 1000;
+      tysz = (textysize * 16) / 1000;
+      err = font_find (tools_fontname_buffer, txsz, tysz,
+                       180 / sprite->mode.scale_xmul,
+                       180 / sprite->mode.scale_ymul, &handle);
+      if (err) return;
+      ftracef2 ("Text splot outline font at %d,%d\n", x0, y1);
+
+      if (write_image)       /* if not "transparent" */
+      { restore = TRUE;
+        if (psprite_hasmask (sprite))
+        { /* Need to cater for pixels in the sprite which are currently    *
+           * transparent. Unlike for system font, we can't retrospectively *
+           * stamp the same image into the mask because that would reveal  *
+           * whatever colour was previously being masked, and then be used *
+           * to blend into. As for the spray can tool, reveal white.       */
+          sprite_id sid;
+          sprite_colour white;
+          sprite_maskstate solid;
+          sprite_maskstate dstmask;
+          sprite_area *dstarea = sprite->file->spritearea;
+          sprite_header *hdr = psprite_address (stencil);
+          char *mask = (char *)((int)hdr + hdr->mask);
+          int x, y, dstx, dsty, dstmode, nc;
+
+          /* Find corner of destination sprite where the stencil is being  *
+           * stamped, in pixels, knowing eigenfactors are the equal        */
+          dstx = sprite->toolspace [3] - width/2;
+          dsty = sprite->toolspace [4] - height/2;
+          nc = colours_count (sprite);
+          sid.s.addr = psprite_address (sprite);
+          sid.tag = sprite_id_addr;
+          dstmode = ((sprite_header *)sid.s.addr)->mode;
+
+          /* Lookup solid white for destination colour depth and mask type */
+          solid = colours_pack_mask (sprite, (main_colour){ .alpha = 255 });
+          if (nc > 256)
+          { white.colour = nc - 1;
+            white.tint = 0;
+          }
+          else
+          { int lb_bpp, *palette;
+            wimp_paletteword pal_white;
+            BOOL mode8bpp = FALSE;
+
+            if (psprite_hastruecolpal (sprite))
+            { /* Point at the full palette directly */
+              palette = (int *) ((int)sid.s.addr + sizeof (sprite_header));
+            }
+            else
+            { lb_bpp = bbc_modevar (dstmode, bbc_Log2BPP);
+              mode8bpp = lb_bpp == 3; /* ie. 8bpp without true colour palette */
+              palette = psprite_std_palettes [sprite->file->use_current_palette? 0: 1]
+                                             [lb_bpp];
+            }
+            pal_white.word = (int)0xFFFFFF00;
+            wimpt_noerr (colourtran_return_colourformode (pal_white, dstmode,
+                                                          (wimp_paletteword *)palette,
+                                                          &white.colour));
+            if (mode8bpp)
+            { /* Convert to colour/tint */
+              white.tint = (white.colour & 3) << 6;
+              white.colour = colours_gcol_ttab [white.colour >> 2];
+            }
+          }
+          for (y = height - 1; y >= 0; y--)
+          { for (x = 0; x < width; x++)
+              /* IF opaque in the stencil           *
+               * AND transparent in the destination *
+               * THEN make destination solid white  */
+              if ((mask [x >> 3] >> (x & 7)) & 1)
+              { sprite_readmask (dstarea, &sid, dstx + x, dsty + y, &dstmask);
+                if (dstmask == sprite_masktransparent)
+                { sprite_writemask (dstarea, &sid, dstx + x, dsty + y, &solid);
+                  sprite_writepixel (dstarea, &sid, dstx + x, dsty + y, &white);
+                }
+              }
+            /* End of a scanline, adjust pointers to next whole word */
+            mask  = (char *)(((int)mask + ((width + 7) >> 3) + 3) & ~3);
+          }
+        }
+        fg.word = colours_entry_from_gcol (sprite, FALSE, TRUE);
+        bg.word = colours_entry_from_gcol (sprite, TRUE, TRUE);
+
+        /* Ensure there's a palette to blend to before switching output to sprite */
+        addpal = ensure_sprite_has_palette (sprite, &oldoffset);
+
+        sprwindow_swap_output_to_sprite (sprite);
+        options = font_OSCOORDS;
+        if (tools_fonts_blend) options |= font_BLENDED;
+        colourtran_setfontcolours (&handle, &bg, &fg, &offset);
+        font_paint (curr_text_buffer, options, x0 - box.minx, y1 - box.miny);
+      }
+      font_lose (handle);
+    }
+
+    if (restore)
+    { Set_Marked_Extent (sprite);
+      sprwindow_swap_output_to_screen ();
+      /* Restore psprite's offset if the palette was a placeholder */
+      if (addpal) sprite->offset = oldoffset;
+      psprite_recalculate_offsets (sprite->file);
+      sprwindow_redisplay (sprite, &Marked_Extent);
+    }
+  }
+}
+
+/***********************************************************
+ * Null events: if pointer is over a window on the sprite, *
+ *    then another text stroke                             *
+ ***********************************************************/
+
+static void textpaint_null (main_window *window, wimp_mousestr *mpos)
+
+{ main_sprite *sprite = window->data->sprite.sprite;
+
+  ftracef0 ("textpaint_null\n");
+  set_text_parameters ();
+
+  if (mpos->bbits == 0 || sprite->toolspace [0] != 2)
+  /* if the mouse button is now up, stop tracking; no tracking until click */
+  { int x, y;
+
+    tools_mouse_to_pixel (window, mpos, &x, &y);
+
+    if (x != sprite->toolspace [3] || y != sprite->toolspace [4])
+    { if (sprite->toolspace [0] == 1)
+        textEOR (sprite);         /* remove old copy */
+      else
+      { sprite->toolspace [0] = 1;
+        ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+            sprite, sprite->toolspace [0]);
+      }
+
+      sprite->toolspace [3] = x;
+      sprite->toolspace [4] = y;
+
+      textEOR (sprite);
+    }
+  }
+  else
+    textpaint_splot (window, mpos);
+}
+
+static void stoptext (main_sprite *sprite)
+
+{ ftracef0 ("stoptext\n");
+  if (sprite->toolspace [0] == 1) textEOR (sprite);
+  sprwindow_release_idle_events (sprite);
+  make_text_stencil (NULL, FALSE);
+  sprite->toolspace [0] = 0;
+  ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+      sprite, sprite->toolspace [0]);
+}
+
+static void textpaint_redraw (main_window *window, int x0, int y0)
+
+{ main_sprite_window *swind = &window->data->sprite;
+  main_sprite *sprite = swind->sprite;
+  ftracef0 ("textpaint_redraw\n");
+
+  if (sprite->toolspace [0] == 1)
+    text_drawEOR(swind, sprite->toolspace, x0, y0);
+}
+
+static void textpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("textpaint_click\n");
+  set_text_parameters ();
+  if ((mpos->bbits & (wimp_BLEFT | wimp_BRIGHT)) != 0)
+  { main_sprite *sprite = window->data->sprite.sprite;
+
+    /* Without this code, dragging the text tool fails if attempted   *
+     * immediately after clicking a text icon on the colour picker in *
+     * Edit Palette or the name on the Save dialogue.                 */
+    sprwindow_claim_idle_events (window);    /* start tracking */
+
+    if (sprite->toolspace [0] == 1) textEOR (sprite);
+    sprite->toolspace [0] = 2;
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+        sprite, sprite->toolspace [0]);
+    sprite->toolspace [3] = sprite->toolspace [4] = -1;
+    textpaint_splot (window, mpos);
+  }
+}
+
+/***********************************
+ *                                 *
+ * spraycanpaint tool: plot points *
+ *                                 *
+ ***********************************/
+
+/***********************************************************
+ *  Actual spraycan zapper                                 *
+ ***********************************************************/
+
+/* random number generation: return 0..1, using knowledge of IEEE format */
+
+static int rndseed = 42;
+static int myrnd (void)
+
+{ ftracef0 ("myrnd\n");
+  rndseed = 2147001325*rndseed + 715136305;
+  return rndseed;
+}
+
+static void spraycanpaint_splot (main_window *window, wimp_mousestr *mpos)
+
+{ BOOL dopix, domask, doblend;
+  int i, x, y;
+  sprite_id sid;
+  sprite_colour colour, white;
+  sprite_maskstate mask;
+  wimp_box redraw_area;
+  main_sprite *sprite = window->data->sprite.sprite;
+  sprite_area *sarea = sprite->file->spritearea;
+  int nc = colours_count (sprite);
+  BOOL mode8bpp = nc == 256 && !psprite_hastruecolpal (sprite);
+  BOOL onoffmask = psprite_transparency_type (sprite) == transparency_type_onoffmask;
+  int palette8bpp[256];
+  unsigned char mix8bpp[256];
+  unsigned int opacity;
+  main_colour gcol = mpos->bbits == 1? sprite->gcol2: sprite->gcol;
+      /* adjust clears to background, select uses current gcol */
+
+  ftracef0 ("spraycanpaint_splot\n");
+
+  /*Do nothing if radius == 0. J R C 5th Oct 1993*/
+  if (sprayradius > 0)
+  {
+    int pxs, pys, elapsed, adjusted_density;
+    /*Adjust spray density according to CPU speed */
+    os_swix1r(OS_ReadMonotonicTime, 0, &elapsed);
+    if (spraytime > 0)
+    {
+      elapsed -= spraytime;
+      /*Divide this by a bigger constant to slow down the spray rate*/
+      adjusted_density = (spraydensity * elapsed) / 8;
+      if (adjusted_density > 0)
+      {
+        /*Reset the timer*/
+        spraytime += elapsed;
+        /*Sanity checks to stop unresponsiveness*/
+        if (adjusted_density > 999)
+          adjusted_density = 999;
+        if (adjusted_density > spraydensity * 2)
+          adjusted_density = spraydensity * 2;
+      }
+    }
+    else
+    {
+      /*Initial spray iteration*/
+      spraytime = elapsed;
+      adjusted_density = spraydensity / 10;
+    }
+
+    if (adjusted_density > 0)
+    {
+      tools_mouse_to_pixel (window, mpos, &x, &y);
+      pxs=tools_pixel_to_point_x(&window->data->sprite, 1);
+      pys=tools_pixel_to_point_y(&window->data->sprite, 1);
+
+      opacity = toolwindow_readopacityslider ();
+      if (opacity < 255 && nc < 256)
+      { /* Blending won't work well with < 256-colours, so disable that */
+        opacity = 255;
+      }
+      opacity = (256 * opacity) / 255; /* Rescale to power-of-two for easier division */
+      ftracef1 ("Opacity: %d\n", opacity);
+      white.colour = nc - 1;
+      ftracef1 ("White defaulting to colour number %d\n", white.colour);
+
+      colour = colours_pack_colour(sprite, gcol);
+      mask = colours_pack_mask(sprite, gcol);
+
+      sprite->toolspace [0] = x;
+      sprite->toolspace [1] = y;
+      ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+          sprite, sprite->toolspace [0]);
+
+      sid.s.addr = psprite_address (sprite);
+      sid.tag = sprite_id_addr;
+
+      /* Do pixels if selected GCOL is not completely transparent
+       * Do mask if there is one of any type
+       * Do blend the spray unless completely opaque
+       */
+      doblend = (opacity < 256);
+      dopix  = gcol.alpha || (psprite_transparency_type(sprite) == transparency_type_alphachannel);
+      domask = psprite_hasmask (sprite);
+
+      visdelay_begin ();
+
+      if (nc == 256 && doblend)
+      { sprite_colour newcolour, entry;
+        wimp_paletteword lookup;
+        unsigned int r, g, b;
+        int num;
+
+        /* Need a fake mode selector because ColourTrans will ignore the full palette given
+         * in 8bpp modes regardless of sprite mode word formulation, and MODE 28 causes
+         * it to use an internal (default) palette.
+         */
+        static const int fakemode[] = { ModeSelectorFlags_ValidFormat,
+                                        640, 480, 3, -1 /* 640x480 8bpp any Hz */,
+                                        VduExt_ModeFlags, ModeFlag_FullPalette,
+                                        -1 /* List terminator */
+                                      };
+        /* For 256 colours, calculate a lookup table (this is a limited 1:N version of
+         * what BlendTable would do for the more general N:N lookup).
+         */
+        wimpt_complain (os_swix5 (ColourTrans_ReadPalette, sarea, sid.s.addr,
+                                  palette8bpp, sizeof (palette8bpp), 1<<0 /* R1 is not a name */));
+        newcolour.colour = palette8bpp [gcol.colour];
+        ftracef1 ("Pre-mixing spray colour %08x with sprite's palette\n", newcolour.colour);
+        for (i = 0; i < sizeof (mix8bpp); i++)
+        { entry.colour = palette8bpp [i];
+          r = MIX_PIXEL(newcolour, entry,  8, 0xFF) >> 8;
+          g = MIX_PIXEL(newcolour, entry, 16, 0xFF) >> 8;
+          b = MIX_PIXEL(newcolour, entry, 24, 0xFF) >> 8;
+          lookup.word = (b << 24) | (g << 16) | (r << 8);
+          colourtran_return_colourformode (lookup, (int)fakemode, (wimp_paletteword *)palette8bpp, &num);
+          mix8bpp [i] = (unsigned char)num;
+        }
+
+        /* Also get best approximation of white */
+        lookup.word = (int)0xFFFFFF00;
+        colourtran_return_colourformode (lookup, (int)fakemode, (wimp_paletteword *)palette8bpp, &white.colour);
+        ftracef2 ("Closest to white is %08x at index %d\n", palette8bpp [white.colour], white.colour);
+        if (mode8bpp)
+        { /* Store as a colour/tint */
+          white.tint = (white.colour & 3) << 6;
+          white.colour = colours_gcol_ttab [white.colour >> 2];
+        }
+      }
+
+      for (i = 0; i < adjusted_density; i++)
+      { int r, nx, ny;
+        double theta;
+
+        r = myrnd ()%sprayradius;
+        theta = fmod ((double) myrnd (), 2*3.1415926);
+
+        nx = x + (int) (r*cos (theta))/pxs;
+        ny = y + (int) (r*sin (theta))/pys;
+
+        if (dopix)
+        { sprite_colour newcolour = colour;
+
+          MUNGE_PIXEL (nx, ny, &newcolour, &gcol, sarea, &sid, sprite)
+          ftracef2 ("sprite_writepixel (GCOL 0x%X, TINT 0x%X)\n",
+              newcolour.colour, newcolour.tint);
+          if (doblend)
+          { sprite_colour    oldcolour;
+            sprite_maskstate oldstate;
+            unsigned int r, g, b, rbmsk, gmsk, rsh, gsh;
+
+            if (onoffmask)
+            { sprite_readmask (sarea, &sid, nx, ny, &oldstate);
+              if (oldstate == sprite_masktransparent)
+                oldcolour = white; /* Blend as though over white */
+              else
+                main_read_pixel (sarea, &sid, nx, ny, &oldcolour);
+            }
+            else
+            { /* No mask, or alpha mask, or alpha channel */
+              main_read_pixel (sarea, &sid, nx, ny, &oldcolour);
+            }
+            switch (nc)
+            { case 256:
+                if (mode8bpp)
+                { /* Turn colour/tint into palette index */
+                  oldcolour.colour = colours_gcol_ttab [colours_gcol_ttab [colours_gcol_ttab
+                                       [oldcolour.colour]]] << 2 | oldcolour.tint >> 6;
+                }
+                /* Look up the nearest blended match */
+                newcolour.colour = mix8bpp [oldcolour.colour];
+                if (mode8bpp)
+                { /* Turn back into a colour/tint */
+                  newcolour.tint = (newcolour.colour & 3) << 6;
+                  newcolour.colour = colours_gcol_ttab [newcolour.colour >> 2];
+                }
+              case -1:
+                break;
+
+              case 4096:
+                rbmsk = gmsk = 0xF;
+                rsh = 8, gsh = 4;
+                goto split_mix;
+
+              case 32768:
+                rbmsk = gmsk = 0x1F;
+                rsh = 10, gsh = 5;
+                goto split_mix;
+
+              case 65536:
+                rbmsk = 0x1F, gmsk = 0x3F;
+                rsh = 11, gsh = 5;
+                goto split_mix;
+
+              case 1<<24:
+                rbmsk = gmsk = 0xFF;
+                rsh = 16, gsh = 8;
+                /* Fall through */
+split_mix:
+                /* Split channels, note RGB and BGR are catered by symmetry */
+                r = MIX_PIXEL(newcolour, oldcolour, rsh, rbmsk) >> 8;
+                g = MIX_PIXEL(newcolour, oldcolour, gsh,  gmsk) >> 8;
+                b = MIX_PIXEL(newcolour, oldcolour,   0, rbmsk) >> 8;
+
+                /* Mix channels back together, preserving alpha */
+                newcolour.colour = (newcolour.colour & ~(nc - 1)) | (r << rsh) | (g << gsh) | b;
+                break;
+            }
+          }
+          sprite_writepixel (sarea, &sid, nx, ny, &newcolour);
+        }
+
+        if (domask)
+          sprite_writemask (sarea, &sid, nx, ny, &mask);
+      }
+      visdelay_end ();
+
+
+      redraw_area.x0=tools_pixel_to_point_x(&window->data->sprite, x) - sprayradius;
+      redraw_area.y0=tools_pixel_to_point_y(&window->data->sprite, y) - sprayradius;
+      redraw_area.x1=tools_pixel_to_point_x(&window->data->sprite, x+1) + sprayradius + 1;
+      redraw_area.y1=tools_pixel_to_point_y(&window->data->sprite, y+1) + sprayradius + 1;
+
+      sprwindow_redisplay (sprite, &redraw_area);
+    }
+  }
+}
+
+/***********************************************************
+ *  Start point plotting                                   *
+ ***********************************************************/
+
+static void spraycanpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("spraycanpaint_click\n");
+  if (mpos->bbits & (wimp_BRIGHT | wimp_BLEFT)) /* ignore drags */
+  { main_sprite *sprite = window->data->sprite.sprite;
+    int n, s;
+
+    if (sscanf (tools_spray_radius, "%d%n", &s, &n) == 1 &&
+        n == strlen (tools_spray_radius))
+      sprayradius = s;
+    if (sscanf (tools_spray_density, "%d%n", &s, &n) == 1 &&
+        n == strlen (tools_spray_density))
+      spraydensity = s;
+
+    ftracef2 ("Radius %d, density %d\n", sprayradius, spraydensity);
+
+    sprwindow_claim_idle_events (window);    /* start tracking */
+    main_set_modified (sprite->file);
+    sprite->toolspace [0] = sprite->toolspace [1] = -1;
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+        sprite, sprite->toolspace [0]);
+
+    spraycanpaint_splot (window, mpos);
+  }
+}
+
+/***********************************************************
+ * Null events: if pointer is over a window on the sprite, *
+ *    then plot a point                                    *
+ ***********************************************************/
+
+static void spraycanpaint_null (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("spraycanpaint_null\n");
+  if (mpos->bbits == 0) /*if the mouse button is now up, stop tracking*/
+  {
+    sprwindow_release_idle_events (window->data->sprite.sprite);
+    /*Reset spray timer*/
+    spraytime = 0;
+  }
+  else
+    spraycanpaint_splot (window, mpos);
+}
+
+/*********************
+ *  The Brush tool   *
+ *********************/
+
+/* This will hold an additional sprite with the current brush stroke when *
+ * opacity is below the maximum. It will be plotted translucently over    *
+ * the base sprite when the sprite window is redrawn.                     *
+ * It's necessary to avoid interference patterns where the brush sprite   *
+ * overlaps previous plots of itself.                                     */
+main_file layersfile = {NULL, NULL, NULL, NULL, ~0, ~0, 0, 0, 1, 0, NULL};
+tools_layer toolslayer = {NULL, NULL, FALSE};
+
+/* Gets a sprite used as an additional layer, currently only used *
+ * internally to contain any translucent brush stroke.            */
+main_sprite *tools_get_layer (main_sprite *basesprite)
+
+{ ftracef0 ("tools_get_layer\n");
+  if (toolslayer.basesprite != basesprite)
+    return NULL;
+  return toolslayer.layersprite;
+}
+
+/* Gets a translation table suitable for plotting the layer directly *
+ * onto the screen, currently used to render translucent brush       *
+ * strokes while the mouse button is held down.                      */
+main_ttab *tools_get_layer_screen_transtab (main_sprite *basesprite)
+
+{ ftracef0 ("tools_get_layer_screen_transtab\n");
+  if (toolslayer.basesprite != basesprite || toolslayer.layersprite == NULL)
+  { ftracef0 ("toolslayer is for different base sprite. Returning NULL.\n");
+    return NULL;
+  }
+
+  if (toolslayer.screentranstab == NULL &&
+      (bbc_modevar (psprite_address (toolslayer.layersprite)->mode, bbc_Log2BPP) != -1))
+  { toolslayer.screentranstab = psprite_ttab_for_sprite (toolslayer.layersprite,
+                                                         -1, (int *) -1, 0, 0);
+    if (toolslayer.screentranstab == NULL)
+      wimpt_noerr (main_error ("PntEG"));
+    else
+      ftracef2 ("Made layer to screen ttab: %x refcount %d\n",
+          toolslayer.screentranstab, toolslayer.screentranstab->refcount);
+  }
+  return toolslayer.screentranstab;
+}
+
+os_error *tools_make_brushmouse_sprite (void)
+
+{ sprite_info sid;
+  os_error *error = NULL;
+  main_window dummywin;
+  main_info_block dummyblock;
+  wimp_box region;
+  int flags;
+  int space_needed = 0;
+  sprite_header *addr;
+  sprite_area *sarea;
+  main_sprite *s;
+
+  ftracef0 ("tools_make_brushmouse_sprite\n");
+  tools_get_sprite_info_pixels (tools_brushsprite_ptr, &sid);
+  region.x0 = 0;
+  region.y0 = 0;
+  region.x1 = (sid.width - 1) * tools_brushsprite_ptr->mode.scale_xmul;
+  region.y1 = (sid.height - 1) * tools_brushsprite_ptr->mode.scale_ymul;
+
+  tools_brushfile.sprites = m_ALLOC(sizeof (main_sprite));
+  if (tools_brushfile.sprites == NULL)
+  { /* Don't display error box to user here. Caller will handle this. */
+    ftracef0 ("Error: Insufficient memory to make brush sprite copy.\n");
+    error = main_error ("PntWG");
+    goto finish;
+  }
+
+  s = tools_brushfile.sprites;
+  s->link         = NULL;
+  s->file         = &tools_brushfile;
+  s->windows      = NULL;
+  s->offset       = 0;
+  s->spriteno     = 0;
+  s->transtab     = tools_brushsprite_ptr->transtab;
+  s->colourhandle = 0;
+  s->bgcolourhandle = 0;
+  s->gcol.colour  = tools_brushsprite_ptr->gcol.colour;
+  s->gcol.alpha   = 255;
+  s->gcol.ecf     = FALSE;
+  s->flags        = 0;
+  s->gcol2.colour = 0;
+  s->gcol2.alpha  = 255;
+  s->gcol2.ecf    = FALSE;
+  s->mode.scale_xmul = tools_brushsprite_ptr->mode.scale_xmul;
+  s->mode.scale_xdiv = tools_brushsprite_ptr->mode.scale_xdiv;
+  s->mode.scale_ymul = tools_brushsprite_ptr->mode.scale_ymul;
+  s->mode.scale_ydiv = tools_brushsprite_ptr->mode.scale_ydiv;
+  memset (s->toolspace, 0, sizeof (s->toolspace));
+  memset (&dummywin, 0, sizeof (dummywin));
+  memset (&dummyblock.sprite, 0, sizeof (dummyblock.sprite));
+  dummyblock.sprite.sprite = tools_brushsprite_ptr;
+  dummywin.data = &dummyblock;
+
+  make_temporary_sprite (&dummywin, region, tools_brushfile.sprites, &tools_brushfile,
+      "brushmouse", FALSE, FALSE, FALSE);
+
+  flags = 1;/* Cuttoff value of 1. Bit 30-31 are zero to convert to on-off mask */
+  ftracef0 ("About to convert to on/off mask.\n");
+  sarea = tools_brushfile.spritearea;
+  space_needed = sid.height * (sid.width + 31 >> 5 << 2);
+  menus_ensure_size (&tools_brushfile.spritearea, space_needed);
+  addr = psprite_address (tools_brushfile.sprites);
+  error = os_swix4r (OS_SpriteOp, SpriteReason_CreateRemoveAlpha | 0x200, (int)sarea, (int)addr, flags,
+                                  NULL, NULL, NULL, &space_needed);
+  if (error != NULL)
+  { /* If r3 > 0 it will give amount of extra space needed in area */
+    if (space_needed > 0)
+      ftracef1 ("More space needed for alpha conversion: %d\n", space_needed);
+    ftracef2 ("Error %d %s\n", error->errnum, error->errmess);
+    if (error->errnum == 133)
+      wimpt_complain (main_error ("PntEG"));
+    tools_delete_brushmouse_sprite ();
+    goto finish;
+  }
+  ftracef0 ("Alpha conversion succeeded.\n");
+  tools_brushmouse_ptr = tools_brushfile.sprites;
+
+finish:
+  if (error != NULL)
+  { tools_brushmouse_ptr = NULL;
+    menus_ensure_size (&tools_brushfile.spritearea, 0);
+  }
+  return error;
+}
+
+void tools_delete_brushmouse_sprite (void)
+
+{ ftracef0 ("tools_delete_brushmouse_sprite\n");
+  if (tools_brushfile.sprites == NULL)
+  { ftracef0 ("Nothing to delete!\n");
+    return;
+  }
+
+  /* The brush transtab currently is reused from the main brush sprite
+     so doesn't need to be deleted here */
+
+  /* Note that this deletes the entire sprite area currently. */
+  delete_temporary_sprite (tools_brushfile.sprites, &tools_brushfile);
+
+  if (tools_brushfile.sprites != NULL)
+  { m_FREE(tools_brushfile.sprites, sizeof (main_sprite));
+    tools_brushfile.sprites = NULL;
+  }
+  tools_brushfile.spritearea = NULL;
+  tools_brushmouse_ptr = NULL;
+}
+
+/* Makes a sprite used as an additional layer, currently only used       *
+ * internally to contain any translucent brush stroke.                   *
+ * The layer's intitialised with a copy of the supplied sprite, to       *
+ * support brushes with alpha masks so any blended pixels will be the    *
+ * correct colour. The layer's mask will be cleared to all transparent.  */
+main_sprite *tools_create_layer (main_window *window)
+
+{ main_sprite *sprite;
+  os_error *error = NULL;
+  BOOL madeSprite = FALSE;
+  if (window == NULL || window->data == NULL || window->data->sprite.sprite == NULL)
+  {
+    ftracef0 ("window, window->data or window->data->sprite.sprite are NULL in tools_create_layer!\n");
+    return NULL;
+  }
+  sprite = window->data->sprite.sprite;
+  ftracef0 ("tools_create_layer\n");
+
+  if (layersfile.sprites == NULL)
+  { sprite_info sid;
+    wimp_box region;
+    tools_get_sprite_info_pixels (sprite, &sid);
+    region.x0 = 0;
+    region.y0 = 0;
+    region.x1 = tools_pixel_to_point_x (&window->data->sprite,
+        sid.width - 1);
+    region.y1 = tools_pixel_to_point_y (&window->data->sprite,
+        sid.height - 1);
+
+    layersfile.sprites = m_ALLOC(sizeof (main_sprite));
+    if (layersfile.sprites == NULL)
+    { /* Don't display error box to user here. Caller will handle this. */
+      ftracef0 ("Error: Insufficient memory to make layer sprite.\n");
+      goto finish;
+    }
+    else
+    { static int *palette = NULL;
+      main_sprite *s = layersfile.sprites;
+
+      s->link         = NULL;
+      s->file         = &layersfile;
+      s->windows      = NULL;
+      s->offset       = 0;
+      s->spriteno     = 0;
+      s->transtab     = NULL;
+      s->colourhandle = 0;
+      s->bgcolourhandle = 0;
+      s->gcol.colour  = sprite->gcol.colour;
+      s->gcol.alpha   = 255;
+      s->gcol.ecf     = FALSE;
+      s->flags        = 0;
+      s->gcol2.colour = 0;
+      s->gcol2.alpha  = 255;
+      s->gcol2.ecf    = FALSE;
+      s->mode.scale_xmul = sprite->mode.scale_xmul;
+      s->mode.scale_xdiv = sprite->mode.scale_xdiv;
+      s->mode.scale_ymul = sprite->mode.scale_ymul;
+      s->mode.scale_ydiv = sprite->mode.scale_ydiv;
+      memset (s->toolspace, 0, sizeof (s->toolspace));
+
+      make_temporary_sprite (window, region, layersfile.sprites, &layersfile,
+        "brushlayer0", /*Force a mask*/TRUE, /*Force a palette*/TRUE,
+        /*Clear to transparent*/TRUE);
+      madeSprite = TRUE;
+
+      /* Get a translation table */
+      /*Get the palette of the destination sprite.*/
+      if ((error = psprite_build_palette (layersfile.sprites, &palette)) != NULL)
+       goto finish;
+      ftracef0 ("calling psprite_ttab_for_sprite()\n");
+      if ((s->transtab = psprite_ttab_for_sprite
+          (s, psprite_address (sprite)->mode,
+          palette != NULL? palette: (int *) -1, 0, 0)) == NULL)
+      { error = main_error ("PntEG");
+        goto finish;
+      }
+    }
+    toolslayer.basesprite = sprite;
+    toolslayer.layersprite = layersfile.sprites;
+  }
+
+finish:
+  if (error != NULL)
+  { ftracef0 (error->errmess);
+    if (madeSprite)
+      delete_temporary_sprite (layersfile.sprites, &layersfile);
+    if (layersfile.sprites != NULL)
+      m_FREE (layersfile.sprites, sizeof (main_sprite));
+    layersfile.sprites = NULL;
+    toolslayer.basesprite = NULL;
+    toolslayer.layersprite = NULL;
+  }
+  toolslayer.screentranstab = NULL;
+  return layersfile.sprites;
+}
+
+void tools_delete_layer (void)
+
+{ ftracef0 ("tools_delete_layer\n");
+  if (layersfile.sprites == NULL)
+  { ftracef0 ("Nothing to delete!\n");
+    toolslayer.basesprite = NULL;
+    toolslayer.layersprite = NULL;
+    return;
+  }
+  /* Free any brush translation table */
+  ftracef0 ("Dropping translucent layer translation tables\n");
+  if (toolwindow_current_tool == &tools_brushpaint)
+  { ftracef2 ("layersfile.sprites->toolspace[2] ttab: %x refcount %d\n", layersfile.sprites->toolspace [2], (layersfile.sprites->toolspace [2])?((main_ttab *)layersfile.sprites->toolspace [2])->refcount:0);
+    psprite_drop_translation ((main_ttab **) &layersfile.sprites->toolspace [2]);
+  }
+  ftracef2 ("layersfile.sprites->transtab: %x refcount: %d\n", layersfile.sprites->transtab, layersfile.sprites->transtab->refcount);
+
+  /* Free normal translation table */
+  psprite_drop_translation (&layersfile.sprites->transtab);
+
+  /* Free translation table for plotting layer to screen */
+  ftracef2 ("toolslayer.screentranstab: %x refcount: %d\n", toolslayer.screentranstab, toolslayer.screentranstab->refcount);
+  psprite_drop_translation (&toolslayer.screentranstab);
+
+  /* Note that if we ever want to support multiple layers, this deletes
+     the entire sprite area currently. */
+  delete_temporary_sprite (layersfile.sprites, &layersfile);
+
+  if (layersfile.sprites != NULL)
+  { m_FREE(layersfile.sprites, sizeof (main_sprite));
+    layersfile.sprites = NULL;
+  }
+  layersfile.spritearea = NULL;
+  toolslayer.basesprite = NULL;
+  toolslayer.layersprite = NULL;
+  toolslayer.mergepending = FALSE;
+}
+
+void tools_merge_layer_onto (main_sprite *sprite)
+
+{ ftracef0 ("tools_merge_layer_onto\n");
+  /* If the brush stroke's in a translucent layer, merge that onto
+     the underlying sprite now. */
+  main_sprite *translucentlayer = tools_get_layer (sprite);
+  if (translucentlayer != NULL && toolslayer.mergepending)
+  { os_error *err = NULL;
+    main_scaling_block scale = {1, 1, 1, 1};
+    unsigned char translucency = 255 - (unsigned char)translucentlayer->gcol.alpha;
+    BOOL addpal;
+    int oldoffset = 0;
+
+    /* Now set dest mode pixel sizes. */
+    /* We don't need to restore the existing values as we're going to   *
+     * delete the layer, otherwise they'd need copying and putting back *
+     * like brushpaint_splot() does with smxd, smyd */
+    translucentlayer->mode.scale_xdiv = sprite->mode.scale_xmul;
+    translucentlayer->mode.scale_ydiv = sprite->mode.scale_ymul;
+
+    visdelay_begin ();
+    ftracef0 ("About to attempt pending merge.\n");
+
+    /* First we need to work around the fact BlendTable / InverseTable  *
+     * only blends with RGB values of pixels and for transparent regions*
+     * of sprites these are very often the wrong colour.                *
+     * The workaround is to change the RGB colour of transparent pixels *
+     * to the currently selected colour before the merge.               */
+    if (translucency > 0 && psprite_hasmask (sprite) &&
+        !psprite_canalphablend(sprite))
+    { /* If not using gcol or tint we should possibly use white or 50% grey */
+      sprite_colour scol = colours_pack_colour (translucentlayer,
+          translucentlayer->gcol);
+      set_transparent_RGB (sprite, &scol);
+    }
+
+    /* Ensure there's a palette before switching output to sprite */
+    addpal = ensure_sprite_has_palette (sprite, &oldoffset);
+
+    sprwindow_swap_output_to_sprite (sprite);
+
+    if (tools_brush_use_gcol)
+    { /* It doesn't really matter what the colour is here. We just need to
+         ensure the logical operation is 0, Set */
+      int mode = toolwindow_current_mode;
+      main_colour gcol = sprite->gcol;
+      gcol.alpha = 255;
+      toolwindow_current_mode = 0; /* Set */
+      colours_set_sprite_gcol (gcol, sprite, 1);
+      toolwindow_current_mode = mode;
+    }
+
+    err = psprite_plot_scaled_m (0, 0, translucentlayer, &scale, 0, 0, translucency);
+    if (err != NULL)
+      goto finish;
+    /* If the base sprite has a mask, we have to plot the layer's
+       mask onto that to make the brush stroke opaque */
+    if (psprite_hasmask (sprite))
+    { sprwindow_swap_output_to_screen ();
+      if (addpal) sprite->offset = oldoffset;
+      sprwindow_swap_output_to_mask (sprite, 1);
+      os_swi2 (OS_SetColour, 0, 0); /* set transparent foreground */
+      os_swi2 (OS_SetColour, 1 << 4, -1); /* set solid background */
+      err = psprite_plot_scaled_m (0, 0, translucentlayer, &scale, 0, 1, 0);
+    }
+finish:
+    Set_Marked_Extent (sprite);
+    sprwindow_swap_output_to_screen ();
+    /* Restore psprite's view and dispose of the palette */
+    if (addpal) sprite->offset = oldoffset;
+    /* We're done with that layer until next brush stroke */
+    tools_delete_layer ();
+    psprite_recalculate_offsets (sprite->file);
+    sprwindow_redisplay (sprite, &Marked_Extent);
+    visdelay_end ();
+    wimpt_noerr (err);
+  }
+  else
+    ftracef2 ("Merge not done. Layer: %x Merge pending?: %d\n",
+              translucentlayer, toolslayer.mergepending);
+}
+
+static void brushpaint_splot (main_window *window, wimp_mousestr *mpos)
+
+{ int x, y;
+  BOOL background;
+  main_sprite *sprite = window->data->sprite.sprite;
+  main_sprite *translucentlayer = NULL;
+  BOOL madenewlayer = FALSE;
+  BOOL workspacechanged = FALSE;
+  BOOL maskforshape = FALSE;
+  main_sprite *destsprite;
+  tools_mouse_to_pixel (window, mpos, &x, &y);
+  background = mpos->bbits == wimp_BRIGHT;
+  main_colour gcol = background ? sprite->gcol2 : sprite->gcol;
+
+  ftracef0 ("brushpaint_splot\n");
+
+  if (x != sprite->toolspace [3] || y != sprite->toolspace [4])
+  { main_ttab *ott = tools_brushsprite_ptr->transtab;
+    int smxd = tools_brushsprite_ptr->mode.scale_xdiv;
+        /*current mode pixel sizes*/
+    int smyd = tools_brushsprite_ptr->mode.scale_ydiv;
+    sprite_info sbi;
+    sprite_id sid;
+    int mul, div;
+    main_sprite_window *swind = &window->data->sprite;
+    unsigned char translucency;
+
+    sid.s.addr = psprite_address (tools_brushsprite_ptr);
+    sid.tag = sprite_id_addr;
+
+    sprite_readsize (tools_brushsprite_ptr->file->spritearea, &sid, &sbi);
+
+    /* now set dest mode pixel sizes */
+    tools_brushsprite_ptr->mode.scale_xdiv = sprite->mode.scale_xmul;
+    tools_brushsprite_ptr->mode.scale_ydiv = sprite->mode.scale_ymul;
+
+    sprite->toolspace [3] = x;
+    sprite->toolspace [4] = y;
+
+    x   = tools_pixel_to_point_x(swind, sprite->toolspace [3]);
+    mul = tools_brushsprite_ptr->mode.scale_xmul * tools_brushscale.scale_xmul;
+    div = swind->sprite->mode.scale_xmul * tools_brushscale.scale_xdiv;
+    x  -= tools_pixel_to_point_x(swind, (sbi.width*mul/div) / 2);
+
+    y   = tools_pixel_to_point_y(swind, sprite->toolspace [4]);
+    mul = tools_brushsprite_ptr->mode.scale_ymul * tools_brushscale.scale_ymul;
+    div = swind->sprite->mode.scale_ymul * tools_brushscale.scale_ydiv;
+    y  -= tools_pixel_to_point_y(swind, (sbi.height*mul/div) / 2);
+
+    /* Read opacity */
+    translucency = 255 - toolwindow_readopacityslider ();
+    if (translucency > 0)
+    { int nc = colours_count (sprite);
+      /* Blending won't work well with < 256-colours, so disable that */
+      if (nc < 256)
+        translucency = 0;
+      ftracef1 ("Translucency: %d\n", translucency);
+    }
+
+    /* Note also if we're painting in the fully transparent colour, with *
+       Shape, we definitely don't want to use the translucentlayer */
+    if (translucency > 0 && (gcol.alpha || tools_brush_use_gcol != 1))
+    { translucentlayer = tools_get_layer (sprite);
+      if (translucentlayer == NULL)
+      { ftracef0 ("tools_get_layer returned NULL. Creating new layer.\n");
+        ftracef1 ("window: %x\n", window);
+        translucentlayer = tools_create_layer (window);
+        madenewlayer = TRUE;
+        ftracef1 ("tools_create_layer returned: %x\n", (int)translucentlayer);
+      }
+      if (translucentlayer == NULL)
+      { /* Out of memory. */
+        ftracef0 ("Couldn't create translucent brush layer.\n");
+        destsprite = sprite;
+        madenewlayer = FALSE;
+      }
+      else
+      { /* Stash the colour of the brush stroke in the sprite's gcol and *
+         * the layer opacity in its gcol.alpha, as this is otherwise *
+         * unused since it's not a regular base sprite */
+        translucentlayer->gcol = gcol;
+        translucentlayer->gcol.alpha = (char)toolwindow_readopacityslider ();
+        destsprite = translucentlayer;
+        toolslayer.mergepending = TRUE;
+      }
+    }
+    else
+    { destsprite = sprite;
+    }
+
+    tools_brushsprite_ptr->transtab = (main_ttab *) /*dest*/sprite->toolspace [2];
+
+    /* our transfer function now does shape except when using ECFs */
+    maskforshape = tools_brush_use_gcol == 1 && gcol.ecf;
+
+    if (!maskforshape && tools_brush_use_gcol && (gcol.alpha ||
+        tools_brush_use_gcol == 1)) /* For transparent, Tint mode's unsupported. */
+    { int bgr;
+      BOOL shapeonly = tools_brush_use_gcol == 1;
+      colours_set_sprite_gcol (gcol, sprite, 1);
+      /* We must figure out the full palette entry for this colour. */
+      bgr = colours_entry_from_gcol (sprite, background, /*force BGR*/TRUE);
+
+      workspacechanged = psprite_init_brush_workspace (FALSE, shapeonly, (uint32_t)bgr, sprite);
+    }
+    else
+    { /* This will disable the ColourTrans transfer function */
+      workspacechanged = psprite_init_brush_workspace (TRUE, FALSE, 0, sprite);
+    }
+
+    if (workspacechanged || madenewlayer || sprite->toolspace [2] == 0)
+    { wimpt_noerr (psprite_free_brush_blocks ());
+      wimpt_noerr (psprite_set_brush_colour_translations ());
+
+      /* this works on 256 colours, but only if the base sprite has a palette */
+
+      tools_brushsprite_ptr->transtab = (main_ttab *) sprite->toolspace [2];
+    }
+
+    sprwindow_swap_output_to_sprite (destsprite);
+
+    if (maskforshape)
+    { /* We do Shape painting the old-fashioned way, by plotting the mask
+      onto the sprite in the selected colour (or ECF pattern). */
+      colours_set_sprite_gcol (gcol, sprite, 1);
+    }
+
+    psprite_plot_scaled_m (x, y, tools_brushsprite_ptr,
+                           &tools_brushscale, toolwindow_current_mode,
+                           maskforshape, 0);
+
+    if (sprwindow_swap_output_to_mask (destsprite, 1))
+    { BOOL c = (tools_brush_use_gcol == 1) && !gcol.alpha;
+
+      os_swi2 (OS_SetColour, c? 0: 1 << 4, c? 0: -1);
+#if 0
+      /*replaces the following, avoiding need to check full-palette bit*/
+      colour = tools_brush_use_gcol &&
+          sprite->gcol == colours_count (sprite)? 0: 255;
+      bbc_gcol (0, colour);
+      bbc_tint (3, colour);
+#endif
+      psprite_plot_scaled_m (x, y,
+          tools_brushsprite_ptr, &tools_brushscale, 0, 1, 0);
+    }
+
+    tools_brushsprite_ptr->transtab = ott;
+    tools_brushsprite_ptr->mode.scale_xdiv = smxd;
+    tools_brushsprite_ptr->mode.scale_ydiv = smyd;
+
+    Set_Marked_Extent (sprite);
+    sprwindow_swap_output_to_screen ();
+    psprite_recalculate_offsets (sprite->file);
+    sprwindow_redisplay (sprite, &Marked_Extent);
+  }
+}
+
+static void brush_drawEOR(main_sprite_window *swind, int *toolspace, int x0, int y0)
+{
+  int x, y;
+  main_scaling_block scale;
+  sprite_info sbi;
+  sprite_id sid;
+  int mul, div;
+  main_sprite *brushmouse;
+
+  if (tools_brushmouse_ptr != NULL)
+    brushmouse = tools_brushmouse_ptr;
+  else if (tools_brushsprite_ptr == NULL)
+    return;
+  else
+    brushmouse = tools_brushsprite_ptr;
+
+  sid.s.addr = psprite_address (brushmouse);
+  sid.tag = sprite_id_addr;
+
+  sprite_readsize (brushmouse->file->spritearea, &sid, &sbi);
+
+  scale.scale_xmul =
+      tools_brushscale.scale_xmul*swind->blobsize.scale_xmul;
+  scale.scale_xdiv =
+      tools_brushscale.scale_xdiv*swind->blobsize.scale_xdiv;
+  scale.scale_ymul =
+      tools_brushscale.scale_ymul*swind->blobsize.scale_ymul;
+  scale.scale_ydiv =
+      tools_brushscale.scale_ydiv*swind->blobsize.scale_ydiv;
+
+  /* find bottom left of brush. Pixel over pointer is aligned
+     to pixel grid. */
+
+  x = tools_pixel_to_extent_x(swind, toolspace [3]);
+  mul=brushmouse->mode.scale_xmul*tools_brushscale.scale_xmul;
+  div=swind->sprite->mode.scale_xmul*tools_brushscale.scale_xdiv;
+  x-=tools_pixel_to_extent_x(swind,(sbi.width*mul/div)/2);
+
+  y = tools_pixel_to_extent_y(swind, toolspace [4]);
+  mul=brushmouse->mode.scale_ymul*tools_brushscale.scale_ymul;
+  div=swind->sprite->mode.scale_ymul*tools_brushscale.scale_ydiv;
+  y -= tools_pixel_to_extent_y(swind,(sbi.height*mul/div)/2);
+
+  psprite_plot_scaled (x+x0, y+y0, brushmouse, &scale, 4);
+}
+
+static void brushEOR (main_sprite *sprite)
+
+{ main_sprite_window *swind;
+
+  ftracef0 ("brushEOR\n");
+  for (swind = sprite->windows; swind != NULL; swind = swind->link)
+  {
+    int more, x0, y0;
+    wimp_redrawstr rds;
+
+    sprite_update_window(swind,&x0,&y0,&rds,&more);
+    while (more)
+    {
+      brush_drawEOR(swind, sprite->toolspace, x0, y0);
+      wimpt_noerr (wimp_get_rectangle (&rds, &more));
+    }
+  }
+}
+
+/**************************************************
+ * Brush: find named sprite, plot at current pos. *
+ **************************************************/
+
+static void brushpaint_click (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("brushpaint_click\n");
+  if ((mpos->bbits & (wimp_BLEFT | wimp_BRIGHT)) != 0 &&
+      tools_brushsprite_ptr != NULL)
+  { main_sprite *sprite = window->data->sprite.sprite;
+
+    /* Read Shape / Stamp / Tint */
+    toolwindow_readbrushmode ();
+
+    /* Without this code, dragging the paint brush fails if attempted *
+     * immediately after clicking a text icon on the colour picker in *
+     * Edit Palette or the name on the Save dialogue.                 */
+    sprwindow_claim_idle_events (window);    /* start tracking */
+
+    if (sprite->toolspace [0] == 1) brushEOR (sprite);
+    sprite->toolspace [0] = 2;    /* had click, no EOR */
+    ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+        sprite, sprite->toolspace [0]);
+    sprite->toolspace [3] = sprite->toolspace [4] = -1;
+
+    if ((psprite_hasalphachannel (tools_brushsprite_ptr) ||
+        psprite_hasalphamask (tools_brushsprite_ptr)) &&
+        psprite_hasmask (sprite))
+    { /* Have to set the RGB colour of transparent regions otherwise it can
+       * look wrong when the OS blends the brush with it. */
+      sprite_colour scol = colours_pack_colour (sprite, sprite->gcol);
+      set_transparent_RGB (sprite, &scol);
+    }
+    brushpaint_splot (window, mpos);
+  }
+}
+
+/***********************************************************
+ * Null events: if pointer is over a window on the sprite, *
+ *    then another brush stroke                            *
+ ***********************************************************/
+
+static void brushpaint_null (main_window *window, wimp_mousestr *mpos)
+
+{ ftracef0 ("brushpaint_null\n");
+  if (tools_brushsprite_ptr != NULL)
+  { main_sprite *sprite = window->data->sprite.sprite;
+
+    if (mpos->bbits == 0 || sprite->toolspace [0] != 2)
+    /*if the mouse button is now up, stop tracking; don't start until click*/
+    { int x, y;
+
+      tools_mouse_to_pixel (window, mpos, &x, &y);
+
+      if (x != sprite->toolspace [3] || y != sprite->toolspace [4] ||
+          tools_get_layer (sprite) != NULL)
+      { if (sprite->toolspace [0] == 1)
+          brushEOR (sprite);         /* remove old copy */
+        else
+        { sprite->toolspace [0] = 1;
+          ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+              sprite, sprite->toolspace [0]);
+        }
+        tools_merge_layer_onto (sprite);
+
+        sprite->toolspace [3] = x;
+        sprite->toolspace [4] = y;
+
+        brushEOR (sprite);
+      }
+    }
+    else
+      brushpaint_splot (window, mpos);
+  }
+}
+
+static void stopbrush (main_sprite *sprite)
+
+{ ftracef0 ("stopbrush\n");
+  if (sprite->toolspace [0] == 1 && tools_brushsprite_ptr != NULL)
+    brushEOR (sprite);
+  sprwindow_release_idle_events (sprite);
+  sprite->toolspace [0] = 0;
+  ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+      sprite, sprite->toolspace [0]);
+  tools_merge_layer_onto (sprite);
+}
+
+void tools_remove_brush (void)
+
+{ main_window *window;
+
+  ftracef0 ("tools_remove_brush\n");
+  /* remove any EORed brushes on screen */
+
+  for (window = main_windows; window != NULL; window = window->link)
+  if (window->tag == main_window_is_file)
+  { main_sprite *sprite;
+   for (sprite = window->data->file.sprites;
+        sprite != NULL;
+        sprite = sprite->link)
+    if (sprite->toolspace [0] == 1) brushEOR (sprite);
+  }
+}
+
+void tools_replace_brush (void)
+
+{ ftracef0 ("tools_replace_brush\n");
+  tools_remove_brush ();
+}
+
+static void brushpaint_redraw (main_window *window, int x0, int y0)
+
+{ if (tools_brushsprite_ptr != NULL)
+  { main_sprite_window *swind = &window->data->sprite;
+    main_sprite *sprite = swind->sprite;
+    ftracef0 ("brushpaint_redraw\n");
+
+    if (sprite->toolspace [0] == 1)
+      brush_drawEOR(swind, sprite->toolspace, x0, y0);
+  }
+}
+
+/***********************************************************
+ * Stop null events: general purpose tool closure routine  *
+ ***********************************************************/
+
+static void stopnulls (main_sprite *sprite)
+
+{ ftracef0 ("stopnulls\n");
+  sprwindow_release_idle_events (sprite);
+  sprite->toolspace [0] = 0;
+  ftracef2 ("0x%X->toolspace [0]: 0x%X\n",
+      sprite, sprite->toolspace [0]);
+}
+
+static void Skip (main_window *window, int x, int y)
+
+{ ftracef0 ("Skip\n");
+  window = window; x = x; y = y;
+}
+
+/*************************************
+ *                                   *
+ *     The available tools           *
+ *                                   *
+ *************************************/
+
+toolwindow_block tools_pixelpaint = { &pixelpaint_click,
+                          &pixelpaint_null,
+                          &Skip,
+                          &stopnulls,
+                          "PntT1" };
+toolwindow_block tools_circlepaint= { &circlepaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT2" };
+toolwindow_block tools_linepaint  = { &linepaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT3" };
+toolwindow_block tools_circleoutlinepaint
+                      = { &circleoutlinepaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT4" };
+toolwindow_block tools_trianglepaint
+                      = { &trianglepaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT5" };
+toolwindow_block tools_ellipsepaint
+                      = { &ellipsepaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT6" };
+toolwindow_block tools_ellipseoutlinepaint
+                      = { &ellipseoutlinepaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT7" };
+toolwindow_block tools_segmentpaint
+                      = { &segmentpaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT8" };
+toolwindow_block tools_sectorpaint
+                      = { &sectorpaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntT9" };
+toolwindow_block tools_arcpaint
+                      = { &arcpaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntTA" };
+toolwindow_block tools_parallelogrampaint
+                      = { &parallelogrampaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntTB" };
+toolwindow_block tools_parallelogramoutlinepaint
+                      = { &parallelogramoutlinepaint_click,
+                          &parallelogramoutlinepaint_null,
+                          &parallelogramoutlinepaint_redraw,
+                          &parallelogramoutlinepaint_stop,
+                          "PntTC" };
+toolwindow_block tools_rectanglepaint
+                      = { &rectanglepaint_click,
+                          &tabledriven_null,
+                          &tabledriven_redraw,
+                          &tabledriven_stop,
+                          "PntTD" };
+toolwindow_block tools_rectangleoutlinepaint
+                      = { &rectangleoutlinepaint_click,
+                          &rectangleoutlinepaint_null,
+                          &rectangleoutlinepaint_redraw,
+                          &rectangleoutlinepaint_stop,
+                          "PntTE" };
+toolwindow_block tools_floodfillpaint
+                      = { &floodfillpaint_click,
+ (void (*) (main_window *, wimp_mousestr *)) &Skip,
+                          &Skip,
+                          &stopnulls,
+                          "PntTF" };
+toolwindow_block tools_scissorpaint
+                      = { &scissorpaint_click,
+                          &scissorpaint_null,
+                          &scissorpaint_redraw,
+                          &scissorpaint_stop,
+                          "PntTG" };
+toolwindow_block tools_grabberpaint
+                      = { &grabberpaint_click,
+                          &grabberpaint_null,
+                          &scissorpaint_redraw,
+                          &scissorpaint_stop,
+                          "PntTH" };
+toolwindow_block tools_camerapaint
+                      = { &camerapaint_click,
+                          &scissorpaint_null,
+                          &scissorpaint_redraw,
+                          &scissorpaint_stop,
+                          "PntTI" };
+toolwindow_block tools_textpaint
+                      = { &textpaint_click,
+                          &textpaint_null,
+                          &textpaint_redraw,
+                          &stoptext,
+                          "PntTJ" };
+toolwindow_block tools_spraycanpaint
+                      = { &spraycanpaint_click,
+                          &spraycanpaint_null,
+                          &Skip,
+                          &stopnulls,
+                          "PntTK" };
+toolwindow_block tools_brushpaint
+                      = { &brushpaint_click,
+                          &brushpaint_null,
+                          &brushpaint_redraw,
+                          &stopbrush,
+                          "PntTL" };
+
+/*************************************************
+ * Call OS_ChangedBox to get invalid screen area *
+ *************************************************/
+
+#pragma -c0 /*Doesn't work with memory access checks on!!*/
+
+static void Set_Marked_Extent (main_sprite *sprite)
+
+{ int *r, xm, ym;
+  wimp_box *cb;
+
+  ftracef0 ("Set_Marked_Extent\n");
+  os_swix2r (OS_ChangedBox, -1, 0, NULL, (int *) &r);
+  cb = (wimp_box *) (r + 1);
+  xm = sprite->mode.scale_xmul;
+  ym = sprite->mode.scale_ymul;
+  Marked_Extent.x0 = cb->x0*xm;
+  Marked_Extent.x1 = (cb->x1 + 1)*xm;
+  Marked_Extent.y0 = cb->y0*ym;
+  Marked_Extent.y1 = (cb->y1 + 1)*ym;
+
+  ftracef4 ("new marked extent is ((%d, %d), (%d, %d))\n",
+      Marked_Extent.x0, Marked_Extent.y0,
+      Marked_Extent.x1, Marked_Extent.y1);
+}

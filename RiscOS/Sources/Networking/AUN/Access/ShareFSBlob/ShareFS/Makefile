@@ -1,0 +1,51 @@
+#
+# Binary Build Environment Makefile for ShareFS
+#
+#
+# Copyright © 2001-2004 Castle Technology Ltd. All rights reserved.
+#
+
+include StdTools
+
+all:
+	@| Do nothing by default
+
+install_rom:
+	${CP} rm.${TARGET} ${INSTDIR}.${TARGET} ${CPFLAGS}
+	@echo ${COMPONENT}: installed
+
+install: resmsgs
+	${LD} -rmf -o ShareFSSA aof.${TARGET}SA resmsgs
+	${MKDIR} ${INSTDIR}
+	${CP} ShareFSSA ${INSTDIR}.${TARGET} ${CPFLAGS}
+	@echo ${COMPONENT}: ram module installed
+
+# Resource export phases
+
+resources:
+	${MKDIR} ${RESDIR}.ShareFS
+	${CP} LocalRes:!Boot     ${RESDIR}.${TARGET}.!Boot     ${CPFLAGS}
+	${CP} LocalRes:Messages  ${RESDIR}.${TARGET}.Messages  ${CPFLAGS}
+	${CP} LocalRes:Templates ${RESDIR}.${TARGET}.Templates ${CPFLAGS}
+	@echo ${COMPONENT}: resources copied to Messages module
+
+resmsgs: LocalRes:!Boot LocalRes:Messages LocalRes:Templates
+	${RESGEN} lookup_area $@\
+	LocalRes:!Boot      Resources.${TARGET}.!Boot\
+	LocalRes:Messages   Resources.${TARGET}.Messages\
+	LocalRes:Templates  Resources.${TARGET}.Templates\
+	LocalRes:!Sprites   Resources.${TARGET}.!Sprites\
+	LocalRes:!Sprites22 Resources.${TARGET}.!Sprites22
+
+rom_link: rom_link-${TARGET}
+	@echo ${COMPONENT}: rom_link complete
+
+rom_link-ShareFS:
+	${MKDIR} linked
+	${LD} -o linked.${TARGET} -rmf -base ${ADDRESS} aof.${TARGET} RISCOSLIB:o.c_abssym
+	@${CP} linked.${TARGET} ${LINKDIR}.${TARGET} ${CPFLAGS}
+
+clean::
+	${WIPE} linked ${WFLAGS}
+	${RM} resmsgs
+	${RM} ShareFSSA

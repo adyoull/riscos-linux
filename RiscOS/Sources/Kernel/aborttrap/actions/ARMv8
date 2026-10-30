@@ -1,0 +1,100 @@
+# Copyright (c) 2021, RISC OS Open Ltd
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met: 
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+#       may be used to endorse or promote products derived from this software
+#       without specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+# 
+
+# F5.1.57 Load-Aquire
+LDA_A1(Rt,Rn,sz,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDA_common(ctx,Rt,Rn,sz);
+}
+
+# F5.1.216 Store-Release
+STL_A1(Rt,Rn,sz,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_STL_common(ctx,Rt,Rn,sz);
+}
+
+# F5.1.59 Load-Aquire Exclusive
+LDAEX_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDAEX_common(ctx,Rt,Rn,4);
+}
+
+LDAEXD_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDAEX_common(ctx,Rt,Rn,8);
+}
+
+LDAEXB_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDAEX_common(ctx,Rt,Rn,1);
+}
+
+LDAEXH_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_LDAEX_common(ctx,Rt,Rn,2);
+}
+
+# F5.1.218 Store-Release Exclusive
+STLEX_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_STLEX_common(ctx,Rt,Rn,4);
+}
+
+STLEXD_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_STLEX_common(ctx,Rt,Rn,8);
+}
+
+STLEXB_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_STLEX_common(ctx,Rt,Rn,1);
+}
+
+STLEXH_A1(Rt,Rn,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_STLEX_common(ctx,Rt,Rn,2);
+}

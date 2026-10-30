@@ -1,0 +1,79 @@
+; Copyright 2002 Pace Micro Technology plc
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+;-*- Mode: Assembler -*-
+;
+; Copyright (C) Acorn Computers Ltd., 1989.
+;
+; DO NOT ADD ENTRIES TO EXISTING CHUNKS WHICH HAVE BEEN RELEASED TO USERS!
+; Old versions of CLib will plant a ticking time bomb in apps by filling the
+; entries with garbage.
+;
+
+        ; C99 complex numbers
+
+        ; Originally introduced in CLib 5.52
+        Entry   _cxd_mul, imported, , unveneered, , , [FPREGARGS]
+        Entry   _cxf_mul, imported, , unveneered, , , [FPREGARGS]
+        Entry   _cxd_div, imported, , unveneered, , , [FPREGARGS]
+        Entry   _cxf_div, imported, , unveneered, , , [FPREGARGS]
+        Entry   _cxd_rdv, imported, , unveneered, , , [FPREGARGS]
+        Entry   _cxf_rdv, imported, , unveneered, , , [FPREGARGS]
+
+        Entry   cacos, imported, , unveneered
+        Entry   cacosf, imported, , unveneered
+        Entry   casin, imported, , unveneered
+        Entry   casinf, imported, , unveneered
+        Entry   catan, imported, , unveneered
+        Entry   catanf, imported, , unveneered
+        Entry   ccos, imported, , unveneered
+        Entry   ccosf, imported, , unveneered
+        Entry   csin, imported, , unveneered
+        Entry   csinf, imported, , unveneered
+        Entry   ctan, imported, , unveneered
+        Entry   ctanf, imported, , unveneered
+        Entry   cacosh, imported, , unveneered
+        Entry   cacoshf, imported, , unveneered
+        Entry   casinh, imported, , unveneered
+        Entry   casinhf, imported, , unveneered
+        Entry   catanh, imported, , unveneered
+        Entry   catanhf, imported, , unveneered
+        Entry   ccosh, imported, , unveneered
+        Entry   ccoshf, imported, , unveneered
+        Entry   csinh, imported, , unveneered
+        Entry   csinhf, imported, , unveneered
+        Entry   ctanh, imported, , unveneered
+        Entry   ctanhf, imported, , unveneered
+        Entry   cexp, imported, , unveneered
+        Entry   cexpf, imported, , unveneered
+        Entry   clog, imported, , unveneered
+        Entry   clogf, imported, , unveneered
+        Entry   cabs, imported, , unveneered
+        Entry   cabsf, imported, , unveneered
+        Entry   cpow, imported, , unveneered
+        Entry   cpowf, imported, , unveneered
+        Entry   csqrt, imported, , unveneered
+        Entry   csqrtf, imported, , unveneered
+        Entry   carg, imported, , unveneered
+        Entry   cargf, imported, , unveneered
+        Entry   cimag, imported, , unveneered
+        Entry   cimagf, imported, , unveneered
+        Entry   conj, imported, , unveneered
+        Entry   conjf, imported, , unveneered
+        Entry   cproj, imported, , unveneered
+        Entry   cprojf, imported, , unveneered
+        Entry   creal, imported, , unveneered
+        Entry   crealf, imported, , unveneered
+
+        END

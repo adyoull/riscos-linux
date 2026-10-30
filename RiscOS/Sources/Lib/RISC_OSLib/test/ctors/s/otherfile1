@@ -1,0 +1,49 @@
+; Copyright 2023 RISC OS Open Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+
+        EXPORT   |otherfile1_ctor|
+        EXPORT   |otherfile1_dtor|
+        IMPORT   |_printf|
+
+        AREA     |C$$ctorvec|, DATA, READONLY
+
+        &        |otherfile1_ctor|
+
+        AREA     |C$$ctor|, CODE, READONLY
+
+        ; Padding to ensure function isn't at start of area
+        ; (looks like there may be issues with testing exclusivity of
+        ; upper end of areas with old C libraries!)
+        DCI      0
+
+|otherfile1_ctor| ROUT
+        ADR      r0,%F01
+        B        |_printf|
+01      =        "In otherfile1 constructor", 10, 0
+        ALIGN
+
+        AREA     |C$$dtorvec|, DATA, READONLY
+
+        &        |otherfile1_dtor|
+
+        AREA     |C$$dtor|, CODE, READONLY
+
+|otherfile1_dtor| ROUT
+        ADR      r0, %F01
+        B        |_printf|
+01      =        "In otherfile1 destructor", 10, 0
+        ALIGN
+
+        END

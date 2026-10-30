@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "3.82"
+Module_Version          SETA    382
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "29 Jul 2026"
+Module_ApplicationDate  SETS    "29-Jul-26"
+Module_ComponentName    SETS    "FontManager"
+Module_FullVersion      SETS    "3.82"
+Module_HelpVersion      SETS    "3.82 (29 Jul 2026)"
+                        END

@@ -1,0 +1,138 @@
+/* Copyright 2026 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include "swis.h"
+
+#include "Global/NewErrors.h"
+#include "Global/ModHand.h"
+
+#include "MsgCode.h"
+#include "TerrMgrInt.h"
+#include "TerritoryMgrHdr.h"
+
+static bool     msgfile_open;
+static uint32_t msg_block[4];
+
+/*!
+ * \brief  Try to open the Messages file
+ * \return Error block pointer
+ */
+static _kernel_oserror *messages_open(void)
+{
+	_kernel_oserror *err;
+
+	/* Only open once */
+	if (msgfile_open) return NULL;
+
+#ifndef ROM
+	/* Register the messages for RAM based modules */
+	err = _swix(ResourceFS_RegisterFiles, _IN(0), Resources());
+	if (err != NULL) return err;
+#endif
+
+	/* Try open, report fail */
+	err = _swix(MessageTrans_OpenFile, _INR(0,2), msg_block, Module_MessagesFile, 0);
+#ifndef ROM
+	if (err != NULL) _swix(ResourceFS_DeregisterFiles, _IN(0), Resources());
+#endif
+	msgfile_open = (err == NULL);
+
+	return err;
+}
+
+/*!
+ * \brief  Try to lookup a token in the messages file
+ * \param  token Token to lookup
+ * \param  buffer Where to expand the token into
+ * \param  buffersz Space in the buffer
+ * \return Pointer to the buffer, or NULL if failed
+ */
+const char *messages_lookup(const char *token, char *buffer, size_t buffersz)
+{
+	_kernel_oserror *err;
+
+	if (messages_open() == NULL)
+	{
+		err = _swix(MessageTrans_Lookup, _INR(0,3), msg_block,
+		            token, buffer, buffersz);
+		if (err == NULL) return buffer;
+	}
+	return NULL; /* Failed lookup */
+}
+
+/*!
+ * \brief  Try to lookup an error message in the messages file
+ * \param  errnum Error number to use
+ * \param  token Token to lookup
+ * \return Pointer to the error
+ */
+_kernel_oserror *messages_errorlookup(uint32_t errnum, const char *token)
+{
+	static _kernel_oserror translated;
+	_kernel_oserror *err;
+
+	err = messages_open();
+	if (err == NULL)
+	{
+		err = _swix(MessageTrans_Lookup, _INR(0,3), msg_block,
+		            token, &translated.errmess, sizeof(translated.errmess));
+		if (err == NULL)
+		{
+			/* Found the token, so set the desired error number */
+			translated.errnum = errnum;
+			err = &translated;
+		}
+	}
+	return err;
+}
+
+/*!
+ * \brief  Try to print a token out in place, followed by CRLF
+ * \param  token Token to print out
+ * \return Nothing
+ */
+void messages_writenl(const char *token)
+{
+	_kernel_oserror *err;
+	const char *text;
+	uint32_t textlen;
+
+	if (messages_open() == NULL)
+	{
+		err = _swix(MessageTrans_Lookup, _INR(0,2) | _OUTR(2,3), msg_block,
+		            token, 0, &text, &textlen);
+		if (err == NULL)
+		{
+			err = _swix(OS_WriteN, _INR(0,1), text, textlen);
+			if (err == NULL) _swix(OS_NewLine, 0);
+		}
+	}
+}
+
+/*!
+ * \brief  Mark the Messages as closed
+ * \return Nothing
+ */
+void messages_destroy(void)
+{
+	/* Tidy up and deregister */
+	if (msgfile_open) _swix(MessageTrans_CloseFile, _IN(0), msg_block);
+	msgfile_open = false;
+#ifndef ROM
+	_swix(ResourceFS_DeregisterFiles, _IN(0), Resources());
+#endif
+}

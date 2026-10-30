@@ -1,0 +1,20 @@
+;
+; This file is automatically maintained by srccommit, do not edit manually.
+;
+                        GBLS    Module_MajorVersion
+                        GBLA    Module_Version
+                        GBLS    Module_MinorVersion
+                        GBLS    Module_Date
+                        GBLS    Module_FullVersion
+                        GBLS    Module_ApplicationDate
+                        GBLS    Module_HelpVersion
+                        GBLS    Module_ComponentName
+Module_MajorVersion     SETS    "2.54"
+Module_Version          SETA    254
+Module_MinorVersion     SETS    ""
+Module_Date             SETS    "14 Mar 2026"
+Module_ApplicationDate  SETS    "14-Mar-26"
+Module_ComponentName    SETS    "CDFSFiler"
+Module_FullVersion      SETS    "2.54"
+Module_HelpVersion      SETS    "2.54 (14 Mar 2026)"
+                        END

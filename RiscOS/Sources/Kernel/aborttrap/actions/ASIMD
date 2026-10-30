@@ -1,0 +1,189 @@
+# Copyright (c) 2021, RISC OS Open Ltd
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met: 
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of RISC OS Open Ltd nor the names of its contributors
+#       may be used to endorse or promote products derived from this software
+#       without specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+# 
+
+# A8.8.320 VLD1 (multiple single elements)
+VLD1_mult_A1a(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD1_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+VLD1_mult_A1b as if VLD1_mult_A1a
+VLD1_mult_A1c as if VLD1_mult_A1a
+
+# A8.8.321 VLD1 (single element to one lane)
+VLD1_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD1_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}
+
+# A8.8.322 VLD1 (single element to all lanes)
+VLD1_alllanes_A1(D:Vd,Rn,size,T,a,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD1_alllanes(ctx,D_Vd,Rn,size,T,a,Rm);
+}
+
+# A8.8.323 VLD2 (multiple 2-element structures)
+VLD2_mult_A1(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD2_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+# A8.8.324 VLD2 (single 2-element structure to one lane)
+VLD2_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD2_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}
+
+# A8.8.325 VLD2 (single 2-element structure to all lanes)
+VLD2_alllanes_A1(D:Vd,Rn,size,T,a,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD2_alllanes(ctx,D_Vd,Rn,size,T,a,Rm);
+}
+
+# A8.8.326 VLD3 (multiple 3-element structures)
+VLD3_mult_A1(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD3_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+# A8.8.327 VLD3 (single 3-element structure to one lane)
+VLD3_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD3_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}
+
+# A8.8.328 VLD3 (single 3-element structure to all lanes)
+VLD3_alllanes_A1(D:Vd,Rn,size,T,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD3_alllanes(ctx,D_Vd,Rn,size,T,Rm);
+}
+
+# A8.8.329 VLD4 (multiple 4-element structures)
+VLD4_mult_A1(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD4_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+# A8.8.330 VLD4 (single 4-element structure to one lane)
+VLD4_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD4_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}
+
+# A8.8.331 VLD4 (single 4-element structure to all lanes)
+VLD4_alllanes_A1(D:Vd,Rn,size,T,a,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VLD4_alllanes(ctx,D_Vd,Rn,size,T,a,Rm);
+}
+
+# A8.8.404 VST1 (multiple single elements)
+VST1_mult_A1(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST1_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+# A8.8.405 VST1 (single element from one lane)
+VST1_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST1_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}
+
+# A8.8.406 VST2 (multiple 2-element structures)
+VST2_mult_A1(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST2_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+# A8.8.407 VST2 (single 2-element structure from one lane)
+VST2_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST2_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}
+
+# A8.8.408 VST3 (multiple 3-element structures)
+VST3_mult_A1(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST3_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+# A8.8.409 VST3 (single 3-element structure from one lane)
+VST3_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST3_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}
+
+# A8.8.410 VST4 (multiple 4-element structures)
+VST4_mult_A1(D:Vd,Rn,type,size,align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST4_mult(ctx,D_Vd,Rn,type,size,align,Rm);
+}
+
+# A8.8.411 VST4 (single 4-element structure from one lane)
+VST4_onelane_A1(D:Vd,Rn,size,index_align,Rm,nonstandard)
+{
+	if(nonstandard)
+		return aborttrap_ERROR(Unexpected);
+	return aborttrap_VST4_onelane(ctx,D_Vd,Rn,size,index_align,Rm);
+}

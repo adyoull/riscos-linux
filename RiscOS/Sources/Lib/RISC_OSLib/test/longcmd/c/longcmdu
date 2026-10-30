@@ -1,0 +1,120 @@
+/* Copyright 2023 RISC OS Open Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* Test handling of long command lines */
+/* This program is a helper to prepare a long command line which can be consumed by LongCmd. You can shrink application space, run LongCmdU, and then run LongCmd or LongCmdM in order to test the C library's ability to extend application space during initialisation / command line handling */
+#include "os.h"
+#include "osmodule.h"
+
+static int rand(void)
+{
+	static unsigned int xs = 1;
+	xs ^= xs << 7;
+	xs ^= xs >> 9;
+	xs ^= xs << 8;
+	return xs;
+}
+
+extern os_error *ddeutils_setclsize(int len);
+extern os_error *ddeutils_setcl(void *buf);
+extern os_error *ddeutils_flushcl();
+
+os_error *mainu(const char *name, const char *tail)
+{
+	/* 'X' as the argument flushes the CL */
+	if (*tail == 'X')
+	{
+		xos_write0("Flushing CL");
+		xos_new_line();
+		ddeutils_flushcl();
+		return NULL;
+	}
+	/* Extract command line length */
+	unsigned int len = 0;
+	unsigned int c = 0;
+	while (c <= 9)
+	{
+		len = len*10 + c;
+		c = (*tail++) - '0';
+	}
+	if (!c)
+	{
+		xos_write0("Usage: LongCmdU <length>");
+		xos_new_line();
+		return NULL;
+	}
+	/* Allocate buffer needed */
+	char *buf;
+	os_error *e = xosmodule_alloc(len + 32, (void **) &buf);
+	if (e)
+	{
+		return e;
+	}
+	const char *substr = "--sub ";
+	char *pos = buf;
+	while ((c = *substr++) != 0)
+	{
+		*pos++ = c;
+	}
+	/* Write length */
+	char *crcstr,*text;
+	e = xos_convert_cardinal4(len,pos,32,&pos);
+	if (e)
+	{
+		goto end;
+	}
+	*pos++ = ' ';
+	crcstr = pos;
+	text = crcstr + 8;
+	/* Fill buffer with random text */
+	for(unsigned i=0;i<len;i++)
+	{
+		text[i] = (rand() & 0xf) + 'a';
+	}
+	text[len] = 0;
+	/* Get CRC */
+	int crc;
+	e = xos_crc(0,(byte *) text,(byte *) text+len,1,&crc);
+	if (e)
+	{
+		goto end;
+	}
+	/* Write CRC */
+	e = xos_convert_cardinal2(crc,crcstr,8,&crcstr);
+	while (crcstr < text)
+	{
+		*crcstr++ = ' ';
+	}
+	/* Set up DDEUtils */
+	e = ddeutils_setclsize(text+len+1 - buf);
+	if (e)
+	{
+		goto end;
+	}
+	e = ddeutils_setcl(buf);
+	if (e)
+	{
+		goto end;
+	}
+	xos_write0(buf);
+	xos_new_line();
+	xosmodule_free(buf);
+	buf = 0;
+	xos_write0("Ready");
+	xos_new_line();
+end:
+	if (buf) xosmodule_free(buf);
+	return e;
+}

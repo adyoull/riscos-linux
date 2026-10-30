@@ -1,0 +1,834 @@
+; Copyright 1996 Acorn Computers Ltd
+; Copyright 2016 Castle Technology Ltd
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+
+; Page table interaction - "long descriptor" format (ARMv7+ 8 bytes per entry)
+
+; Note that to ensure page table reads & writes are seen as atomic by both the
+; MMU and other CPU cores, we only use LDRD & STRD when reading/writing entries.
+
+;----------------------------------------------------------------------------------------
+; logical_to_physical
+;
+;       In:     r4 = logical address
+;
+;       Out:    r5 corrupt
+;               CC => r8,r9 = physical address
+;               CS => invalid logical address, r8,r9 corrupted
+;
+;       Convert logical address to physical address.
+;
+logical_to_physical_LongDesc
+        LDR     r9, =LL3PT
+        MOV     r5, r4, LSR #12         ; r5 = logical page number
+        ADD     r5, r9, r5, LSL #3      ; r5 -> L3PT entry for logical address
+        MOV     r8, r5, LSR #12         ; r8 = page offset to L3PT entry for logical address
+        ADD     r8, r9, r8, LSL #3      ; r8 -> L3PT entry for L3PT entry for logical address
+        LDRD    r8, [r8]
+        ASSERT  LL3_Page != 0
+        ASSERT  LL_Fault = 0
+        TST     r8, #LL3_Page           ; Check for valid (4K) page
+        BEQ     meminfo_returncs
+        LDRD    r8, [r5]
+        TST     r8, #LL3_Page           ; Check for valid (4K) page
+        BEQ     meminfo_returncs
+        BFI     r8, r4, #0, #12         ; Valid, so apply offset within the page
+        AND     r9, r9, #LL_HighAddr    ; And high address mask
+        CLC
+        MOV     pc, lr
+
+ [ CacheablePageTables
+MakePageTablesCacheable_LongDesc ROUT
+        Entry   "r0,r4-r5,r8-r9"
+        BL      GetPageFlagsForCacheablePageTables
+        ; Update PageTable_PageFlags
+        LDR     r1, =ZeroPage
+        STR     r0, [r1, #PageTable_PageFlags]
+        ; Adjust the logical mapping of the page tables to use the specified page flags
+        LDR     r1, =LL1PT
+        LDR     r2, =4096 ; Round up to page multiple
+        BL      AdjustMemoryPageFlags
+        LDR     r1, =LL2PT
+        LDR     r2, =16*1024
+        BL      AdjustMemoryPageFlags
+        LDR     r1, =LL3PT
+        LDR     r2, =8*1024*1024
+        BL      AdjustMemoryPageFlags
+        ; Update the TTBR
+        LDR     r4, =LL1PT
+        BL      logical_to_physical_LongDesc
+        MOV     r0, r8 ; Assume only 32bit address
+        LDR     r1, =ZeroPage
+        BL      SetTTBR_LongDesc
+        ; Perform a full TLB flush to make sure the new mappings are visible
+        ARMop   TLB_InvalidateAll,,,r1
+        EXIT
+
+MakePageTablesNonCacheable_LongDesc ROUT
+        Entry   "r0-r1,r4-r5,r8-r9"
+        ; Flush the page tables from the cache, so that when we update the TTBR
+        ; below we can be sure that the MMU will be seeing the current page
+        ; tables
+        LDR     r0, =LL1PT
+        ADD     r1, r0, #4096
+        LDR     r4, =ZeroPage
+        ARMop   Cache_CleanRange,,,r4
+        LDR     r0, =LL2PT
+        ADD     r1, r0, #16*1024
+        ARMop   Cache_CleanRange,,,r4
+        LDR     r0, =LL3PT
+        ADD     r1, r0, #8*1024*1024
+        ARMop   Cache_CleanRange,,,r4
+        ; Update the TTBR so the MMU performs non-cacheable accesses
+        LDR     r0, =AreaFlags_PageTablesAccess :OR: DynAreaFlags_NotCacheable :OR: DynAreaFlags_NotBufferable
+        STR     r0, [r4, #PageTable_PageFlags]
+        LDR     r4, =LL1PT
+        BL      logical_to_physical_LongDesc
+        MOV     r0, r8 ; Assume only 32bit address
+        LDR     r1, =ZeroPage
+        BL      SetTTBR_LongDesc
+        ; Perform a full TLB flush just in case
+        ARMop   TLB_InvalidateAll,,,r1
+        ; Now we can adjust the logical mapping of the page tables to be non-cacheable
+        LDR     r0, [r1, #PageTable_PageFlags]
+        LDR     r1, =LL1PT
+        LDR     r2, =4096
+        BL      AdjustMemoryPageFlags
+        LDR     r1, =LL2PT
+        LDR     r2, =16*1024
+        BL      AdjustMemoryPageFlags
+        LDR     r1, =LL3PT
+        LDR     r2, =8*1024*1024
+        BL      AdjustMemoryPageFlags
+        EXIT
+ ]
+
+;**************************************************************************
+;
+;       AllocateBackingLevel2 - Allocate L3 pages for an area
+;
+;       Internal routine called by DynArea_Create
+;
+; in:   r3 = base address (will be page aligned)
+;       r4 = area flags (NB if doubly mapped, then have to allocate for both halves)
+;       r5 = size (of each half in doubly mapped areas)
+;
+; out:  If successfully allocated pages, then
+;         All registers preserved
+;         V=0
+;       else
+;         r0 -> error
+;         V=1
+;       endif
+
+AllocateBackingLevel2_LongDesc Entry "r0-r8,r11"
+        TST     r4, #DynAreaFlags_DoublyMapped          ; if doubly mapped
+        SUBNE   r3, r3, r5                              ; then area starts further back
+        MOVNE   r5, r5, LSL #1                          ; and is twice the size
+
+; NB no need to do sanity checks on addresses here, they've already been checked
+
+; now round address range to 2M boundaries
+
+        ADD     r5, r5, r3                              ; r5 -> end
+        MOV     r0, #1 :SHL: 21
+        SUB     r0, r0, #1
+        BIC     r8, r3, r0                              ; round start address down (+ save for later)
+        ADD     r5, r5, r0
+        BIC     r5, r5, r0                              ; but round end address up
+
+; first go through existing L3PT working out how much we need
+
+        LDR     r7, =LL3PT
+        ADD     r3, r7, r8, LSR #9                      ; r3 -> start of L3PT for area
+        ADD     r5, r7, r5, LSR #9                      ; r5 -> end of L3PT for area +1
+
+        ADD     r1, r7, r3, LSR #9                      ; r1 -> L3PT for r3
+        ADD     r2, r7, r5, LSR #9                      ; r2 -> L3PT for r5
+
+        TEQ     r1, r2                                  ; if no pages needed
+        BEQ     %FT30
+
+        MOV     r4, #0                                  ; number of backing pages needed
+10
+        LDRD    r6, [r1], #8                            ; get L3PT entry for L3PT
+        TST     r6, #LL_TypeMask                        ; EQ if translation fault
+        ADDEQ   r4, r4, #1                              ; if not there then 1 more page needed
+        TEQ     r1, r2
+        BNE     %BT10
+
+; if no pages needed, then exit
+
+        TEQ     r4, #0
+        BEQ     %FT30
+
+; now we need to claim r4 pages from the free pool, if possible; return error if not
+
+        LDR     r1, =ZeroPage
+        LDR     r6, [r1, #FreePoolDANode + DANode_PMPSize]
+        SUBS    r6, r6, r4                              ; reduce free pool size by that many pages
+        BCS     %FT14                                   ; if enough, skip next bit
+
+; not enough pages in free pool currently, so try to grow it by the required amount
+
+        Push    "r0, r1"
+        MOV     r0, #ChangeDyn_FreePool
+        RSB     r1, r6, #0                              ; size change we want (+ve)
+        MOV     r1, r1, LSL #12
+        SWI     XOS_ChangeDynamicArea
+        Pull    "r0, r1"
+        BVS     %FT90                                   ; didn't manage change, so report error
+
+        MOV     r6, #0                                  ; will be no pages left in free pool after this
+14
+        STR     r6, [r1, #FreePoolDANode + DANode_PMPSize] ; if possible then update size
+
+        LDR     r0, [r1, #FreePoolDANode + DANode_PMP]  ; r0 -> free pool page list
+        ADD     r0, r0, r6, LSL #2                      ; r0 -> first page we're taking out of free pool
+
+        LDR     lr, =LL2PT
+        ADD     r8, lr, r8, LSR #18                     ; point r8 at start of L2 we may be updating
+        LDR     r7, =LL3PT
+        ADD     r1, r7, r3, LSR #9                      ; point r1 at L3PT for r3 again
+        LDR     r11, =ZeroPage
+        LDR     r11, [r11, #PageTable_PageFlags]        ; access privs (+CB bits)
+20
+        LDRD    r6, [r1], #8                            ; get L2PT entry again
+        TST     r6, #LL_TypeMask                        ; if no fault
+        BNE     %FT25                                   ; then skip
+
+        Push    "r1-r2, r4"
+        MOV     lr, #-1
+        LDR     r2, [r0]                                ; get page number to use
+        STR     lr, [r0], #4                            ; remove from PMP
+        Push    "r0"
+        BL      BangCamUpdate_LongDesc                  ; Map in to L3PT access window
+
+; now that the page is mapped in we can zero its contents (=> cause translation fault for area initially)
+; L2PT won't know about the page yet, so mapping it in with garbage initially shouldn't cause any issues
+
+        ADD     r0, r3, #4096
+        MOV     r1, #0
+        MOV     r2, #0
+        MOV     r4, #0
+        MOV     r6, #0
+15
+        STMDB   r0!, {r1,r2,r4,r6}                      ; store data
+        TEQ     r0, r3
+        BNE     %BT15
+
+        ; Make sure the page is seen to be clear before we update L2PT to make
+        ; it visible to the MMU
+        PageTableSync
+
+        Pull    "r0-r2, r4"
+
+        LDR     lr, =ZeroPage
+        LDR     r6, [lr, #LxPTUsed]
+        ADD     r6, r6, #4096
+        STR     r6, [lr, #LxPTUsed]
+
+; now update 1 entry in L2PT (corresponding to 2M of address space which is covered by the 4K of L3)
+; and point it at the physical page we've just allocated (r1!-8 will already hold physical address+bits now!)
+
+        LDRD    r6, [r1, #-8]                           ; r6,r7 = L3PT entry describing our logical mapping of the new page
+        BFC     r6, #0, #LL_LowAddr_Start               ; Low phys addr
+        AND     r7, r7, #LL_HighAddr                    ; High phys addr
+        ORR     r6, r6, #LL12_Table                     ; It's a table ptr
+        STRD    r6, [r8]                                ; Store as L2PT entry
+25
+        ADD     r3, r3, #4096                           ; advance L3PT logical address
+        ADD     r8, r8, #8                              ; move onto L2 for next 2M
+
+        TEQ     r1, r2
+        BNE     %BT20
+        PageTableSync
+30
+        CLRV
+        EXIT
+
+; Come here if not enough space in free pool to allocate level3
+
+90
+        ADRL    r0, ErrorBlock_CantAllocateLevel2
+  [ International
+        BL      TranslateError
+  |
+        SETV
+  ]
+        STR     r0, [sp]
+        EXIT
+
+;**************************************************************************
+;
+;       UpdateL1PTForPageReplacement
+;
+; Updates L2PT to point to the right place, if a physical L3PT page has been
+; replaced with a substitute.
+;
+; In: r0 = log addr of page being replaced
+;     r1,r2 = phys addr of replacement page
+;
+; Out: r0-r4, r7-r12 can be corrupted
+;
+UpdateL1PTForPageReplacement_LongDesc ROUT
+        LDR     r3, =LL3PT
+        SUBS    r0, r0, r3
+        MOVCC   pc, lr                          ; address is below L3PT
+        CMP     r0, #8*1024*1024
+        MOVCS   pc, lr                          ; address is above L3PT
+
+        LDR     r3, =LL2PT
+        ADD     r0, r3, r0, LSR #(12-3)         ; address in L2 of entry to update
+        LDRD    r8, [r0]                        ; load L2PT entry
+        MOV     r1, r1, LSR #LL_LowAddr_Start
+        BFI     r8, r1, #LL_LowAddr_Start, #LL_LowAddr_Size ; Update low phys addr
+        ASSERT  LL_HighAddr_Start = 0
+        BFI     r9, r2, #0, #LL_HighAddr_Size   ; Update high phys addr
+        STRD    r8, [r0]
+
+        ; In order to guarantee that the result of a page table write is
+        ; visible, the ARMv6+ memory order model requires us to perform TLB
+        ; maintenance (equivalent to the MMU_ChangingUncached ARMop) after we've
+        ; performed the write. Performing the maintenance beforehand (as we've
+        ; done traditionally) will work most of the time, but not always.
+        LDR     r3, =ZeroPage
+        ARMop   MMU_ChangingUncached,,tailcall,r3
+
+;
+; ----------------------------------------------------------------------------------
+;
+;convert page number in $pnum to L3PT entry (physical address+protection bits),
+;using cached PhysRamTable entries for speed
+;
+;entry: $ptable -> PhysRamTable, $pbits,$pbits2 = protection bits
+;       $cache0, $cache1, $cache2 = PhysRamTable cache
+;exit:  $cache0, $cache1, $cache2 updated
+;
+
+        MACRO
+        PageNumToL3PT $pnum,$pnum2,$ptable,$cache0,$cache1,$cache2,$pbits,$pbits2
+        MOV     $pnum2,$pbits2        ; Save $pbits2 so it can be used as cache func in/out
+        SUB     $pbits2,$pnum,$cache0 ; no. pages into block
+        CMP     $pbits2,$cache2
+        BLHS    PageNumToL3PTCache_$ptable._$cache0._$cache1._$cache2._$pbits2
+        ADD     $pnum,$cache1,$pbits2 ; physical address of page (in page units)
+        MOV     $pbits2,$pnum2
+        ORR     $pnum2,$pnum2,$pnum,LSR #20 ; High attr + high addr
+        ORR     $pnum,$pbits,$pnum,LSL #12 ; Low attr + low addr
+        MEND
+
+        MACRO
+        PageNumToL3PTInit $ptable,$cache0,$cache1,$cache2
+        ASSERT  $cache2 > $cache1
+        LDR     $ptable,=ZeroPage+PhysRamTable
+        MOV     $cache0,#0
+        LDMIA   $ptable,{$cache1,$cache2}
+        MOV     $cache2,$cache2,LSR #12
+        MEND
+
+PageNumToL3PTCache_r4_r5_r6_r7_r12 ROUT
+        Entry   "r4"
+        ADD     r12,r12,r5 ; Restore page number
+        MOV     r5,#0
+10
+        LDMIA   r4!,{r6,r7} ; Get PhysRamTable entry
+        MOV     r7,r7,LSR #12
+        CMP     r12,r7
+        SUBHS   r12,r12,r7
+        ADDHS   r5,r5,r7
+        BHS     %BT10
+        EXIT    ; r5-r7 = cache entry, r12 = offset into entry
+
+; ----------------------------------------------------------------------------------
+;
+;AMB_movepagesin_L2PT
+;
+;updates L3PT for new logical page positions, does not update CAM
+;
+; entry:
+;       r3  =  new logical address of 1st page
+;       r8  =  number of pages
+;       r9  =  page flags
+;       r10 -> page list
+;
+AMB_movepagesin_L2PT_LongDesc ROUT
+        Entry   "r0-r12"
+
+        MOV     r0, #0
+        GetPTE  r11, 4K, r0, r9, LongDesc
+
+        PageNumToL3PTInit r4,r5,r6,r7
+
+        LDR     r9,=LL3PT
+        ADD     r9,r9,r3,LSR #(Log2PageSize-3) ;r9 -> L3PT for 1st new logical page
+
+        CMP     r8,#2
+        BLT     %FT20
+10
+        LDMIA   r10!,{r0,r2}         ;next 2 page numbers
+        PageNumToL3PT r0,r1,r4,r5,r6,r7,r11,r12
+        PageNumToL3PT r2,r3,r4,r5,r6,r7,r11,r12
+        STRD    r0,[r9],#16          ;write L3PT entries
+        STRD    r2,[r9,#-8]
+        SUB     r8,r8,#2
+        CMP     r8,#2
+        BGE     %BT10
+20
+        CMP     r8,#0
+        BEQ     %FT35
+        LDR     r0,[r10],#4
+        PageNumToL3PT r0,r1,r4,r5,r6,r7,r11,r12
+        STRD    r0,[r9]
+35
+        PageTableSync
+        EXIT
+
+; ----------------------------------------------------------------------------------
+;
+;AMB_movecacheablepagesout_L2PT
+;
+;updates L3PT for old logical page positions, does not update CAM
+;
+; entry:
+;       r3  =  old page flags
+;       r4  =  old logical address of 1st page
+;       r8  =  number of pages
+;
+AMB_movecacheablepagesout_L2PT_LongDesc
+        Entry   "r0-r8"
+
+        ; Calculate L3PT flags needed to make the pages uncacheable
+        ; Assume all pages will have identical flags (or at least close enough)
+        LDR     lr,=ZeroPage
+        LDR     lr,[lr, #MMU_PCBTrans]
+        GetTempUncache_LongDesc r0, r3, lr, r1
+        LDR     r1, =TempUncache_L3PTMask
+
+        LDR     lr,=LL3PT
+        ADD     lr,lr,r4,LSR #(Log2PageSize-3)    ;lr -> L3PT 1st entry
+
+        CMP     r8,#2
+        BLT     %FT20
+10
+        LDRD    r2,[lr]
+        LDRD    r4,[lr,#8]
+        BIC     r2,r2,r1
+        BIC     r4,r4,r1
+        ORR     r2,r2,r0
+        ORR     r4,r4,r0
+        STRD    r2,[lr],#16
+        STRD    r4,[lr,#-8]
+        SUB     r8,r8,#2
+        CMP     r8,#2
+        BGE     %BT10
+20
+        CMP     r8,#0
+        BEQ     %FT35
+        LDRD    r2,[lr]
+        BIC     r2,r2,r1
+        ORR     r2,r2,r0
+        STRD    r2,[lr]
+35
+        FRAMLDR r0,,r4                           ;address of 1st page
+        FRAMLDR r1,,r8                           ;number of pages
+        LDR     r3,=ZeroPage
+        ARMop   MMU_ChangingEntries,,,r3
+        FRAMLDR r4
+        FRAMLDR r8
+        B       %FT55 ; -> moveuncacheablepagesout_L2PT (avoid pop+push of large stack frame)
+
+; ----------------------------------------------------------------------------------
+;
+;AMB_moveuncacheablepagesout_L2PT
+;
+;updates L3PT for old logical page positions, does not update CAM
+;
+; entry:
+;       r4  =  old logical address of 1st page
+;       r8  =  number of pages
+;
+AMB_moveuncacheablepagesout_L2PT_LongDesc
+        ALTENTRY
+55      ; Enter here from movecacheablepagesout
+        LDR     lr,=LL3PT
+        ADD     lr,lr,r4,LSR #(Log2PageSize-3)    ;lr -> L2PT 1st entry
+
+        MOV     r0,#0                             ;0 means translation fault
+        MOV     r1,#0
+
+        CMP     r8,#8
+        BLT     %FT70
+60
+        STRD    r0,[lr],#8*8
+        STRD    r0,[lr,#-7*8]
+        STRD    r0,[lr,#-6*8]
+        STRD    r0,[lr,#-5*8]
+        STRD    r0,[lr,#-4*8]
+        STRD    r0,[lr,#-3*8]
+        STRD    r0,[lr,#-2*8]
+        STRD    r0,[lr,#-1*8]
+        SUB     r8,r8,#8
+        CMP     r8,#8
+        BGE     %BT60
+70
+        CMP     r8,#0
+        BEQ     %FT85
+80
+        STRD    r0,[lr],#8
+        SUBS    r8,r8,#1
+        BNE     %BT80
+85
+        FRAMLDR r0,,r4                           ;address of 1st page
+        FRAMLDR r1,,r8                           ;number of pages
+        LDR     r3,=ZeroPage
+        ARMop   MMU_ChangingUncachedEntries,,,r3 ;no cache worries, hoorah
+        EXIT
+
+ [ AMB_LazyMapIn
+AMB_SetPageFlags_LongDesc
+        Entry
+; Calculate default page flags
+        MOV     R0, #0
+        MOV     R1, #0
+        GetPTE  R0, 4K, R0, R1, LongDesc
+        STR     R0,AMBPageFlags
+        Exit
+ ]
+
+; Scan a sparsely mapped dynamic area for the next mapped/unmapped section
+;
+; In:
+;   r3 = end address
+;   r4 = 0 to release, 1 to claim
+;   r8 = start address
+; Out:
+;   r1 = size of found area
+;   r8 = start address of found area, or >= r3 if nothing found
+;   r5-r7,r9 corrupt
+ScanSparse_LongDesc ROUT
+        LDR     r5,=LL3PT
+        ADD     r5,r5,r8,LSR #9      ;r5 -> L3PT for base (assumes 4k page)
+;
+;look for next fragment of region that needs to have mapping change
+20
+        CMP     r8,r3
+        MOVHS   pc,lr                ;done
+        LDRD    r6,[r5],#8           ;pick-up next L3PT entry
+        CMP     r4,#0                ;if operation is a release...
+        CMPEQ   r6,#0                ;...and L3PT entry is 0 (not mapped)...
+        ADDEQ   r8,r8,#&1000         ;...then skip page (is ok)
+        BEQ     %BT20
+        CMP     r4,#0                ;if operation is a claim (not 0)...
+        CMPNE   r6,#0                ;...and L3PT entry is non-0 (mapped)...
+        ADDNE   r8,r8,#&1000         ;...then skip page (is ok)
+        BNE     %BT20
+        MOV     r1,#&1000            ;else we need to do a change (1 page so far)
+30
+        ADD     r9,r8,r1
+        CMP     r9,r3
+        MOVHS   pc,lr
+        LDRD    r6,[r5],#8           ;pick-up next L3PT entry
+        CMP     r4,#1                ;if operation is a release (not 1)...
+        CMPNE   r6,#0                ;...and L3PT entry is non-0 (mapped)...
+        ADDNE   r1,r1,#&1000         ;...then count page as needing change
+        BNE     %BT30
+        CMP     r4,#1                ;if operation is a claim...
+        CMPEQ   r6,#0                ;...and L3PT entry is 0 (not mapped)...
+        ADDEQ   r1,r1,#&1000         ;...then count page as needing change
+        BEQ     %BT30
+        MOV     pc, lr
+
+; Set a page as temporarily uncacheable.
+; Doesn't modify the CAM or perform any cache/TLB maintenance.
+;
+; In:
+;   r0 = address
+;   r6 = page flags for r0
+;   r8 = page table flags from last call (undefined for first call)
+;   r9 = page flags from last call (-1 for first call)
+; Out:
+;   r8, r9 updated
+;   r1, r4, r5 corrupt
+MakeTempUncache_LongDesc ROUT
+        ; Calculate required page flags
+        CMP     r9, r6
+        BEQ     %FT06
+        LDR     r1, =ZeroPage
+        MOV     r9, r6
+        LDR     r1, [r1, #MMU_PCBTrans]
+        GetTempUncache_LongDesc r8, r9, r1, r4
+06
+        LDR     r1, =LL3PT
+        ; Bypass BangCAM and update L2PT directly (avoids CAM gaining any unwanted temp uncacheability flags)
+        ADD     r1, r1, r0, LSR #9
+        LDRD    r4, [r1]
+        BIC     r4, r4, #TempUncache_L3PTMask
+        ORR     r4, r4, r8
+        STRD    r4, [r1]
+        MOV     pc, lr
+
+; void *AccessPhysicalAddress(unsigned int flags, uint64_t phys, void **oldp)
+;
+; APCS calling convention.
+;
+; flags: RISC OS page flags
+; phys: Physical address to access
+; oldp: Pointer to word to store old state (or NULL)
+;
+; On exit: Returns logical address corresponding to 'phys'.
+;
+; Arranges for the physical address 'phys' to be (temporarily) mapped into
+; logical memory. In fact, at least the whole megabyte containing 'phys' is
+; mapped in. All mappings use the same shared logical window; the current state
+; of the window will be returned in 'oldp', to allow it to be restored (via
+; ReleasePhysicalAddress) once you've finised with it.
+;
+; Note: No cache maintenance performed. Assumption is that mappings will be
+; non-cacheable.
+AccessPhysicalAddress_LongDesc ROUT
+        ; Check physical address is valid on current CPU
+        LDR     ip, =ZeroPage
+        Push    "a1,v3,lr"
+        LDR     v3, [ip, #PhysIllegalMask]
+        TST     a3, v3
+        BNE     %FT90
+        UBFX    v3, a2, #0, #21                         ; v3 = offset for result
+        ; Use Get2MPTE to convert into page table entry
+        MOV     ip, a2
+        BFI     ip, a3, #0, #21                         ; Get2MPTE packs the high address bits into the low bits
+        GetPTE  a1, 2M, ip, a1, LongDesc
+        ; Force XN (easier to do afterwards since PPL mapping is non-trivial)
+        ORR     a2, a2, #LL_Page_HighAttr_XN
+ [ EmulateAP1
+        ; Don't allow AP1 emulation (usermode readonly); there's no XN+SW0
+        ; format defined in PPLTrans, so to ensure we can map from the page
+        ; table entry flags back to a valid AP number, we must clear SW0 and
+        ; lose the usermode access.
+        BIC     a2, a2, #LL_Page_HighAttr_SW0
+ ]
+        MOV     lr, a4
+        LDR     ip, =LL2PT + (PhysicalAccess:SHR:18)    ; ip -> L2PT entry
+        LDRD    a3, [ip]                                ; Get old entry
+        STRD    a1, [ip]                                ; Put new entry
+        ; Compact old entry into a single word if necessary
+        CMP     lr, #0
+        BFINE   a3, a4, #12, #8
+        STRNE   a3, [lr]
+        LDR     a1, =PhysicalAccess
+        ORR     a1, a1, v3
+        STR     a1, [sp]
+        ARMop   MMU_ChangingUncached                    ; sufficient, cause not cacheable
+        Pull    "a1,v3,pc"
+
+90      ; Invalid physical address
+        ADD     sp, sp, #1*4
+        MOV     a1, #0
+        Pull    "v3,pc"
+
+; void ReleasePhysicalAddress(void *old)
+;
+; APCS calling convention.
+;
+; Call with the 'oldp' value from a previous AccessPhysicalAddress call to
+; restore previous physical access window state.
+ReleasePhysicalAddress_LongDesc
+        LDR     ip, =LL2PT + (PhysicalAccess:SHR:18)    ; ip -> L2PT entry
+        ; The 8 byte page table entry is packed into the 4 byte token as folllows:
+        ; * Bits 0-11 give the low 12 bits of the page table entry (page type + low attributes)
+        ; * Bits 21-31 give bits 21-31 of the page table entry (low PA)
+        ; * Bits 12-20 give bits 32-39 of the page table entry (high PA)
+        ; * Bit 20 is spare  (kept at zero)
+        ; * The upper attributes are fixed (always XN)
+        UBFX    a2, a1, #12, #8                         ; Get high word
+        BICS    a1, a1, #&FF000                         ; Get low word
+        ORRNE   a2, a2, #LL_Page_HighAttr_XN            ; Always XN
+        STRD    a1, [ip]
+        ARMop   MMU_ChangingUncached,,tailcall          ; sufficient, cause not cacheable
+
+;
+; In:  a1 = flags  (L1_B,L1_C,L1_TEX)
+;           bit 20 set if doubly mapped
+;           bit 21 set if L1_AP specified (else default to AP_None)
+;      a2 = physical address
+;      a3 = size
+; Out: a1 = assigned logical address, or 0 if failed (no room)
+;
+RISCOS_MapInIO_LongDesc ROUT
+        MOV     a4, a3
+        MOV     a3, #0
+        ; drop through...
+;
+; In:  a1 = flags  (L1_B,L1_C,L1_TEX)
+;           bit 20 set if doubly mapped
+;           bit 21 set if L1_AP specified (else default to AP_None)
+;      a2,a3 = physical address
+;      a4 = size
+; Out: a1 = assigned logical address, or 0 if failed (no room)
+;
+RISCOS_MapInIO64_LongDesc ROUT
+
+; Will detect and return I/O space already mapped appropriately, or map and return new space
+; For simplicity and speed of search, works on a section (1Mb) granularity
+;
+
+        ASSERT  L1_B = 1:SHL:2
+        ASSERT  L1_C = 1:SHL:3
+ [ MEMM_Type = "VMSAv6"
+        ASSERT  L1_AP = 2_100011 :SHL: 10
+        ASSERT  L1_TEX = 2_111 :SHL: 12
+ |
+        ASSERT  L1_AP = 3:SHL:10
+        ASSERT  L1_TEX = 2_1111 :SHL: 12
+ ]
+
+        ! 0, "LongDescTODO Decide how to handle this"
+        AND     a1, a1, #MapInFlag_DoublyMapped
+        ORR     a1, a1, #LL12_Block+LLAttr_SO           ; privileged device mapping
+        ORR     a1, a1, #LL_Page_LowAttr_AF+LL_Page_LowAttr_SH1+LL_Page_LowAttr_SH0
+RISCOS_MapInIO_LowAttr_LongDesc ; a1 bits 0-11 = low attributes, bits 20+ = our extra flags
+        Entry   "a2,v1-v8"
+        LDR     ip, =ZeroPage
+        SUB     a4, a4, #1                              ; reduce by 1 so end physical address is inclusive
+        ADDS    v1, a2, a4
+        ADC     v2, a3, #0                              ; v1,v2 = end physical address
+        LDR     v3, [ip, #PhysIllegalMask]
+        TST     v2, v3
+        MOVNE   a1, #0
+        BNE     %FT90                                   ; can't map in physical addresses in this range
+
+        MOV     v4, a2, LSR #21
+        ORR     v4, v4, a3, LSL #11                     ; v4 = physical start 2MB to map
+        MOV     v5, v1, LSR #21
+        ORR     v5, v5, v2, LSL #11
+        ADD     v5, v5, #1                              ; v5 = exclusive physical end 2MB to map
+        ANDS    v8, a1, #MapInFlag_DoublyMapped
+        SUBNE   v8, v5, v4                              ; v8 = offset of second mapping (in 2MB) or 0
+        UBFX    a1, a1, #0, #LL_LowAttr_Start+LL_LowAttr_Size ; mask out our extra flags
+        ORR     a1, a1, v4, LSL #21
+        MOV     a2, v4, LSR #11
+        ORR     a2, a2, #LL_Page_HighAttr_XN            ; a1,a2 = first PT entry to match
+ [ EmulateAP1
+        ; Don't allow AP1 emulation (usermode readonly); there's no XN+SW0
+        ; format defined in PPLTrans, so to ensure we can map from the page
+        ; table entry flags back to a valid AP number, we must clear SW0 and
+        ; lose the usermode access.
+        BIC     a2, a2, #LL_Page_HighAttr_SW0
+ ]
+        LDR     v7, [ip, #IOAllocPtr]
+        MOV     v7, v7, LSR #18                         ; v7 = logical 2MB*8 that we're checking for a match
+        LDR     v1, =LL2PT
+        LDR     v2, [ip, #IOAllocTop]
+        MOV     v2, v2, LSR #18                         ; v2 = last logical 2MB*8 to check (exclusive)
+10
+        ADD     ip, v7, v8, LSL #3                      ; logical 2MB*8 of base mapping or second mapping if there is one
+        CMP     ip, v2
+        BHS     %FT50                                   ; run out of logical addresses to check
+        LDRD    a3, [v1, v7]                            ; check only or first entry
+        TEQ     a1, a3
+        TEQEQ   a2, a4
+        LDREQD  a3, [v1, ip]                            ; check only or second entry
+        TEQEQ   a1, a3
+        TEQEQ   a2, a4
+        ADD     v7, v7, #8                              ; next logical 2MB to check
+        BNE     %BT10
+
+        ; Found start of requested IO already mapped, and with required flags
+        ; Now check that the remaining secions are all there too
+        MOV     v6, v4                                  ; current 2MB being checked
+        MOV     v3, v7, LSL #18
+        SUB     v3, v3, #1:SHL:21                       ; start logical address
+20
+        ADD     v6, v6, #1                              ; next physical 2MB
+        ADDS    a1, a1, #1:SHL:21                       ; next PTE
+        ADC     a2, a2, #0
+        ADD     ip, v7, v8, LSL #3
+        CMP     v6, v5
+        BHS     %FT80
+        CMP     ip, v2
+        BHS     %FT45                                   ; run out of logical addresses to check
+        LDRD    a3, [v1, v7]                            ; check only or first entry
+        TEQ     a1, a3
+        TEQEQ   a2, a4
+        LDREQD  a3, [v1, ip]                            ; check only or second entry
+        TEQEQ   a1, a3
+        TEQEQ   a2, a4
+        ADDEQ   v7, v7, #8                              ; next logical 2MB*8
+        BEQ     %BT20                                   ; good so far, try next entry
+        ; Mismatch, rewind PTE and continue outer loop
+        SUB     v6, v6, v4
+        SUBS    a1, a1, v6, LSL #21
+        SBC     a2, a2, v6, LSR #11    
+        B       %BT10
+
+45
+        ; Rewind PTE
+        SUB     v6, v6, v4
+        SUBS    a1, a1, v6, LSL #21
+        SBC     a2, a2, v6, LSR #11
+50      ; Request not currently mapped, only partially mapped, or mapped with wrong flags
+        LDR     ip, =ZeroPage
+        LDR     a3, [ip, #IOAllocPtr]
+        MOV     a3, a3, LSR #21
+        SUB     v7, v5, v4                              ; v7 = number of 2MB required
+        SUB     a3, a3, v7
+        MOV     v3, a3, LSL #21
+        LDR     v6, [ip, #IOAllocLimit]
+        CMP     v3, v6                                  ; run out of room to allocate IO?
+        MOVLS   a1, #0                                  ; LS is to match previous version of the code - perhaps should be LO?
+        BLS     %FT90
+        STR     v3, [ip, #IOAllocPtr]
+        MOV     a3, a3, LSL #3
+60
+        ADD     ip, a3, v8, LSL #3
+        STRD    a1, [v1, a3]                            ; write only or first entry
+        STRD    a1, [v1, ip]                            ; write only or second entry
+        ADDS    a1, a1, #1:SHL:21
+        ADC     a2, a2, #0
+        ADD     a3, a3, #8
+        SUBS    v7, v7, #1
+        BNE     %BT60
+
+        PageTableSync                                   ; corrupts a1
+80
+        LDR     a2, [sp]                                ; retrieve original physical address from stack
+        BFI     v3, a2, #0, #21                         ; apply sub-2MB offset
+        MOV     a1, v3
+90
+        EXIT
+
+; Helper for MapIOpermanent / MapIO64permanent
+;
+; In:
+;   r0 = MapIO flags
+;   r1,r2 = phys addr
+;   r3 = size
+;   r12 = page flags
+; Out:
+;   r0 = assigned log addr, or 0 if failed (no room)
+MapIO_Helper_LongDesc
+        ; Convert DA flags to page table entry
+        Push    "r0,r1"
+        MOV     r0, #0
+        GetPTE  r0, 2M, r0, r12, LongDesc
+        UBFX    r0, r0, #0, #LL_LowAttr_Start+LL_LowAttr_Size ; Only keep the low attribtues (only high attribute is XN/PXN, which is always forced)
+        Pull    "r1"
+        ORR     r0, r0, r1              ; Add in the extra flags
+        Pull    "r1"
+        B       RISCOS_MapInIO_LowAttr_LongDesc
+
+        LTORG
+
+        END

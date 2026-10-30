@@ -1,0 +1,12 @@
+
+RISC OS Open. Build Directory Preparation Script.
+
+------------------------------------------------------------------------------
+
+Some of the tools are part of a commercial product so they aren't included in
+the published sources.
+
+There is a script called "InstallTools" within the build tree which you can
+run to install your copy of the official build tools into this directory. It
+assumes you already have these tools installed on your system.
+
