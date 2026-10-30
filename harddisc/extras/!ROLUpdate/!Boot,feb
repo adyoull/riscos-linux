@@ -1,0 +1,3 @@
+| ROLUpdate: Configure's plug-in for updating RISC OS on Linux
+If "<ROLUpdate$Dir>" = "" then Set ROLUpdate$Dir <Obey$Dir>
+IconSprites <ROLUpdate$Dir>.!Sprites

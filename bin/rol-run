@@ -1,0 +1,463 @@
+#!/bin/bash
+# rol-run: run a RISC OS program in RISC OS for Linux, headless, and give
+# back its output and exit status.
+#
+#   rol-run [options] PROGRAM [ARGS...]     an ELF (converted with elf2aif)
+#                                           or an Absolute (AIF) file
+#   rol-run [options] -c 'COMMAND'          any RISC OS command line
+#
+# Options:
+#   -t SECONDS   time limit (default 120, desktop mode the wait + 40;
+#                ROL_TIMEOUT)
+#   -C DIR       directory to run in (default: the current directory)
+#   -m FILE      RMLoad another module first (repeatable)
+#   -v           also print RISC OS's console log (start-up, errors) to stderr
+#   -k           keep the work directory (its path goes to stderr)
+#   -h           this help
+# Desktop mode boots a copy of ROL_HARDDISC=DIR instead of out/harddisc/HardDisc4
+# when it is set (the UTM image's, say).
+# Sound: ROL_SOUND_WAV=FILE saves it as a WAV file; ROL_SOUND=silent uses
+# a silent SoundDMA instead of the ROM's.
+# Environment: ROL_MODULES=DIR takes VFPSupport, ARMEABISupport, SoundDMA,
+# Iconv and BASICVFP from DIR instead of out/modules (to run GCCSDK's
+# ARMEABISupport 1.08, say).
+#
+# Desktop mode (-d, or any of -s -w -g): boot HardDisc4 (a fresh copy of
+# out/harddisc/HardDisc4: make harddisc) into the desktop, headless, start
+# the program as a Wimp task, let it run, and save a screenshot:
+#   -s FILE      the screenshot, PNG (default: rol-run.png)
+#   -w SECONDS   how long the program runs before the screenshot (default
+#                5; sooner if it ends)
+#   -g WxH       screen size (default 1024x768)
+# Programs can take extra screenshots with the command *TBShot (saved as
+# FILE-1.png, FILE-2.png, ...). The program starts 2 seconds after the
+# desktop does. Its text output isn't collected in desktop mode: the screen
+# is the result. Exit status: the program's if it ended in time, 0 if it
+# was still running, 125 if the Wimp refused to start it. An error box
+# (also "File not found" for a missing program) stops the whole desktop
+# until it's answered, so a run that shows one ends at the time limit
+# (-t), with the box in the screenshot (exit status 124).
+#
+# Before the program, RISC OS loads VFPSupport, ARMEABISupport and
+# LinuxAudio (this test bed's, from out/modules: LinuxAudio gives the ROM's
+# SoundDMA a sound device, and SoundControl and SharedSound go with it),
+# SharedUnixLibrary and PThreadTicker (from the riscos-crossdev toolchain),
+# and BASICVFP if out/modules has it (make basicvfp).
+#
+# Exit status: the program's (Sys$ReturnCode, 0-255); 125 if it ended with
+# a RISC OS error (printed to stderr); 124 on time-out; 117 if RISC OS
+# stopped at its supervisor prompt waiting for keyboard input (nothing is
+# typed: stdin is not connected); 126 if the test bed couldn't start.
+# Output: what RISC OS printed while the program ran (stdout and stderr
+# alike, as on a RISC OS screen) goes to stdout.
+#
+# Environment: TB_DIR (this repository; found from the script's location),
+# RCD_DIR or RISCOS_TOOLCHAIN (riscos-crossdev), ROL_ROM (default
+# $TB_DIR/out/rom/RISCOS.IMG), ROL_QEMU (default: none on a 32-bit ARM host
+# outside desktop mode, else $TB_DIR/out/bin/qemu-arm-riscos; empty = run the
+# ROM directly: then privileged PSR instructions in code from disc, such as
+# HardDisc4's SharedCLibrary's, don't work), QEMU_CPU
+# (e.g. cortex-a8 for a VFPv3 CPU without VFPv4).
+#
+# Paths are handed to RISC OS through IXFS (IXFS:$.home.me.x/c is
+# /home/me/x.c). Wimp$ScrapDir (UnixLib's /tmp) is a fresh directory.
+# Arguments pass through an Obey file: one with spaces is put in double
+# quotes; avoid < and | (RISC OS reads <...> as a variable).
+
+set -uo pipefail
+
+die () { echo "rol-run: $*" >&2; exit 126; }
+usage () { sed -n '2,/^$/{s/^# \{0,1\}//;p}' "$0"; }
+
+TB_DIR=${TB_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+if [ -z "${RISCOS_TOOLCHAIN:-}" ]; then
+  [ -n "${RCD_DIR:-}" ] || die "set RCD_DIR (riscos-crossdev) or RISCOS_TOOLCHAIN"
+  RISCOS_TOOLCHAIN=$RCD_DIR/toolchain/env
+fi
+ROL_ROM=${ROL_ROM:-$TB_DIR/out/rom/RISCOS.IMG}
+MODULES=${ROL_MODULES:-$TB_DIR/out/modules}
+
+timeout_s=${ROL_TIMEOUT:-}
+rundir=$PWD
+command=
+verbose=0
+keep=0
+desktop=0
+shot=
+wait_s=5
+geometry=1024x768
+extra_modules=()
+while getopts ":t:C:m:c:ds:w:g:vkh" opt; do
+  case $opt in
+    t) timeout_s=$OPTARG ;;
+    C) rundir=$OPTARG ;;
+    m) extra_modules+=("$OPTARG") ;;
+    c) command=$OPTARG ;;
+    d) desktop=1 ;;
+    s) shot=$OPTARG; desktop=1 ;;
+    w) wait_s=$OPTARG; desktop=1 ;;
+    g) geometry=$OPTARG; desktop=1 ;;
+    v) verbose=1 ;;
+    k) keep=1 ;;
+    h) usage; exit 0 ;;
+    *) usage >&2; exit 126 ;;
+  esac
+done
+shift $((OPTIND - 1))
+case $wait_s in ''|*[!0-9]*) die "-w takes whole seconds" ;; esac
+# The time limit: 120 s, or in desktop mode the wait plus 40 s (boot 5,
+# start 2, slack): an error box stops the desktop, so don't wait long.
+[ -n "$timeout_s" ] || { [ "$desktop" = 1 ] && timeout_s=$((wait_s + 40)) || timeout_s=120; }
+[ -n "$command" ] || [ $# -ge 1 ] || { usage >&2; exit 126; }
+
+[ -f "$ROL_ROM" ] || die "no ROM image at $ROL_ROM (run rom/fetch.sh, or make)"
+for m in VFPSupport ARMEABISupport; do
+  [ -f "$MODULES/$m,ffa" ] || die "no $MODULES/$m,ffa (run make)"
+done
+SUL=$RISCOS_TOOLCHAIN/bin/arm-riscos-gnueabihf-sul
+TICKER=$RISCOS_TOOLCHAIN/riscos/PThrTicker,ffa
+[ -f "$SUL" ] && [ -f "$TICKER" ] || die "no SharedUnixLibrary/PThrTicker in $RISCOS_TOOLCHAIN"
+
+# QEMU, unless this is a 32-bit ARM machine. (A 64-bit ARM machine that
+# runs 32-bit programs can run it directly too: set ROL_QEMU= to do that.)
+# The desktop always uses QEMU: HardDisc4's SharedCLibrary needs its
+# emulation of privileged PSR instructions (qemu/), which Linux can't do.
+# ROL_VM: a command that runs the ROM (or, in desktop mode, rol-kvm and the
+# ROM) natively in a virtual machine with a 32-bit capable ARM processor,
+# such as tests/native-vm's: then ROL_QEMU defaults to none.
+if [ -n "${ROL_VM:-}" ] && [ -z "${ROL_QEMU+set}" ]; then
+  ROL_QEMU=
+fi
+if [ -z "${ROL_QEMU+set}" ]; then
+  case $desktop:$(uname -m) in
+    0:armv7*|0:armv8l) ROL_QEMU= ;;
+    *) ROL_QEMU=$TB_DIR/out/bin/qemu-arm-riscos ;;
+  esac
+fi
+[ -z "$ROL_QEMU" ] || [ -x "$ROL_QEMU" ] || die "no $ROL_QEMU (run make)"
+
+# Linux path -> IXFS path: / and . swap, $ is the root.
+ixfs () {
+  local p
+  p=$(readlink -f "$1") || return 1
+  case $p in *[[:space:]\<\>\|\"\#\*\:\&\^\%\@\\]*) die "can't hand this path to RISC OS: $p" ;; esac
+  p=${p#/}
+  p=$(printf '%s' "$p" | tr './' '/.')
+  printf 'IXFS:$%s' "${p:+.$p}"
+}
+
+# Desktop mode: HardDisc4's !Boot starts the desktop; a task in
+# Choices:Boot.Tasks loads the modules and runs the driver, a BASIC Wimp
+# task that starts the program, waits, writes the result and leaves RISC
+# OS. rol-kvm is the screen; it saves it when RISC OS ends.
+run_desktop () {
+  local hd4=${ROL_HARDDISC:-$TB_DIR/out/harddisc/HardDisc4} kvm=$TB_DIR/out/bin/rol-kvm
+  [ -d "$hd4/!Boot" ] || die "no $hd4 (run make harddisc)"
+  [ -x "$kvm" ] || die "no $kvm (run make)"
+  : "${shot:=rol-run.png}"
+  [ -d "$(dirname "$shot")" ] || die "no directory for the screenshot: $shot"
+  # Numbered screenshots from an earlier run would look like this run's.
+  local k=1
+  while [ -e "${shot%.png}-$k.png" ]; do rm -f "${shot%.png}-$k.png"; k=$((k + 1)); done
+  cp -a --reflink=auto "$hd4" "$work/HardDisc4" || die "can't copy HardDisc4"
+  mkdir "$work/kvm"
+  local HD
+  HD=$(ixfs "$work/HardDisc4") || exit 126
+
+  cat > "$work/driver" <<'EOF'
+REM rol-run's desktop driver: start TB$Command as a Wimp task, give it
+REM TB$Wait seconds (less if it ends), write TB$Result, leave RISC OS.
+ended%=FALSE
+ON ERROR PROCend("driver: "+REPORT$+" (line "+STR$ERL+")",125)
+DIM b% 256,blk% 256,ml% 8
+ml%!0=&400C3:ml%!4=0:REM Message_TaskCloseDown (and Quit)
+SYS "Wimp_Initialise",310,&4B534154,"rol-run",ml% TO ,me%
+OSCLI "WimpSlot -next 16384K"
+REM Let the rest of the boot sequence's tasks start first.
+SYS "OS_ReadMonotonicTime" TO t%
+end%=t%+200
+REPEAT SYS "Wimp_PollIdle",0,blk%,end% TO r%:SYS "OS_ReadMonotonicTime" TO t%:UNTIL t%-end%>=0
+OSCLI "Set Sys$ReturnCode 0"
+SYS "XWimp_StartTask",FNvar("TB$Command") TO h%;f%
+IF f% AND 1 THEN PROCend(FNz(h%+4),125)
+SYS "OS_ReadMonotonicTime" TO t%
+end%=t%+100*VAL(FNvar("TB$Wait"))
+ended%=(h%=0)
+WHILE NOT ended% AND end%-t%>0
+  SYS "Wimp_PollIdle",0,blk%,end% TO r%
+  IF r%=17 OR r%=18 THEN
+    IF blk%!16=&400C3 AND blk%!4=h% THEN ended%=TRUE
+    IF blk%!16=0 THEN PROCend("RISC OS was told to quit",125)
+  ENDIF
+  SYS "OS_ReadMonotonicTime" TO t%
+ENDWHILE
+IF ended% THEN
+  REM Message_TaskCloseDown comes at Wimp_CloseDown, which can be before
+  REM the program's OS_Exit has set Sys$ReturnCode: give it a moment.
+  end%=t%+50
+  REPEAT SYS "Wimp_PollIdle",0,blk%,end% TO r%:SYS "OS_ReadMonotonicTime" TO t%:UNTIL t%-end%>=0
+  PROCend("",VAL(FNvar("Sys$ReturnCode")) AND 255)
+ENDIF
+PROCend("",0)
+DEF PROCend(e$,r%)
+LOCAL F%
+ON ERROR OFF
+F%=OPENOUT(FNvar("TB$Result"))
+IF e$<>"" THEN BPUT#F%,"error "+e$
+BPUT#F%,"status "+STR$r%
+BPUT#F%,"running "+STR$(-(NOT ended%))
+CLOSE#F%
+SYS "IXSupport_LinuxSyscall",r%,,,,,,,248
+END
+DEF FNvar(n$)
+LOCAL l%,f%
+SYS "XOS_ReadVarVal",n$,b%,255,0,3 TO ,,l%;f%
+IF f% AND 1 THEN =""
+b%?l%=13
+=$b%
+DEF FNz(a%)
+LOCAL s$
+WHILE ?a%<>0 AND LEN(s$)<250:s$+=CHR$?a%:a%+=1:ENDWHILE
+=s$
+EOF
+
+  # *TBShot (tools/tbshot.s): SIGUSR1 to rol-kvm, QEMU's parent.
+  cp "$TB_DIR/out/bin/TBShot,ffc" "$work/TBShot,ffc" || die "no out/bin/TBShot,ffc (run make)"
+
+  # A command of more than one line goes in an Obey file (and then the
+  # status is the Obey file's, not the program's).
+  local start=$command
+  if [ "$(printf '%s\n' "$command" | wc -l)" -gt 1 ]; then
+    printf '%s\n' "$command" > "$work/command,feb"
+    start="Run $W.command"
+  fi
+
+  {
+    # (NativeSupport is loaded before !Boot: nboot, below)
+    for m in $basemods; do [ "$m" = NativeSupport ] || echo "RMLoad $W.mods.$m"; done
+    echo "$sound_reinit"
+    for ((j = 1; j <= i; j++)); do echo "RMLoad $W.mods.Extra$j"; done
+    echo "Set Wimp\$ScrapDir $W.scrap"
+    echo "Set Alias\$TBShot /$W.TBShot"
+    echo "Set TB\$Command $start"
+    echo "Set TB\$Wait $wait_s"
+    echo "Set TB\$Result $W.result"
+    echo "Dir $RUNDIR"
+    echo "WimpSlot -min 64K -max 64K"
+    echo "BASIC -quit $W.driver"
+  } > "$work/HardDisc4/!Boot/Choices/Boot/Tasks/TestBed,feb"
+
+  # NativeSupport before HardDisc4's !Boot (its SharedCLibrary needs it
+  # when the ROM runs natively; under QEMU it does nothing)
+  local nboot="/<IXFS\$HardDisc4>.!Boot"
+  if [ -f "$TB_DIR/out/modules/NativeSupport,ffa" ]; then
+    cp "$TB_DIR/out/modules/NativeSupport,ffa" "$work/NativeSupport,ffa"
+    printf 'RMLoad %s.NativeSupport\n/<IXFS$HardDisc4>.!Boot\n' "$W" > "$work/nboot,feb"
+    nboot="Obey $W.nboot"
+  fi
+  RISC_OS_IXFS_HardDisc4=$HD RISC_OS_Alias_IXFSBoot=$nboot \
+    timeout -k 5 "$timeout_s" ${ROL_VM:-} "$kvm" -o "$work/kvm" -g "$geometry" ${ROL_KVM_CONTROL:+-c "$ROL_KVM_CONTROL"} -- \
+    $ROL_QEMU "$ROL_ROM" --nvram "$work/HardDisc4/!Boot/Loader/CMOS" \
+    </dev/null >"$work/console" 2>"$work/stderr"
+  local status=$? n=0 f base=${shot%.png}
+  [ "$verbose" = 1 ] && { echo "--- RISC OS console log ---" >&2; tr -d '\r' < "$work/console" | tr -cd '\n\t -~' >&2; echo; cat "$work/stderr" >&2; echo "--- end of log ---" >&2; }
+  for f in "$work"/kvm/shot-*.png; do
+    [ -f "$f" ] || continue
+    n=$((n + 1)); mv "$f" "$base-$n.png" || echo "rol-run: can't write $base-$n.png" >&2
+  done
+  if [ -f "$work/kvm/final.png" ]; then
+    if mv "$work/kvm/final.png" "$shot"; then
+      echo "rol-run: screenshot $shot" >&2
+    else
+      echo "rol-run: can't write the screenshot to $shot" >&2
+    fi
+  else
+    echo "rol-run: no screenshot (RISC OS never set a screen mode of 256 colours or more)" >&2
+  fi
+  [ "$n" = 0 ] || echo "rol-run: $n more from *TBShot: $base-1.png ..." >&2
+  if [ -f "$work/result" ]; then
+    local line
+    line=$(grep '^error ' "$work/result") && echo "rol-run: RISC OS error: ${line#error }" >&2
+    line=$(grep '^status ' "$work/result") && return "${line#status }"
+  fi
+  case $status in
+    124|137) echo "rol-run: time limit (${timeout_s}s) reached" >&2; return 124 ;;
+  esac
+  echo "rol-run: RISC OS ended without finishing the run (status $status)" >&2
+  return 126
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/rol-run.XXXXXX") || die "mktemp failed"
+cleanup () {
+  # the sound capture ends when RISC OS closes the FIFO; it may still be
+  # waiting for RISC OS to open it
+  if [ -n "${sndcap_pid:-}" ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$sndcap_pid" 2>/dev/null || break; sleep 0.2; done
+    kill "$sndcap_pid" 2>/dev/null; wait "$sndcap_pid" 2>/dev/null
+  fi
+  if [ "$keep" = 1 ]; then echo "rol-run: kept $work" >&2; else rm -rf "$work"; fi
+}
+trap cleanup EXIT
+mkdir "$work/mods" "$work/scrap"
+cp "$MODULES/VFPSupport,ffa" "$MODULES/ARMEABISupport,ffa" "$work/mods/"
+cp "$SUL" "$work/mods/SharedULib,ffa"
+cp "$TICKER" "$work/mods/PThrTicker,ffa"
+# BASICVFP (make basicvfp), if there's one: *BASIC64 needs it once
+# VFPSupport is loaded, as on a Pi.
+basemods="VFPSupport ARMEABISupport SharedULib PThrTicker"
+# NativeSupport first, when the ROM runs natively (no QEMU): what the test
+# bed's QEMU does for code loaded from disc (it does nothing under QEMU).
+if [ -f "$TB_DIR/out/modules/NativeSupport,ffa" ]; then
+  cp "$TB_DIR/out/modules/NativeSupport,ffa" "$work/mods/"
+  basemods="NativeSupport $basemods"
+fi
+if [ -f "$MODULES/BASICVFP,ffa" ]; then
+  cp "$MODULES/BASICVFP,ffa" "$work/mods/"
+  basemods+=" BASICVFP"
+fi
+# HardDisc4 has no Iconv (UnixLib's iconv needs it): the test bed's.
+if [ -f "$MODULES/Iconv,ffa" ]; then
+  cp "$MODULES/Iconv,ffa" "$work/mods/"
+  basemods+=" Iconv"
+fi
+# Sound. The port's ROM has RISC OS Open's SoundDMA but no audio device
+# for it: LinuxAudio (modules/LinuxAudio) is one, sending the sound to a
+# Linux FIFO; with it, the ROM's SoundDMA is started again, then the ROM's
+# other sound modules so that they register with it. ROL_SOUND_WAV=FILE
+# saves the sound as a WAV file (tools/rol-sndcap.py reads the FIFO);
+# without it the sound is dropped (at the sample rate). ROL_SOUND=silent
+# uses the old silent SoundDMA stand-in (modules/SoundDMA) instead.
+sound_reinit="RMReInit SoundChannels
+RMReInit SoundScheduler
+RMReInit WaveSynth
+RMReInit StringLib
+RMReInit Percussion"
+sndcap_pid=
+if [ "${ROL_SOUND:-}" != silent ] && [ -f "$MODULES/LinuxAudio,ffa" ]; then
+  cp "$MODULES/LinuxAudio,ffa" "$work/mods/"
+  basemods+=" LinuxAudio"
+  sound_fifo=$work/sound
+  # (SoundControl, the mixer, and SharedSound: RISC OS Open's, from its Pi
+  # ROM, when make basicvfp has taken them out)
+  pre= post=
+  if [ -f "$MODULES/SoundControl,ffa" ]; then
+    cp "$MODULES/SoundControl,ffa" "$work/mods/"; pre="RMLoad $(ixfs "$work").mods.SoundControl"
+  fi
+  if [ -f "$MODULES/SharedSound,ffa" ]; then
+    cp "$MODULES/SharedSound,ffa" "$work/mods/"; post="RMLoad $(ixfs "$work").mods.SharedSound"
+  fi
+  sound_reinit="Set LinuxAudio\$Path $sound_fifo
+$pre
+RMReInit SoundDMA
+$sound_reinit
+$post"
+  if [ -n "${ROL_SOUND_WAV:-}" ]; then
+    mkfifo "$sound_fifo" || die "can't make $sound_fifo"
+    python3 -I "$TB_DIR/tools/rol-sndcap.py" "$sound_fifo" "$ROL_SOUND_WAV" &
+    sndcap_pid=$!
+  fi
+else
+  cp "$MODULES/SoundDMA,ffa" "$work/mods/" || die "no $MODULES/SoundDMA,ffa (run make)"
+  basemods+=" SoundDMA"
+fi
+i=0
+for m in "${extra_modules[@]}"; do
+  i=$((i + 1)); cp "$m" "$work/mods/Extra$i,ffa" || die "can't read $m"
+done
+W=$(ixfs "$work") || exit 126
+RUNDIR=$(ixfs "$rundir") || exit 126
+
+# The program: an Absolute file (AIF) as prog,ff8.
+if [ -z "$command" ]; then
+  prog=$1; shift
+  [ -f "$prog" ] || die "no such file: $prog"
+  magic=$(head -c 4 "$prog" | od -An -tx1 | tr -d ' \n')
+  if [ "$magic" = 7f454c46 ]; then
+    "$RISCOS_TOOLCHAIN/bin/arm-riscos-gnueabihf-strip" -o "$work/prog.elf" "$prog" ||
+      die "can't strip $prog"
+    "$RISCOS_TOOLCHAIN/bin/elf2aif" -e "$work/prog.elf" "$work/prog,ff8" >/dev/null ||
+      die "elf2aif failed on $prog"
+  else
+    # AIF: word 4 (offset &10) is SWI OS_Exit (&EF000011).
+    w4=$(od -An -tx4 -j16 -N4 "$prog" | tr -d ' ')
+    [ "$w4" = ef000011 ] || die "$prog is neither an ELF nor an Absolute (AIF) file"
+    cp "$prog" "$work/prog,ff8"
+  fi
+  command="Run $W.prog"
+  for a in "$@"; do
+    case $a in *[[:space:]]*) command+=" \"$a\"" ;; *) command+=" $a" ;; esac
+  done
+fi
+
+if [ "$desktop" = 1 ]; then
+  run_desktop
+  exit $?
+fi
+
+# How it ends: one line with the error (if any), one with the status, then
+# leave RISC OS (Linux exit_group through IXSupport_LinuxSyscall).
+cat > "$work/finish" <<'EOF'
+DIM b% 256
+e$=FNvar("X$Error")
+r%=VAL(FNvar("Sys$ReturnCode")) AND 255
+IF e$<>"" THEN PRINT "==TB-ERROR==";e$:r%=125
+PRINT "==TB-END==";r%
+SYS "IXSupport_LinuxSyscall",r%,,,,,,,248
+END
+DEF FNvar(n$)
+LOCAL l%,f%
+SYS "XOS_ReadVarVal",n$,b%,255,0,3 TO ,,l%;f%
+IF f% AND 1 THEN =""
+b%?l%=13
+=$b%
+EOF
+
+{
+  for m in $basemods; do echo "RMLoad $W.mods.$m"; done
+  echo "$sound_reinit"
+  for ((j = 1; j <= i; j++)); do echo "RMLoad $W.mods.Extra$j"; done
+  echo "Set Wimp\$ScrapDir $W.scrap"
+  echo "Dir $RUNDIR"
+  echo "Unset X\$Error"
+  echo "Set Sys\$ReturnCode 0"
+  echo "Echo ==TB-BEGIN=="
+  echo "X $command"
+  echo "BASIC -quit $W.finish"
+} > "$work/boot"
+
+RISC_OS_Alias_IXFSBoot="Obey $W.boot" \
+  timeout -k 5 "$timeout_s" ${ROL_VM:-} $ROL_QEMU "$ROL_ROM" --abort-on-input \
+  </dev/null >"$work/console" 2>"$work/stderr"
+status=$?
+
+if [ "$verbose" = 1 ]; then
+  echo "--- RISC OS console log ---" >&2
+  tr -d '\r' < "$work/console" >&2
+  echo "--- end of log ---" >&2
+fi
+
+# Print what came between the markers.
+tr -d '\r' < "$work/console" | awk -v err="$work/errline" -v end="$work/endline" '
+  /^==TB-BEGIN==$/ { on = 1; next }
+  /^==TB-ERROR==/ { sub(/^==TB-ERROR==/, ""); print > err; next }
+  /^==TB-END==/ { sub(/^==TB-END==/, ""); print > end; on = 0; next }
+  on { print }'
+[ -s "$work/errline" ] && echo "rol-run: RISC OS error: $(cat "$work/errline")" >&2
+if [ -s "$work/endline" ]; then
+  exit "$(cat "$work/endline")"
+fi
+case $status in
+  124|137) echo "rol-run: time limit (${timeout_s}s) reached" >&2; exit 124 ;;
+  117)
+    # A serious error (an abort, say) skips *X and leaves RISC OS at its
+    # prompt, which then asks for keyboard input. Report the error.
+    err=$(tr -d '\r' < "$work/console" | sed -n '/^==TB-BEGIN==$/,$p' | grep '^Error: ' | tail -1)
+    if [ -n "$err" ]; then
+      echo "rol-run: RISC OS error: ${err#Error: }" >&2
+      exit 125
+    fi
+    echo "rol-run: RISC OS stopped at its prompt, waiting for keyboard input" >&2 ;;
+  *) echo "rol-run: RISC OS ended without finishing the run (status $status)" >&2 ;;
+esac
+[ "$verbose" = 1 ] || { echo "--- last lines of the RISC OS console ---" >&2; tr -d '\r' < "$work/console" | tail -15 >&2; }
+exit $([ "$status" = 117 ] && echo 117 || echo 126)

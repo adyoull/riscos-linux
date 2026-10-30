@@ -1,0 +1,21 @@
+# Where the test bed gets BASICVFP: RISC OS Open's Raspberry Pi ROM zip
+# (5.30 stable, "RPi ROM stable" on riscosopen.org's Raspberry Pi downloads
+# page): zip file, sha256, URL; then the modules taken out of the ROM image
+# (RISCOS.IMG in the zip): title, sha256, and where it goes (modules =
+# out/modules/TITLE,ffa, pirom = out/pirom/TITLE-ROOL,ffa):
+#   BASICVFP      BBC BASIC for VFP (the port's ROM has none)
+#   VFPSupport    ROOL's own 0.18, only for a test: its elementary
+#                 functions, compared with ours
+#   SharedSound   1.20, which lets several programs make sound at once (many
+#                 sound players need it): the port's ROM has SoundDMA but not
+#                 this. (An assembler module, so it can be loaded from disc;
+#                 its Messages file comes with modules/LinuxAudio. The Pi
+#                 ROM's SoundControl is a C module tied to the ROM's C
+#                 library: modules/SoundControl builds it from source.)
+# Not in git: basicvfp/fetch.sh downloads the zip and writes them.
+# (The page lists an MD5 for an earlier upload of the same release; the zip
+# it serves now has a ROM built 15 May 2024.)
+BCM2835.5.30.zip c7cf3c00a08ae3a885841ae1651c140c776732ceb2fcc95dd62f42c3cbdfbd06 https://www.riscosopen.org/zipfiles/platform/raspberry-pi/BCM2835.5.30.zip
+BASICVFP 42c65f03ad1162ef44841ca9eb82aca21293336f08e34901308f17bdd153da4f modules
+VFPSupport 21297eb8a12a7939c627dfdcbf648e34695b34af4111a55d9b599c14ad1db9a3 pirom
+SharedSound bd04e05a0d0150f7fa801bebb5b788d93fc7aa3edd666940c8e220e3d92278c1 modules

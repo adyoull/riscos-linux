@@ -1,0 +1,22 @@
+| !Run for !ROBench: CPU, memory, OS, file and graphics benchmark.
+| Runs single-tasking (as games do) so other tasks don't disturb the
+| timing, then opens the results file. Takes about 15 minutes.
+Set ROBench$Dir <Obey$Dir>
+IconSprites <ROBench$Dir>.!Sprites
+RMEnsure UtilityModule 5.00 Error ROBench needs RISC OS 5
+RMEnsure VFPSupport 0 Error ROBench needs the VFPSupport module (RISC OS 5 on an ARMv7 or later processor)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error ROBench needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error ROBench needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 4096K -max 4096K
+CDir <ROBench$Dir>.Results
+| robench sets ROBench$Last to the results file; BasicBench adds to it
+<ROBench$Dir>.robench -g -o <ROBench$Dir>.Results.R%%T %*0
+Set ROBench$Basic BASIC
+BASIC -quit <ROBench$Dir>.BasicBench
+Set ROBench$Basic BASIC64
+RMEnsure BASICVFP 0 Set ROBench$Basic none
+If "<ROBench$Basic>"="BASIC64" Then BASIC64 -quit <ROBench$Dir>.BasicBench
+Unset ROBench$Basic
+If "<ROBench$Last>"<>"" Then Filer_Run <ROBench$Last>

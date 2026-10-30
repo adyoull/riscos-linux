@@ -1,0 +1,5 @@
+# The RISC OS for Linux ROM image the test bed runs: file, sha256, URL.
+# Timothy Baldwin's prebuilt binary of the Linux port (RISC OS 5.29,
+# 30 Apr 2021, built from RISC_OS_Linux_Source 385115bc on 2022-12-26).
+# rom/fetch.sh downloads it into out/rom/ and checks it.
+RISCOS.IMG af1fe2dbc91dcb77905c8098908ba91fe716ffb6716af6b5bcf0abd7421adc85 https://raw.githubusercontent.com/TimothyEBaldwin/RISC_OS_Linux_Binary/aba24d022f3bfa40873d5fa4a74602987bdf94da/Unix/RISCOS.IMG

@@ -1,0 +1,68 @@
+#!/bin/bash
+# tools/native-vm/vmexec: run RISC OS natively - no QEMU user mode, the ROM
+# straight on the processor, as on a Raspberry Pi 4 or 5 - in a virtual
+# Cortex-A72 (qemu-system-aarch64, TCG). For rol-run and tests/run.sh:
+#
+#   ROL_VM=tools/native-vm/vmexec bin/rol-run ...
+#   ROL_VM=tools/native-vm/vmexec make check
+#
+# Called as "vmexec PROGRAM ARGS..." (the ROM, or in desktop mode rol-kvm
+# and the ROM), it boots a VM whose init mounts this machine's file system
+# over 9p, runs the program in a chroot there with the RISC_OS_* (and a
+# few other) environment variables, and powers off; its output and exit
+# status come back as the program's. One run at a time (flock).
+#
+# It needs (environment, or defaults):
+#   ROL_VM_DISK    the root disk: the UTM image's (Data/riscos.qcow2 in
+#                  RISC OS v3.10.utm or later), whose init runs such jobs;
+#                  only read (snapshot)
+#   ROL_VM_KERNEL  its kernel (the EFI file in its first partition, e.g.
+#                  qemu-img convert -O raw riscos.qcow2 d.raw; then
+#                  mcopy -i d.raw@@1M ::/EFI/BOOT/BOOTAA64.EFI Image)
+#   ROL_VM_KVM     rol-kvm built for aarch64, for desktop mode (make
+#                  out/bin/rol-kvm-aarch64, with aarch64-linux-gnu-gcc)
+#   ROL_VM_CPU     the CPU (default cortex-a72)
+# The kernel must have CONFIG_COMPAT (32-bit programs), CONFIG_KUSER_HELPERS,
+# CONFIG_SECCOMP_FILTER, CONFIG_COMPAT_32BIT_TIME (the port's timers) and
+# 9p over virtio.
+# Not through the VM: anything that talks to rol-kvm or the sound through
+# a FIFO (tests/desktop-wheel.sh, tests/sound-out.sh), which run.sh skips.
+# On a timeout it is killed (TERM): the VM is stopped and what the program
+# wrote so far is printed. The kernel's messages are left in
+# /tmp/rol-native-vm/job/dmesg.
+TB=$(cd "$(dirname "$0")/../.." && pwd)
+J=/tmp/rol-native-vm/job
+DISK=${ROL_VM_DISK:-$TB/out/native-vm/riscos.qcow2}
+KERNEL=${ROL_VM_KERNEL:-$TB/out/native-vm/Image}
+KVM=${ROL_VM_KVM:-$TB/out/bin/rol-kvm-aarch64}
+for f in "$DISK" "$KERNEL"; do
+  [ -f "$f" ] || { echo "vmexec: no $f (see tools/native-vm/vmexec)" >&2; exit 126; }
+done
+command -v qemu-system-aarch64 >/dev/null || { echo "vmexec: no qemu-system-aarch64" >&2; exit 126; }
+mkdir -p /tmp/rol-native-vm
+exec 9>/tmp/rol-native-vm/lock
+flock 9
+rm -rf "$J"
+mkdir -p "$J"
+a0=$1
+shift
+case $a0 in */rol-kvm) a0=$KVM ;; esac
+printf '%s\0' "$a0" "$@" > "$J/argv"
+env -0 | grep -zE '^(RISC_OS_|ROL_|HOME=|PATH=|TERM=|LANG=)' > "$J/env"
+pwd > "$J/cwd"
+qemu-system-aarch64 -M virt -cpu "${ROL_VM_CPU:-cortex-a72}" -smp 2 -m 2048 \
+  -kernel "$KERNEL" \
+  -drive if=none,id=d0,file="$DISK",format=qcow2,snapshot=on -device virtio-blk-pci,drive=d0 \
+  -virtfs local,path=/,mount_tag=host,security_model=none,id=h0 \
+  -device virtio-rng-pci -nic none -display none -serial file:"$J/serial.log" -no-reboot \
+  > "$J/qemu.out" 2>&1 &
+q=$!
+trap 'kill $q 2>/dev/null; wait $q; cat "$J/stdout" 2>/dev/null; cat "$J/stderr" >&2 2>/dev/null; exit 143' TERM INT
+wait $q
+cat "$J/stdout" 2>/dev/null
+cat "$J/stderr" >&2 2>/dev/null
+if [ ! -s "$J/status" ]; then
+  echo "vmexec: the VM didn't finish: $(tail -c 300 "$J/qemu.out" | tr -d '\0')" >&2
+  exit 126
+fi
+exit "$(cat "$J/status")"

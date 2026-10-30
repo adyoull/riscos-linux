@@ -1,0 +1,3 @@
+| Updates: keeps the Linux under RISC OS for Linux up to date
+If "<Updates$Dir>" = "" then Set Updates$Dir <Obey$Dir>
+IconSprites <Updates$Dir>.!Sprites

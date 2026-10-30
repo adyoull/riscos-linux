@@ -1,0 +1,3 @@
+| !Boot for !ROBench
+If "<ROBench$Dir>"="" Then Set ROBench$Dir <Obey$Dir>
+IconSprites <Obey$Dir>.!Sprites

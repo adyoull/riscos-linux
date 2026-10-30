@@ -1,0 +1,106 @@
+ROBench 1.01 (18-Oct-2026)
+==========================
+
+A benchmark for RISC OS 5: processor, floating point, memory, SWIs,
+files, graphics and BBC BASIC, measured the way the standard benchmarks
+measure, so that two machines (a Raspberry Pi 4 and RISC OS on Linux,
+say) can be compared test by test.
+
+Running it
+----------
+Double-click !ROBench. It runs single-tasking, as a game does, so that
+other tasks can't disturb the timing; the graphics tests draw all over
+the screen. A full run takes about 15 minutes; the results open in your
+text editor when it finishes, and are kept in !ROBench.Results.
+
+  Quick      the same tests, shorter (about 4 minutes, less precise)
+  CPUOnly    processor and memory tests only (also fine in a task window)
+
+To name the machine in the results, set ROBench$Machine first, e.g.
+  *Set ROBench$Machine Pi 4 1.8GHz
+To compare with an earlier run, from the command line:
+  *<ROBench$Dir>.robench -g -ref <ROBench$Dir>.Refs.MacVM
+(Refs holds RISC OS on Linux results: MacVM, as the UTM image runs on a
+Mac Studio, and Testbedx86.)
+which adds a ratio column and a geometric mean per group. *robench -h
+lists the options.
+
+How it measures
+---------------
+- Each test is calibrated: the iteration count doubles until a run takes
+  an eighth of the target time (this also warms the caches), then is
+  scaled so that a timed run lasts 2 seconds (the clock ticks in
+  centiseconds, so +-0.5% at worst).
+- Each test is then run 5 times. The median is reported, with the best
+  and the spread ((slowest - fastest) / median: high means something
+  else was taking time).
+- Every test returns a checksum that depends on all its results, so the
+  compiler can't leave work out, and every run must give the same one.
+  Where there is a known answer it is checked: SHA-256 and CRC-32 test
+  vectors, LINPACK's residual, the FFT round trip, the compressor's
+  round trip, N-queens' 724 solutions, Whetstone's result, the N-body
+  energy. A wrong answer shows as FAILED.
+- The C tests are built with GCC 10 at -O2 for ARMv7 with VFPv3
+  (riscos-crossdev), statically linked with UnixLib; the neon tests
+  with NEON intrinsics.
+
+Changes
+-------
+1.01: the neon tests; -noneon.
+
+The tests
+---------
+int.coremark    list, matrix, state machine and CRC work in the style of
+                CoreMark (not CoreMark: its numbers aren't CoreMark scores)
+int.compress    LZ77 (LZ4-style) compression of 1 MB of English-like text
+int.decompress  and decompression, checked against the original
+int.sha256      SHA-256 of 1 MB
+int.crc32       CRC-32 of 1 MB, a byte at a time from a table
+int.sort        quicksort of 256K random 32-bit numbers
+int.wordfreq    counting the words of 1 MB of text in a hash table
+int.queens      N-queens on a 10 x 10 board (recursion, branches)
+fp.whetstone    Whetstone, double precision (MWIPS)
+fp.linpack      LINPACK 200 x 200, double precision (MFLOPS)
+fp.fft          16K-point complex FFT, forward and back (MFLOPS)
+fp.nbody        the five-planet N-body simulation
+fp.mandelbrot   Mandelbrot set 320 x 240, single precision
+fp.matmul       128 x 128 single precision matrix multiply (MFLOPS)
+neon.blend      alpha blending 640 x 480 RGBA, 8-bit (NEON intrinsics)
+neon.yuv2rgb    YUV 4:2:0 to RGBA 640 x 480, 16-bit fixed point
+neon.sad        motion search: 16 x 16 sums of absolute differences
+neon.saxpy      y = a*x + y on 64K floats
+neon.fir        32-tap FIR filter on 16K float samples
+neon.xform      4 x 4 matrix transform of 64K float vertices
+                (every NEON test is checked against plain C; without
+                NEON, or with -noneon, the plain C runs instead)
+mem.copy..triad STREAM-style copy, scale, add, triad on 8 MB arrays
+mem.memcpy      the C library's memcpy and memset, 8 MB
+mem.read*       reading a 16 KB, 256 KB and 8 MB working set
+mem.lat*        latency: following a random chain of pointers through
+                16 KB, 256 KB, 4 MB and 32 MB (nanoseconds, lower is better)
+mem.malloc      malloc and free, mixed sizes
+os.swi          a SWI (XOS_ReadMonotonicTime) from assembler
+os.readvar      OS_ReadVarVal through the C library's _swix
+io.*            8 MB files with fwrite/fread and OS_File, byte streams
+                with OS_BPut/OS_BGet, creating and deleting small files
+                (in <Wimp$ScrapDir>; includes the file system's caching)
+gfx.*           filled rectangles (with ColourTrans), lines, block copy,
+                sprites plain and scaled, anti-aliased Font_Paint, Draw
+                fill and stroke, JPEG decode and plot (SpriteExtend), all
+                in the current screen mode: results depend on it, so
+                compare machines in the same mode
+basic.*         BBC BASIC V: loops, real maths, trig, strings, PROC/FN,
+                sorting, sieve; basic64.* the same in BASIC64 (BASICVFP)
+
+Comparing
+---------
+Like with like: the same version of ROBench, screen mode, and file
+system. The ratio column and geometric means come from -ref.
+
+Licence
+-------
+MIT (see Licence). Written with Claude as a coding assistant; Andrew
+Youll directs the work. The algorithms follow Whetstone (Curnow and
+Wichmann), LINPACK (Dongarra), STREAM (McCalpin), CoreMark (EEMBC) and
+the Computer Language Benchmarks Game's N-body; the code is ROBench's
+own and the results are not official results of any of them.

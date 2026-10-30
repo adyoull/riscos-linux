@@ -1,0 +1,7 @@
+# The HardDisc4 image the desktop mode boots: file, sha256, URL.
+# RISC OS Open's HardDisc4 5.30 (self-extracting utility; !Boot 1.37).
+# Not in git: harddisc/fetch.sh downloads it, checks it, unpacks it in RISC
+# OS for Linux and sets it up in out/harddisc/HardDisc4.
+# (The Linux port's own build pins 5.28, which riscosopen.org no longer
+# serves.)
+HardDisc4.5.30.util 0f6cd3aecf109786a7e9808ce444d7383349d3f0405cee76f2fe3ed7615b9673 https://www.riscosopen.org/zipfiles/platform/common/HardDisc4.5.30.util

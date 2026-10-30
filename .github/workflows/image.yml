@@ -1,0 +1,79 @@
+# For each release tag: build the container image (docker/Dockerfile) on the
+# riscos-crossdev image named in .riscos-crossdev, run make check inside
+# it, and only then publish it as
+# ghcr.io/adyoull/riscos-linux-testbed:<version> (and :latest).
+# The package is private, like the repository.
+name: Container image
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build, e.g. v0.1'
+        required: true
+      latest:
+        description: 'Also tag the image :latest (for the newest release only)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Versions
+        id: v
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "crossdev=$(tr -d ' \n' < .riscos-crossdev)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: riscos-linux-testbed:test
+          # UnixLib's source is cloned while the image builds: if
+          # riscos-unixlib is private, a secret UNIXLIB_TOKEN that can read
+          # it (not kept in the image).
+          secrets: |
+            unixlib_token=${{ secrets.UNIXLIB_TOKEN }}
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            BASE=ghcr.io/adyoull/riscos-crossdev:${{ steps.v.outputs.crossdev }}
+
+      - name: make check inside the image
+        run: docker run --rm riscos-linux-testbed:test sh -c 'cd /opt/riscos-linux-testbed && make check'
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          LATEST: ${{ github.event_name == 'push' || inputs.latest }}
+        run: |
+          img=ghcr.io/adyoull/riscos-linux-testbed
+          docker tag riscos-linux-testbed:test "$img:$VERSION"
+          docker push "$img:$VERSION"
+          if [ "$LATEST" = true ]; then
+            docker tag riscos-linux-testbed:test "$img:latest"
+            docker push "$img:latest"
+          fi

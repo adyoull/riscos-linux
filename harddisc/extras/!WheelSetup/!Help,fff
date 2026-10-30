@@ -1,0 +1,14 @@
+Scroll wheel                                    RISC OS on Linux
+============
+Configure's Scroll wheel chooses which way the mouse's scroll wheel (or
+a trackpad's two-finger scroll) scrolls windows:
+
+  Normal     the wheel turned away from you (or two fingers moved up)
+             scrolls up, as RISC OS has always done
+  Reversed   the other way round: "natural" scrolling, as on a Mac or
+             a phone (the window follows your fingers)
+
+Set uses it at once and keeps it in Choices:KVMWheel for the next start.
+From the command line: *KVMWheel Reverse, *KVMWheel Normal.
+
+Copyright (c) 2026 Andrew Youll. MIT licence.

@@ -1,0 +1,141 @@
+REM >!RunImage
+REM WheelSetup: Configure's Scroll wheel plug-in: Normal or Reversed
+REM (natural) scrolling. Set runs *KVMWheel Reverse|Normal and writes
+REM <Choices$Write>.KVMWheel, which the boot sequence runs (PreDesk).
+REM Copyright (c) 2026 Andrew Youll. MIT licence.
+ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
+DIM blk% 1024, ind% 1024
+indp%=0
+SYS "Wimp_Initialise",380,&4B534154,"Scroll wheel",0 TO ,task%
+PROCwindow
+PROCload
+PROCopen
+quit%=FALSE
+REPEAT
+  SYS "Wimp_Poll",&3831,blk% TO reason%
+  CASE reason% OF
+    WHEN 2 : SYS "Wimp_OpenWindow",,blk%
+    WHEN 3 : quit%=TRUE
+    WHEN 6 : PROCclick(blk%!8,blk%!12,blk%!16)
+    WHEN 8 : PROCkey(blk%!24)
+    WHEN 17,18 : IF blk%!16=0 THEN quit%=TRUE
+  ENDCASE
+UNTIL quit%
+SYS "Wimp_CloseDown",task%,&4B534154
+END
+
+DEF FNstr(s$,len%)
+LOCAL p%
+p%=ind%+indp%
+IF len%<LEN(s$)+1 THEN len%=LEN(s$)+1
+$p%=s$
+indp%+=(len%+3) AND NOT 3
+=p%
+
+DEF FNicon(x0%,y0%,x1%,y1%,fl%,t$,v$)
+LOCAL i%
+blk%!0=win% : blk%!4=x0% : blk%!8=y0% : blk%!12=x1% : blk%!16=y1%
+blk%!20=fl%
+blk%!24=FNstr(t$,0)
+IF v$="" THEN blk%!28=-1 ELSE blk%!28=FNstr(v$,0)
+blk%!32=LEN(t$)+1
+SYS "Wimp_CreateIcon",,blk% TO i%
+=i%
+
+DEF PROCwindow
+LOCAL b%
+W%=760 : H%=300
+b%=blk%+512
+b%!0=0 : b%!4=0 : b%!8=W% : b%!12=H%
+b%!16=0 : b%!20=0 : b%!24=-1
+b%!28=&87000012
+b%?32=7 : b%?33=2 : b%?34=7 : b%?35=1 : b%?36=3 : b%?37=1 : b%?38=12 : b%?39=0
+b%!40=0 : b%!44=-H% : b%!48=W% : b%!52=0
+b%!56=&13D : b%!60=0 : b%!64=1 : b%!68=0
+b%!72=FNstr("Scroll wheel",0) : b%!76=-1 : b%!80=13
+b%!84=0
+SYS "Wimp_CreateWindow",,b% TO win%
+g%=FNicon(16,-196,W%-16,-24,&1700011D,"","R4")
+t%=FNicon(48,-48,48+15*16,0,&17000139,"Scroll direction","")
+normal%=FNicon(48,-108,W%-48,-60,&1701B113,"Normal","Sradiooff,radioon")
+rev%=FNicon(48,-168,W%-48,-120,&1701B113,"Reversed (natural, as on a Mac)","Sradiooff,radioon")
+cancel%=FNicon(W%-420,-276,W%-232,-216,&1700313D,"Cancel","R5,3")
+set%=FNicon(W%-216,-284,W%-16,-208,&1700313D,"Set","R6,3")
+ENDPROC
+
+DEF PROCopen
+LOCAL b%,sw%,sh%,ex%,ey%,x%,y%,a$,i%
+SYS "OS_ReadModeVariable",-1,11 TO ,,sw%
+SYS "OS_ReadModeVariable",-1,12 TO ,,sh%
+SYS "OS_ReadModeVariable",-1,4 TO ,,ex%
+SYS "OS_ReadModeVariable",-1,5 TO ,,ey%
+sw%=(sw%+1)<<ex% : sh%=(sh%+1)<<ey%
+x%=(sw%-W%)DIV2 : y%=(sh%+H%)DIV2
+SYS "OS_GetEnv" TO a$
+i%=INSTR(a$,"-openat ")
+IF i% THEN a$=MID$(a$,i%+8) : x%=VAL(a$) : a$=MID$(a$,INSTR(a$," ")+1) : y%=VAL(a$)
+b%=blk%
+b%!0=win% : b%!4=x% : b%!8=y%-H% : b%!12=x%+W% : b%!16=y%
+b%!20=0 : b%!24=0 : b%!28=-1
+SYS "Wimp_OpenWindow",,b%
+ENDPROC
+
+DEF PROCselect(i%,on%)
+blk%!0=win% : blk%!4=i%
+IF on% THEN blk%!8=&200000 ELSE blk%!8=0
+blk%!12=&200000
+SYS "Wimp_SetIconState",,blk%
+ENDPROC
+
+DEF FNon(i%)
+blk%!0=win% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+=(blk%!24 AND &200000)<>0
+
+REM what Choices:KVMWheel says (Normal if there's none)
+DEF PROCload
+LOCAL f%,l$,r%
+f%=0 : SYS "XOS_Find",&4F,"Choices:KVMWheel" TO f% ;fl%
+IF fl% AND 1 THEN f%=0
+IF f% THEN
+  WHILE NOT EOF#f%
+    l$=GET$#f%
+    IF INSTR(l$,"Reverse") THEN r%=TRUE
+  ENDWHILE
+  CLOSE#f%
+ENDIF
+PROCselect(normal%,NOT r%) : PROCselect(rev%,r%)
+ENDPROC
+
+DEF PROCsave
+LOCAL f%,c$
+IF FNon(rev%) THEN c$="KVMWheel Reverse" ELSE c$="KVMWheel Normal"
+SYS "XOS_CLI",c$
+f%=OPENOUT("<Choices$Write>.KVMWheel")
+IF f%=0 THEN ERROR 1,"Can't write <Choices$Write>.KVMWheel"
+BPUT#f%,"| Configure's Scroll wheel: which way the scroll wheel scrolls"
+BPUT#f%,c$
+CLOSE#f%
+SYS "OS_File",18,"<Choices$Write>.KVMWheel",&FEB
+ENDPROC
+
+DEF PROCclick(b%,w%,i%)
+IF w%<>win% THEN ENDPROC
+CASE i% OF
+  WHEN normal%,rev% : PROCselect(normal%,i%=normal%) : PROCselect(rev%,i%=rev%)
+  WHEN cancel%
+    IF b% AND 4 THEN quit%=TRUE
+    IF b% AND 1 THEN PROCload
+  WHEN set%
+    IF b% AND 5 THEN PROCsave
+    IF b% AND 4 THEN quit%=TRUE
+ENDCASE
+ENDPROC
+
+DEF PROCkey(k%)
+CASE k% OF
+  WHEN 13 : PROCsave : quit%=TRUE
+  WHEN 27 : quit%=TRUE
+  OTHERWISE : SYS "Wimp_ProcessKey",k%
+ENDCASE
+ENDPROC

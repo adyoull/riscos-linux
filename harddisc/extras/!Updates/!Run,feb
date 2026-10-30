@@ -1,0 +1,4 @@
+| Updates: opens Configure's Updates (RISC OS on Linux and Debian)
+Set Updates$Dir <Obey$Dir>
+IconSprites <Updates$Dir>.!Sprites
+Filer_Run <Boot$Dir>.Resources.Configure.!ROLUpdate

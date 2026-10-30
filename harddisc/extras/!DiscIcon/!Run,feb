@@ -1,0 +1,3 @@
+| DiscIcon: HardDisc4 as a hard disc icon on the icon bar
+WimpSlot -min 64k -max 64k
+BASIC -quit <Obey$Dir>.!RunImage

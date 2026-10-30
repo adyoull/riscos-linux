@@ -1,0 +1,14 @@
+# Working notes never go in the repo.
+handoffs/
+*handoff*.md
+CLAUDE.md
+*START-HERE*.md
+.DS_Store
+
+# Build output and downloads
+out/
+dl/*
+!dl/README.md
+qemu/work/
+__pycache__/
+*.pyc

@@ -1,0 +1,151 @@
+REM >BasicBench
+REM ROBench: BBC BASIC tests. Copyright 2026 Andrew Youll. MIT licence.
+REM Each test is calibrated to run for T% centiseconds, run R% times,
+REM and the median is reported (as robench does). Appends to the
+REM results file named by ROBench$Last, if set.
+ON ERROR PRINT REPORT$;" at line ";ERL:END
+T%=200:R%=5
+DIM times%(31), arr%(1999), sieve% 8192, vb% 256
+IF FNvar("ROBench$Quick")<>"" THEN T%=50:R%=3
+basic$=FNvar("ROBench$Basic"):IF basic$="" THEN basic$="BASIC"
+out%=0:o$=FNvar("ROBench$Last")
+IF o$<>"" THEN out%=OPENUP(o$):IF out% THEN PTR#out%=EXT#out%
+PROCline("")
+PROCline(basic$+" ("+FNversion+"): "+STR$(T%/100)+" s per run, "+STR$(R%)+" runs, median")
+IF basic$="BASIC" THEN pre$="basic." ELSE pre$="basic64."
+PROCtest(pre$+"intloop","Integer FOR loop with arithmetic","Mloops/s",1000/1E6,1)
+PROCtest(pre$+"realmath","Real arithmetic (+ * / +)","Mops/s",4000/1E6,2)
+PROCtest(pre$+"trig","SIN COS SQR LN EXP","Kcalls/s",5000/1E3,3)
+PROCtest(pre$+"string","String slicing, joining, STR$, INSTR","Kops/s",1000/1E3,4)
+PROCtest(pre$+"proc","PROC and FN calls","Kcalls/s",2000/1E3,5)
+PROCtest(pre$+"sort","Shell sort 2000 integers","sorts/s",1,6)
+PROCtest(pre$+"sieve","Sieve of Eratosthenes to 8192","sieves/s",1,7)
+IF out% THEN CLOSE#out%
+END
+
+DEF PROCtest(id$,what$,unit$,work,kind%)
+LOCAL n%,t%,i%,c%,k%
+REM calibrate: grow n% until a run takes T%/8, then scale to T%
+n%=1
+REPEAT
+  t%=FNrun(kind%,n%)
+  IF t%<T%/8 THEN IF t%<T%/80 THEN n%=n%*10 ELSE n%=n%*2
+UNTIL t%>=T%/8
+n%=n%*T%/t%:IF n%<1 THEN n%=1
+FOR i%=0 TO R%-1:times%(i%)=FNrun(kind%,n%):NEXT
+REM sort the times, take the median
+REM (BASIC's AND evaluates both sides, so no times%(-1) in the test)
+REM (and a WHILE that starts false must have its ENDWHILE on a line of its own)
+FOR i%=1 TO R%-1
+  t%=times%(i%):c%=i%
+  REPEAT
+    k%=FNgt(c%,t%)
+    IF k% THEN times%(c%)=times%(c%-1):c%-=1
+  UNTIL NOT k%
+  times%(c%)=t%
+NEXT
+t%=times%(R% DIV 2):IF t%<1 THEN t%=1
+PROCline(LEFT$(id$+STRING$(17," "),17)+LEFT$(what$+STRING$(36," "),36)+RIGHT$(STRING$(12," ")+FNf2(n%*work/(t%/100)),12)+" "+unit$)
+IF out% THEN BPUT#out%,"result,"+id$+","+unit$+","+STR$(n%*work/(t%/100))+",0,0,ok"
+ENDPROC
+
+DEF FNrun(kind%,n%)
+LOCAL t%,i%,j%,a%,a,b,s$,x$
+t%=TIME
+CASE kind% OF
+WHEN 1
+  FOR i%=1 TO n%:FOR j%=1 TO 1000:a%+=(j% AND 7)*3:NEXT:NEXT
+WHEN 2
+  a=1:b=0
+  FOR i%=1 TO n%:FOR j%=1 TO 1000:b=b*0.5+a*1.0001:a=b/3+1:NEXT:NEXT
+WHEN 3
+  a=0
+  FOR i%=1 TO n%:FOR j%=1 TO 1000:a=a+SIN(j%)*COS(j%)+SQR(j%)+LN(j%)+EXP(j%/1000):NEXT:NEXT
+WHEN 4
+  x$="The quick brown fox jumps over the lazy dog"
+  FOR i%=1 TO n%:FOR j%=1 TO 1000
+    s$=LEFT$(x$,10)+MID$(x$,j% MOD 30+1,8)+STR$(j%)+RIGHT$(x$,5)
+    a%+=LEN(s$)+INSTR(s$,"fox")
+  NEXT:NEXT
+WHEN 5
+  FOR i%=1 TO n%:FOR j%=1 TO 1000:PROCnop(j%):a%+=FNsq(j%):NEXT:NEXT
+WHEN 6
+  FOR i%=1 TO n%:PROCfill:PROCshell:NEXT
+WHEN 7
+  FOR i%=1 TO n%:a%+=FNsieve:NEXT
+ENDCASE
+=TIME-t%
+
+DEF PROCnop(x%)
+ENDPROC
+
+DEF FNsq(x%)=x%*x%
+
+DEF PROCfill
+LOCAL i%,s%
+s%=12345
+FOR i%=0 TO 1999:s%=(s%*75+74) MOD 65537:arr%(i%)=s%:NEXT
+ENDPROC
+
+DEF PROCshell
+LOCAL g%,i%,j%,t%,k%
+g%=1
+REPEAT g%=g%*3+1:UNTIL g%>=2000
+REPEAT
+  g%=g% DIV 3
+  FOR i%=g% TO 1999
+    t%=arr%(i%):j%=i%
+    REPEAT
+      k%=FNshgt(j%,g%,t%)
+      IF k% THEN arr%(j%)=arr%(j%-g%):j%-=g%
+    UNTIL NOT k%
+    arr%(j%)=t%
+  NEXT
+UNTIL g%<=1
+ENDPROC
+
+DEF FNshgt(j%,g%,t%):IF j%<g% THEN =FALSE
+=arr%(j%-g%)>t%
+
+DEF FNsieve
+LOCAL i%,k%,c%
+FOR i%=0 TO 8191 STEP 4:sieve%!i%=&01010101:NEXT
+FOR i%=2 TO 8191
+  REM (a FOR loop always runs once: only start one that has work to do)
+  IF sieve%?i% THEN c%+=1:IF i%<=90 THEN FOR k%=i%*i% TO 8191 STEP i%:sieve%?k%=0:NEXT
+NEXT
+=c%
+
+DEF FNversion
+SYS "OS_Module",18,"BASIC" TO ,,,b%
+IF basic$<>"BASIC" THEN SYS "XOS_Module",18,"BASICVFP" TO ,,,b%;f%
+=FNhelp(b%)
+
+DEF FNhelp(b%)
+LOCAL p%,s$
+p%=b%+b%!&14:s$=""
+REPEAT
+  IF ?p%=9 THEN s$+=" " ELSE s$+=CHR$(?p%)
+  p%+=1
+UNTIL ?p%<32 AND ?p%<>9
+=s$
+
+DEF FNf2(x)
+LOCAL @%
+@%=&0102020C
+=STR$(x)
+
+DEF FNgt(c%,t%):IF c%<1 THEN =FALSE
+=times%(c%-1)>t%
+
+DEF FNvar(v$)
+LOCAL l%,f%
+SYS "XOS_ReadVarVal",v$,vb%,255,0,3 TO ,,l%;f%
+IF (f% AND 1) OR l%<=0 THEN =""
+vb%?l%=13
+=$vb%
+
+DEF PROCline(l$)
+PRINT l$
+IF out% THEN BPUT#out%,l$
+ENDPROC

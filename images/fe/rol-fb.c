@@ -1,0 +1,1561 @@
+/* rol-fb: a full-screen front end for RISC OS for Linux on a Linux
+ * console: the screen on the framebuffer (/dev/fb0), the keyboard and
+ * mouse (or tablet) from evdev (/dev/input/event*). No X, no SDL.
+ *
+ *   rol-fb [-p] [-n] -- COMMAND [ARGS...]
+ *
+ * Runs COMMAND (qemu-arm-riscos with the port's ROM) with a SocketKVM
+ * connection, as the port's SDL front end does, and asks RISC OS for a
+ * screen mode the size of the framebuffer (at the start through the
+ * ROL$ScreenWidth and ROL$ScreenHeight variables, so that a mode saved in
+ * Configure wins; then whenever the host's window changes size). RISC
+ * OS's pointer is drawn in
+ * software. Mouse buttons as on RISC OS: left = Select, middle = Menu,
+ * right = Adjust (-p: right = Menu, middle = Adjust, for a mouse or
+ * trackpad without a middle button). -n: a real monitor (a Raspberry Pi's
+ * HDMI): never set a display mode of its own, only the monitor's preferred
+ * one, and scale other RISC OS modes to fit it (a virtual GPU takes any
+ * size; a monitor shows only the modes it supports).
+ * The scroll wheel goes as key numbers &1F0-&1F3 (up, down, left, right),
+ * for the KVMWheel module. The display is set to the RISC OS mode's size,
+ * so RISC OS's pixels aren't scaled here; RISC OS is asked for a mode the
+ * size of the host's window when that changes.
+ * Exits with COMMAND's exit status.
+ *
+ * The protocol (SocketKVM_Protocol.h) and the key numbers are Timothy
+ * Baldwin's, from the Linux port's SocketKVMFrontends (Apache-2.0).
+ *
+ * Copyright (c) 2026 Andrew Youll. MIT licence. */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/fb.h>
+#include <drm/drm.h>
+#include <drm/drm_mode.h>
+#include <linux/input.h>
+#include <linux/kd.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/mount.h>
+#include <sys/syscall.h>
+#include <grp.h>
+#include <sched.h>
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <sys/uio.h>
+#include <elf.h>
+#include <sys/signalfd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <stddef.h>
+#include <drm/drm_fourcc.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "linux2ro.h"
+
+enum { R_MOUSE = 0, R_KEYDOWN = 1, R_KEYUP = 2, R_MODE_SYNC = 3,
+       R_RESIZE = 4, R_CLOSE = 5, R_VERSION = 6 };
+enum { C_MODE_CHANGE = 0, C_SET_PALETTE = 1, C_POINTER = 2, C_SUSPEND = 3,
+       C_CLOSE_CTL = 4, C_VERSION = 6, C_ACTIVESCREEN = 7, C_STARTSCREEN = 8 };
+enum { RO_SELECT = 0x70, RO_MENU = 0x71, RO_ADJUST = 0x72 };
+
+struct report { int32_t reason; uint32_t a, b, c; };
+
+#define SCREEN_MAX (1024 * 1024 * 100)
+#define MAX_INPUTS 32
+
+static int sock = -1, screen_fd = -1;
+static unsigned char *pixels;
+static int width, height, log2bpp = -1, mode_changed;
+static int row_bytes;				/* width * bytes per pixel + extra */
+static uint32_t ncolour, modeflags;
+#define MF_64K 0x80				/* 16 bpp: 5:6:5 */
+#define MF_RGB 0x4000				/* &xRGB, not &xBGR */
+/* scaling: output pixel (x, y) shows RISC OS pixel (xmap[x], ymap[y]) */
+static int *xmap, *ymap, map_w, map_h, map_valid;
+static int ox, oy, sw, sh;			/* the picture's place on the output */
+static uint32_t palette[256];			/* 0x00BBGGRR */
+static uint32_t ptr_pal[4];			/* 0x00RRGGBB; [0] unused */
+static unsigned char ptr_shape[32][32];		/* colour 0-3 */
+static int ptr_h, ptr_ax, ptr_ay, ptr_changed;
+static uint32_t start_addr, active_addr;
+static int have_start, have_active;
+static int pcmouse, realmonitor;
+
+/* framebuffer */
+static int fb_fd = -1, fb_w, fb_h, fb_bpp, fb_stride;
+static int drm_fd = -1;
+static uint32_t drm_conn, drm_crtc, drm_fb, drm_handle;
+static size_t fb_size;
+static unsigned char *fb;
+static uint32_t *back;				/* fb_w x fb_h, 0x00RRGGBB */
+static uint32_t *last_src;			/* copy of what was drawn */
+static size_t last_len;
+
+/* input */
+static struct { int fd; char name[32]; int absmax_x, absmax_y; } inputs[MAX_INPUTS];
+static int ninputs;
+static int mx, my;				/* pointer, RISC OS pixels from top left */
+static unsigned buttons;			/* bit 0 select, 1 menu, 2 adjust */
+static int key_down[256];
+
+static void
+send_report (int reason, uint32_t a, uint32_t b, uint32_t c)
+{
+  struct report r = { reason, a, b, c };
+  if (write (sock, &r, sizeof r) < 0 && errno != EAGAIN && errno != EPIPE)
+    perror ("rol-fb: write");
+}
+
+#define OV_KEY 0x080008u
+#define OV_BUFS 32
+static int ov_listen = -1, ov_client = -1;
+static uint32_t ov_plane, prim_plane, ov_zpos_ok;
+static int ov_need, ov_shown = -1;		/* ARGB desktop; index on screen */
+static int ov_x, ov_y, ov_w, ov_h;		/* RISC OS pixels: the key area */
+static struct { uint32_t fb, handle; } ov_buf[OV_BUFS];
+static struct drm_mode_modeinfo cur_mode;
+static int have_cur_mode;
+
+
+/* --- the output: DRM/KMS (follows the VM window's size), else fbdev --- */
+
+/* The connector's preferred mode (the host's window size with UTM's
+   dynamic resolution), or its first. */
+static int
+drm_pick (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id)
+{
+  struct drm_mode_card_res res = { 0 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_GETRESOURCES, &res))
+    return -1;
+  uint32_t conns[16], crtcs[16], encs[16], fbs[16];
+  if (res.count_connectors > 16 || res.count_crtcs > 16 || res.count_encoders > 16 || res.count_fbs > 16)
+    return -1;
+  res.connector_id_ptr = (uintptr_t) conns;
+  res.crtc_id_ptr = (uintptr_t) crtcs;
+  res.encoder_id_ptr = (uintptr_t) encs;
+  res.fb_id_ptr = (uintptr_t) fbs;
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_GETRESOURCES, &res))
+    return -1;
+  for (uint32_t i = 0; i < res.count_connectors; i++)
+    {
+      struct drm_mode_get_connector c = { .connector_id = conns[i] };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) || c.connection != 1 || !c.count_modes)
+	continue;
+      struct drm_mode_modeinfo modes[64];
+      uint32_t cencs[16];
+      if (c.count_modes > 64)
+	c.count_modes = 64;
+      if (c.count_encoders > 16)
+	c.count_encoders = 16;
+      c.modes_ptr = (uintptr_t) modes;
+      c.encoders_ptr = (uintptr_t) cencs;
+      c.count_props = 0;
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c))
+	continue;
+      int best = 0;
+      for (uint32_t m = 0; m < c.count_modes; m++)
+	if (modes[m].type & DRM_MODE_TYPE_PREFERRED)
+	  {
+	    best = m;
+	    break;
+	  }
+      *mode = modes[best];
+      *conn_id = conns[i];
+      *crtc_id = crtcs[0];
+      if (c.encoder_id)
+	{
+	  struct drm_mode_get_encoder e = { .encoder_id = c.encoder_id };
+	  if (!ioctl (drm_fd, DRM_IOCTL_MODE_GETENCODER, &e) && e.crtc_id)
+	    *crtc_id = e.crtc_id;
+	}
+      return 0;
+    }
+  return -1;
+}
+
+static void
+drm_release (void)
+{
+  if (fb && fb != MAP_FAILED)
+    munmap (fb, fb_size);
+  fb = NULL;
+  if (drm_fb)
+    ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &drm_fb);
+  if (drm_handle)
+    {
+      struct drm_mode_destroy_dumb d = { .handle = drm_handle };
+      ioctl (drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+    }
+  drm_fb = drm_handle = 0;
+}
+
+/* The display's own (hardware) cursor: a clear one, so that a VM's host
+   shows no pointer of its own over RISC OS's (UTM draws its arrow where
+   the guest has set none), and a monitor shows no stray one either. */
+static void
+drm_hide_cursor (void)
+{
+  static uint32_t handle;
+  if (!handle)
+    {
+      struct drm_mode_create_dumb cd = { .width = 64, .height = 64, .bpp = 32 };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd))
+	return;
+      struct drm_mode_map_dumb md = { .handle = cd.handle };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md) == 0)
+	{
+	  void *p = mmap (NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, md.offset);
+	  if (p != MAP_FAILED)
+	    {
+	      memset (p, 0, cd.size);	/* (fully transparent ARGB) */
+	      munmap (p, cd.size);
+	    }
+	}
+      handle = cd.handle;
+    }
+  struct drm_mode_cursor c = { .flags = DRM_MODE_CURSOR_BO, .crtc_id = drm_crtc,
+			       .width = 64, .height = 64, .handle = handle };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_CURSOR, &c))
+    fprintf (stderr, "rol-fb: no hardware cursor to hide (%s)\n", strerror (errno));
+}
+
+static int
+drm_setup (const struct drm_mode_modeinfo *mode)
+{
+  drm_release ();
+  struct drm_mode_create_dumb cd = { .width = mode->hdisplay, .height = mode->vdisplay, .bpp = 32 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd))
+    return -1;
+  drm_handle = cd.handle;
+  if (ov_need)
+    {
+      /* with a video overlay: ARGB, so that the key colour can be clear */
+      struct drm_mode_fb_cmd2 f2 = { .width = cd.width, .height = cd.height,
+				     .pixel_format = DRM_FORMAT_ARGB8888 };
+      f2.handles[0] = cd.handle;
+      f2.pitches[0] = cd.pitch;
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB2, &f2))
+	return -1;
+      drm_fb = f2.fb_id;
+    }
+  else
+    {
+      struct drm_mode_fb_cmd fc = { .width = cd.width, .height = cd.height, .pitch = cd.pitch,
+				    .bpp = 32, .depth = 24, .handle = cd.handle };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB, &fc))
+	return -1;
+      drm_fb = fc.fb_id;
+    }
+  cur_mode = *mode;
+  have_cur_mode = 1;
+  struct drm_mode_map_dumb md = { .handle = cd.handle };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md))
+    return -1;
+  fb_size = cd.size;
+  fb = mmap (NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, md.offset);
+  if (fb == MAP_FAILED)
+    return -1;
+  memset (fb, 0, fb_size);
+  struct drm_mode_crtc cr = { .crtc_id = drm_crtc, .fb_id = drm_fb,
+			      .set_connectors_ptr = (uintptr_t) &drm_conn, .count_connectors = 1,
+			      .mode = *mode, .mode_valid = 1 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_SETCRTC, &cr))
+    {
+      perror ("rol-fb: SETCRTC");
+      return -1;
+    }
+  drm_hide_cursor ();
+  fb_w = mode->hdisplay;
+  fb_h = mode->vdisplay;
+  fb_stride = cd.pitch;
+  fb_bpp = 32;
+  free (back);
+  back = calloc ((size_t) fb_w * fb_h, 4);
+  map_valid = 0;
+  fprintf (stderr, "rol-fb: display %dx%d (DRM)\n", fb_w, fb_h);
+  return back ? 0 : -1;
+}
+
+/* The size the host asks for (its window, with UTM's dynamic resolution):
+   followed by asking RISC OS for a mode that size. The display itself is
+   set to the RISC OS mode's size (drm_match_mode), so that nothing is
+   scaled here: the host scales it to its window, smoothly. */
+static int host_w, host_h, failed_w, failed_h;
+
+static int
+drm_open (void)
+{
+  struct drm_mode_modeinfo mode;
+  /* the first card with a screen connected: a GPU that only renders
+     (Panfrost, Lima, V3D) may be card0, with the display on card1 */
+  for (int n = 0; n < 8 && host_w == 0; n++)
+    {
+      char path[32];
+      snprintf (path, sizeof path, "/dev/dri/card%d", n);
+      if (drm_fd >= 0)
+	close (drm_fd);
+      drm_fd = open (path, O_RDWR | O_CLOEXEC);
+      if (drm_fd >= 0 && drm_pick (&mode, &drm_conn, &drm_crtc) == 0)
+	{
+	  host_w = mode.hdisplay;
+	  host_h = mode.vdisplay;
+	}
+    }
+  if (drm_fd < 0)
+    return -1;
+  if (host_w == 0 || drm_setup (&mode))
+    {
+      drm_release ();
+      close (drm_fd);
+      drm_fd = -1;
+      return -1;
+    }
+  return 0;
+}
+
+/* The window changed size? Then a new framebuffer, and 1 to tell RISC OS. */
+static int
+drm_check_resize (void)
+{
+  struct drm_mode_modeinfo mode;
+  uint32_t conn, crtc;
+  if (drm_fd < 0 || drm_pick (&mode, &conn, &crtc))
+    return 0;
+  if (mode.hdisplay == host_w && mode.vdisplay == host_h)
+    return 0;
+  host_w = mode.hdisplay;
+  host_h = mode.vdisplay;
+  drm_conn = conn;
+  drm_crtc = crtc;
+  return drm_setup (&mode) == 0;
+}
+
+/* A display mode exactly w x h (60 Hz timings made up: a virtual GPU
+   takes any size), so the RISC OS mode isn't scaled here. 0 if done. */
+static int
+drm_match_mode (int w, int h)
+{
+  if (drm_fd < 0 || (w == fb_w && h == fb_h) || (w == failed_w && h == failed_h))
+    return -1;
+  if (realmonitor)
+    {
+      failed_w = w;
+      failed_h = h;
+      return -1;
+    }
+  struct drm_mode_modeinfo m;
+  memset (&m, 0, sizeof m);
+  m.hdisplay = w;
+  m.hsync_start = w + 48;
+  m.hsync_end = w + 80;
+  m.htotal = w + 160;
+  m.vdisplay = h;
+  m.vsync_start = h + 3;
+  m.vsync_end = h + 9;
+  m.vtotal = h + 35;
+  m.vrefresh = 60;
+  m.clock = (uint32_t) ((uint64_t) m.htotal * m.vtotal * 60 / 1000);
+  m.type = DRM_MODE_TYPE_USERDEF;
+  snprintf (m.name, sizeof m.name, "%dx%d", w, h);
+  if (drm_setup (&m) == 0)
+    return 0;
+  fprintf (stderr, "rol-fb: no %dx%d display mode: scaling\n", w, h);
+  failed_w = w;
+  failed_h = h;
+  struct drm_mode_modeinfo pref;
+  uint32_t conn, crtc;
+  if (drm_pick (&pref, &conn, &crtc) == 0)
+    drm_setup (&pref);
+  return -1;
+}
+
+static void
+flush (void)
+{
+  if (drm_fd >= 0 && drm_fb)
+    {
+      struct drm_clip_rect r = { 0, 0, (unsigned short) fb_w, (unsigned short) fb_h };
+      struct drm_mode_fb_dirty_cmd d = { .fb_id = drm_fb, .num_clips = 1, .clips_ptr = (uintptr_t) &r };
+      static int reported;
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_DIRTYFB, &d) && !reported++)
+	perror ("rol-fb: DIRTYFB");
+    }
+}
+
+/* --- the video overlay: a YUV plane under the desktop (Raspberry Pi) ---
+
+   LinuxCodec (a RISC OS module) connects to the abstract socket
+   "rol-fb-overlay" and hands over the decoder's picture buffers (dmabufs,
+   SCM_RIGHTS). Each is made a DRM framebuffer (YUV 4:2:0) once; showing a
+   picture puts it on a KMS overlay plane at the window's place, scaled by
+   the display hardware. The overlay goes under the desktop's plane, which
+   then has an alpha channel: the program paints its video area in the key
+   colour, and those pixels (inside the overlay's rectangle) are made
+   transparent, so windows and menus on top of the video still show. If the
+   driver can't put the plane underneath (no zpos), it goes on top.
+
+   Messages: 16 words, [0] = command, replies 16 words, [0] = 0 or -errno.
+     1 OPEN                       -> [1] key colour 0x00RRGGBB, [2] under (1/0)
+     2 ADDBUF index w h fourcc pitch0 off0 pitch1 off1 pitch2 off2 (+ fd)
+     3 SHOW index x y w h sx sy sw sh  (RISC OS pixels from the top left;
+                                       source rectangle in picture pixels)
+                                  -> [1] the index shown before (now free) or -1
+     4 HIDE                       -> [1] the index shown before or -1
+     5 FORGET                     (all buffers: the decoder's were remade) */
+static int
+prop_id (uint32_t obj, const char *name, uint64_t *value)
+{
+  uint32_t ids[64];
+  uint64_t vals[64];
+  struct drm_mode_obj_get_properties gp = { .props_ptr = (uintptr_t) ids, .prop_values_ptr = (uintptr_t) vals,
+					    .count_props = 64, .obj_id = obj, .obj_type = DRM_MODE_OBJECT_PLANE };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &gp))
+    return 0;
+  for (uint32_t i = 0; i < gp.count_props && i < 64; i++)
+    {
+      struct drm_mode_get_property pr = { .prop_id = ids[i] };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPROPERTY, &pr))
+	continue;
+      if (!strcmp (pr.name, name))
+	{
+	  if (value)
+	    *value = vals[i];
+	  return (int) ids[i];
+	}
+    }
+  return 0;
+}
+
+static int
+set_prop (uint32_t obj, const char *name, uint64_t value)
+{
+  int id = prop_id (obj, name, NULL);
+  if (!id)
+    return -1;
+  struct drm_mode_obj_set_property sp = { .value = value, .prop_id = (uint32_t) id, .obj_id = obj,
+					  .obj_type = DRM_MODE_OBJECT_PLANE };
+  return ioctl (drm_fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &sp);
+}
+
+/* An overlay plane for our CRTC that takes YUV 4:2:0, and the primary */
+static void
+ov_find_planes (void)
+{
+  struct drm_set_client_cap cap = { DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1 };
+  ioctl (drm_fd, DRM_IOCTL_SET_CLIENT_CAP, &cap);
+  uint32_t crtcs[16];
+  struct drm_mode_card_res res = { .crtc_id_ptr = (uintptr_t) crtcs, .count_crtcs = 16 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_GETRESOURCES, &res))
+    return;
+  int ci = -1;
+  for (uint32_t i = 0; i < res.count_crtcs && i < 16; i++)
+    if (crtcs[i] == drm_crtc)
+      ci = (int) i;
+  if (ci < 0)
+    return;
+  uint32_t planes[64];
+  struct drm_mode_get_plane_res pr = { .plane_id_ptr = (uintptr_t) planes, .count_planes = 64 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr))
+    return;
+  ov_plane = prim_plane = 0;
+  for (uint32_t i = 0; i < pr.count_planes && i < 64; i++)
+    {
+      uint32_t fmts[128];
+      struct drm_mode_get_plane gp = { .plane_id = planes[i], .format_type_ptr = (uintptr_t) fmts, .count_format_types = 128 };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPLANE, &gp) || !(gp.possible_crtcs & (1u << ci)))
+	continue;
+      uint64_t type = 0;
+      prop_id (planes[i], "type", &type);
+      if (type == 1 /* primary */ && !prim_plane)
+	prim_plane = planes[i];
+      if (type != 0 /* overlay */ || ov_plane)
+	continue;
+      for (uint32_t f = 0; f < gp.count_format_types && f < 128; f++)
+	if (fmts[f] == DRM_FORMAT_YUV420)
+	  ov_plane = planes[i];
+    }
+  if (ov_plane)
+    fprintf (stderr, "rol-fb: video overlay plane %u (primary %u)\n", ov_plane, prim_plane);
+}
+
+static void
+ov_reply (int32_t a, int32_t b, int32_t c)
+{
+  int32_t m[16] = { a, b, c };
+  if (ov_client >= 0)
+    send (ov_client, m, sizeof m, MSG_NOSIGNAL);
+}
+
+static void
+ov_forget (void)
+{
+  for (int i = 0; i < OV_BUFS; i++)
+    {
+      if (ov_buf[i].fb)
+	ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &ov_buf[i].fb);
+      if (ov_buf[i].handle)
+	{
+	  struct drm_gem_close gc = { .handle = ov_buf[i].handle };
+	  ioctl (drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
+	}
+      ov_buf[i].fb = ov_buf[i].handle = 0;
+    }
+}
+
+static int
+ov_hide (void)
+{
+  int prev = ov_shown;
+  if (ov_plane && ov_shown >= 0)
+    {
+      struct drm_mode_set_plane sp = { .plane_id = ov_plane, .crtc_id = drm_crtc };
+      ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp);
+    }
+  ov_shown = -1;
+  ov_w = ov_h = 0;
+  return prev;
+}
+
+/* The desktop's plane needs an alpha channel for the key: remake it */
+static void
+ov_want_alpha (int on)
+{
+  if (ov_need == on)
+    return;
+  ov_need = on;
+  if (have_cur_mode)
+    drm_setup (&cur_mode);
+  if (on && ov_plane && prim_plane)
+    ov_zpos_ok = set_prop (ov_plane, "zpos", 0) == 0 && set_prop (prim_plane, "zpos", 1) == 0;
+  map_valid = 0;
+}
+
+static void
+ov_message (void)
+{
+  int32_t m[16];
+  union { char buf[CMSG_SPACE (sizeof (int))]; struct cmsghdr align; } ctl;
+  struct iovec iov = { m, sizeof m };
+  struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = ctl.buf, .msg_controllen = sizeof ctl.buf };
+  memset (m, 0, sizeof m);
+  ssize_t n = recvmsg (ov_client, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+  if (n == 0 || (n < 0 && errno != EAGAIN))
+    {
+      /* LinuxCodec went: take the video off the screen */
+      ov_hide ();
+      ov_forget ();
+      close (ov_client);
+      ov_client = -1;
+      ov_want_alpha (0);
+      return;
+    }
+  if (n < 4)
+    return;
+  int fd = -1;
+  for (struct cmsghdr *c = CMSG_FIRSTHDR (&msg); c; c = CMSG_NXTHDR (&msg, c))
+    if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
+      memcpy (&fd, CMSG_DATA (c), sizeof fd);
+  switch (m[0])
+    {
+    case 1:				/* OPEN */
+      if (drm_fd < 0 || !ov_plane)
+	{
+	  ov_reply (-ENODEV, 0, 0);
+	  break;
+	}
+      ov_want_alpha (1);
+      ov_reply (0, (int32_t) OV_KEY, (int32_t) ov_zpos_ok);
+      break;
+    case 2:				/* ADDBUF */
+      {
+	int i = m[1];
+	if (fd < 0 || i < 0 || i >= OV_BUFS)
+	  {
+	    ov_reply (-EINVAL, 0, 0);
+	    break;
+	  }
+	if (ov_buf[i].fb)
+	  ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &ov_buf[i].fb);
+	ov_buf[i].fb = 0;
+	struct drm_prime_handle ph = { .fd = fd };
+	int r = ioctl (drm_fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph);
+	if (r == 0)
+	  {
+	    struct drm_mode_fb_cmd2 fc = { .width = (uint32_t) m[2], .height = (uint32_t) m[3],
+					   .pixel_format = (uint32_t) m[4] };
+	    for (int p = 0; p < 3; p++)
+	      {
+		fc.handles[p] = ph.handle;
+		fc.pitches[p] = (uint32_t) m[5 + p * 2];
+		fc.offsets[p] = (uint32_t) m[6 + p * 2];
+	      }
+	    r = ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB2, &fc);
+	    ov_buf[i].handle = ph.handle;
+	    ov_buf[i].fb = r == 0 ? fc.fb_id : 0;
+	  }
+	ov_reply (r ? -errno : 0, 0, 0);
+	break;
+      }
+    case 3:				/* SHOW */
+      {
+	int i = m[1];
+	if (i < 0 || i >= OV_BUFS || !ov_buf[i].fb || width <= 0 || height <= 0)
+	  {
+	    ov_reply (-EINVAL, -1, 0);
+	    break;
+	  }
+	ov_x = m[2]; ov_y = m[3]; ov_w = m[4]; ov_h = m[5];
+	/* RISC OS pixels to the display's: as the desktop is scaled */
+	long dx = ox + (long) ov_x * sw / width, dy = oy + (long) ov_y * sh / height;
+	long dw = (long) ov_w * sw / width, dh = (long) ov_h * sh / height;
+	struct drm_mode_set_plane sp = { .plane_id = ov_plane, .crtc_id = drm_crtc, .fb_id = ov_buf[i].fb,
+					 .crtc_x = (int32_t) dx, .crtc_y = (int32_t) dy,
+					 .crtc_w = (uint32_t) dw, .crtc_h = (uint32_t) dh,
+					 .src_x = (uint32_t) m[6] << 16, .src_y = (uint32_t) m[7] << 16,
+					 .src_w = (uint32_t) m[8] << 16, .src_h = (uint32_t) m[9] << 16 };
+	int prev = ov_shown;
+	if (dw <= 0 || dh <= 0 || ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp))
+	  {
+	    ov_reply (-errno ? -errno : -EINVAL, -1, 0);
+	    break;
+	  }
+	ov_shown = i;
+	map_valid = 0;			/* redraw with the key area */
+	ov_reply (0, prev == i ? -1 : prev, 0);
+	break;
+      }
+    case 4:				/* HIDE */
+      ov_reply (0, ov_hide (), 0);
+      map_valid = 0;
+      break;
+    case 5:				/* FORGET */
+      ov_hide ();
+      ov_forget ();
+      ov_reply (0, 0, 0);
+      break;
+    default:
+      ov_reply (-EINVAL, 0, 0);
+    }
+  if (fd >= 0)
+    close (fd);
+}
+
+static void
+ov_accept (void)
+{
+  int c = accept4 (ov_listen, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+  if (c < 0)
+    return;
+  if (ov_client >= 0)
+    {
+      /* one program's video at a time: the new one takes over */
+      ov_hide ();
+      ov_forget ();
+      close (ov_client);
+    }
+  ov_client = c;
+}
+
+static void
+ov_start (void)
+{
+  if (drm_fd < 0)
+    return;
+  ov_find_planes ();
+  if (!ov_plane)
+    return;
+  ov_listen = socket (AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  struct sockaddr_un a = { .sun_family = AF_UNIX };
+  memcpy (a.sun_path, "\0rol-fb-overlay", 15);
+  if (ov_listen < 0 || bind (ov_listen, (struct sockaddr *) &a, offsetof (struct sockaddr_un, sun_path) + 15)
+      || listen (ov_listen, 2))
+    {
+      perror ("rol-fb: overlay socket");
+      if (ov_listen >= 0)
+	close (ov_listen);
+      ov_listen = -1;
+    }
+}
+
+static int
+fb_open (void)
+{
+  struct fb_var_screeninfo v;
+  struct fb_fix_screeninfo f;
+  if (drm_open () == 0)
+    return 0;
+  fb_fd = open ("/dev/fb0", O_RDWR | O_CLOEXEC);
+  if (fb_fd < 0)
+    {
+      perror ("rol-fb: /dev/fb0");
+      return -1;
+    }
+  if (ioctl (fb_fd, FBIOGET_VSCREENINFO, &v) || ioctl (fb_fd, FBIOGET_FSCREENINFO, &f))
+    {
+      perror ("rol-fb: fb ioctl");
+      return -1;
+    }
+  fb_w = v.xres;
+  fb_h = v.yres;
+  fb_bpp = v.bits_per_pixel;
+  fb_stride = f.line_length;
+  if (fb_bpp != 32 && fb_bpp != 16)
+    {
+      fprintf (stderr, "rol-fb: %d bits per pixel framebuffer not supported\n", fb_bpp);
+      return -1;
+    }
+  fb = mmap (NULL, (size_t) fb_stride * fb_h, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
+  if (fb == MAP_FAILED)
+    {
+      perror ("rol-fb: mmap fb");
+      return -1;
+    }
+  back = calloc ((size_t) fb_w * fb_h, 4);
+  fprintf (stderr, "rol-fb: framebuffer %dx%d, %d bpp\n", fb_w, fb_h, fb_bpp);
+  return back ? 0 : -1;
+}
+
+static void
+console_graphics (int on)
+{
+  int t = open ("/dev/tty0", O_RDWR | O_CLOEXEC);
+  if (t < 0)
+    t = open ("/dev/tty1", O_RDWR | O_CLOEXEC);
+  if (t >= 0)
+    {
+      ioctl (t, KDSETMODE, on ? KD_GRAPHICS : KD_TEXT);
+      close (t);
+    }
+}
+
+static inline uint32_t
+src_pixel (const unsigned char *base, int x, int y)
+{
+  const unsigned char *row = base + (size_t) y * row_bytes;
+  uint32_t r, g, b;
+  switch (log2bpp)
+    {
+    case 3:
+      {
+	uint32_t c = palette[row[x]];
+	return ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+      }
+    case 4:
+      {
+	unsigned v = row[x * 2] | (row[x * 2 + 1] << 8);
+	if (ncolour == 4095)			/* 4:4:4:4 */
+	  {
+	    r = (v & 15) * 17; g = ((v >> 4) & 15) * 17; b = ((v >> 8) & 15) * 17;
+	  }
+	else if (modeflags & MF_64K)		/* 5:6:5 */
+	  {
+	    r = v & 31; g = (v >> 5) & 63; b = (v >> 11) & 31;
+	    r = (r << 3) | (r >> 2); g = (g << 2) | (g >> 4); b = (b << 3) | (b >> 2);
+	  }
+	else					/* 1:5:5:5 */
+	  {
+	    r = v & 31; g = (v >> 5) & 31; b = (v >> 10) & 31;
+	    r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2);
+	  }
+	break;
+      }
+    case 5:
+      {
+	const unsigned char *q = row + x * 4;
+	r = q[0]; g = q[1]; b = q[2];
+	break;
+      }
+    default:
+      return 0;
+    }
+  if (modeflags & MF_RGB)
+    {
+      uint32_t t = r; r = b; b = t;
+    }
+  return (r << 16) | (g << 8) | b;
+}
+
+/* Fit the RISC OS screen in the output: as big as it goes, keeping its
+   shape (and its pixels square, as RISC OS's are), in the middle. */
+static void
+make_maps (void)
+{
+  free (xmap);
+  free (ymap);
+  xmap = malloc (sizeof (int) * fb_w);
+  ymap = malloc (sizeof (int) * fb_h);
+  double sc = (double) fb_w / width;
+  if ((double) fb_h / height < sc)
+    sc = (double) fb_h / height;
+  if (sc >= 1)
+    sc = (int) sc;			/* whole multiples: crisp pixels */
+  sw = (int) (width * sc + 0.5);
+  sh = (int) (height * sc + 0.5);
+  if (sw > fb_w) sw = fb_w;
+  if (sh > fb_h) sh = fb_h;
+  ox = (fb_w - sw) / 2;
+  oy = (fb_h - sh) / 2;
+  for (int x = 0; x < fb_w; x++)
+    xmap[x] = x < ox || x >= ox + sw ? -1 : (int) ((long long) (x - ox) * width / sw);
+  for (int y = 0; y < fb_h; y++)
+    ymap[y] = y < oy || y >= oy + sh ? -1 : (int) ((long long) (y - oy) * height / sh);
+  map_w = width;
+  map_h = height;
+  map_valid = 1;
+}
+
+/* Redraw if the screen, the palette, the pointer or its position changed. */
+static void
+redraw (int force)
+{
+  static int last_mx = -1, last_my = -1;
+  if (log2bpp < 3 || width <= 0 || height <= 0 || screen_fd < 0 || !fb)
+    return;
+  const unsigned char *base = pixels;
+  if (have_start && have_active && active_addr >= start_addr)
+    base += active_addr - start_addr;
+  size_t len = (size_t) row_bytes * height;
+  struct stat st;
+  if (fstat (screen_fd, &st) || (size_t) st.st_size < len + (base - pixels))
+    return;
+  if (!map_valid || map_w != width || map_h != height)
+    {
+      make_maps ();
+      force = 1;
+    }
+  int screen_changed = force || mode_changed || len != last_len || !last_src
+		       || memcmp (last_src, base, len);
+  if (!screen_changed && !ptr_changed && mx == last_mx && my == last_my)
+    return;
+  if (screen_changed)
+    {
+      if (len != last_len)
+	{
+	  free (last_src);
+	  last_src = malloc (len);
+	  last_len = len;
+	}
+      if (last_src)
+	memcpy (last_src, base, len);
+      mode_changed = 0;
+      const unsigned char *src = last_src ? (const unsigned char *) last_src : base;
+      for (int y = 0; y < fb_h; y++)
+	{
+	  uint32_t *row = back + (size_t) y * fb_w;
+	  int sy = ymap[y];
+	  if (sy < 0)
+	    {
+	      memset (row, 0, (size_t) fb_w * 4);
+	      continue;
+	    }
+	  if (y > 0 && ymap[y - 1] == sy)
+	    {
+	      memcpy (row, row - fb_w, (size_t) fb_w * 4);
+	      continue;
+	    }
+	  for (int x = 0; x < fb_w; x++)
+	    row[x] = xmap[x] < 0 ? 0 : src_pixel (src, xmap[x], sy);
+	}
+    }
+  last_mx = mx;
+  last_my = my;
+  ptr_changed = 0;
+  /* copy to the output, with the pointer drawn on (unscaled) */
+  int px = ox + (int) ((long long) mx * sw / width) - ptr_ax;
+  int py = oy + (int) ((long long) my * sh / height) - ptr_ay;
+  for (int y = 0; y < fb_h; y++)
+    {
+      const uint32_t *row = back + (size_t) y * fb_w;
+      unsigned char *d = fb + (size_t) y * fb_stride;
+      int pr = y - py;
+      int has_ptr = pr >= 0 && pr < ptr_h && pr < 32;
+      if (fb_bpp == 32)
+	{
+	  uint32_t *d32 = (uint32_t *) d;
+	  if (!ov_need)
+	    memcpy (d32, row, (size_t) fb_w * 4);
+	  else
+	    {
+	      /* opaque, but for the key colour inside the video's area */
+	      int ky = ov_shown >= 0 && ov_w > 0 && ymap[y] >= ov_y && ymap[y] < ov_y + ov_h;
+	      for (int x = 0; x < fb_w; x++)
+		{
+		  uint32_t c = row[x];
+		  int k = ky && c == OV_KEY && xmap[x] >= ov_x && xmap[x] < ov_x + ov_w;
+		  d32[x] = k ? 0 : c | 0xFF000000u;
+		}
+	    }
+	  if (!has_ptr)
+	    continue;
+	  for (int i = 0; i < 32; i++)
+	    {
+	      int x = px + i;
+	      if (x < 0 || x >= fb_w)
+		continue;
+	      unsigned c = ptr_shape[pr][i];
+	      if (c)
+		d32[x] = ptr_pal[c] | 0xFF000000u;
+	    }
+	}
+      else
+	{
+	  uint16_t *d16 = (uint16_t *) d;
+	  for (int x = 0; x < fb_w; x++)
+	    {
+	      uint32_t c = row[x];
+	      if (has_ptr && x >= px && x < px + 32 && ptr_shape[pr][x - px])
+		c = ptr_pal[ptr_shape[pr][x - px]];
+	      d16[x] = ((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x1F);
+	    }
+	}
+    }
+  flush ();
+  static int frames;
+  if (frames++ < 3)
+    fprintf (stderr, "rol-fb: frame %d drawn (%dx%d at %d,%d)\n", frames, sw, sh, ox, oy);
+}
+
+/* --- messages from RISC OS -------------------------------------------- */
+static void
+read_messages (void)
+{
+  union { int32_t reason; uint32_t w[80]; unsigned char b[400]; } c;
+  for (;;)
+    {
+      union { char buf[CMSG_SPACE (sizeof (int)) * 2]; struct cmsghdr align; } ctl;
+      struct iovec iov = { &c, sizeof c };
+      struct msghdr msg = { 0 };
+      msg.msg_iov = &iov;
+      msg.msg_iovlen = 1;
+      msg.msg_control = ctl.buf;
+      msg.msg_controllen = sizeof ctl.buf;
+      ssize_t s = recvmsg (sock, &msg, MSG_DONTWAIT);
+      if (s < 4)
+	return;
+      for (struct cmsghdr *m = CMSG_FIRSTHDR (&msg); m; m = CMSG_NXTHDR (&msg, m))
+	if (m->cmsg_level == SOL_SOCKET && m->cmsg_type == SCM_RIGHTS)
+	  {
+	    if (screen_fd >= 0)
+	      close (screen_fd);
+	    memcpy (&screen_fd, CMSG_DATA (m), sizeof (int));
+	    void *p = mmap (pixels, SCREEN_MAX, PROT_READ, MAP_FIXED | MAP_SHARED, screen_fd, 0);
+	    if (p == MAP_FAILED)
+	      perror ("rol-fb: mmap screen");
+	  }
+      switch (c.reason)
+	{
+	case C_MODE_CHANGE:
+	  {
+	    int extra = 0;
+	    log2bpp = c.w[1 + 1];
+	    width = c.w[1 + 5];
+	    height = c.w[1 + 11];
+	    ncolour = 0;
+	    modeflags = 0;
+	    /* the VIDC list's control list: index, value pairs, then -1 */
+	    for (int k = 1 + 16; k + 1 < 80 && c.w[k] != 0xFFFFFFFFu; k += 2)
+	      switch (c.w[k])
+		{
+		case 14: extra = c.w[k + 1]; break;	/* ExtraBytes */
+		case 15: ncolour = c.w[k + 1]; break;	/* NColour */
+		case 16: modeflags = c.w[k + 1]; break;	/* ModeFlags */
+		}
+	    row_bytes = ((width << log2bpp) >> 3) + extra;
+	    if (mx >= width) mx = width - 1;
+	    if (my >= height) my = height - 1;
+	    mode_changed = 1;
+	    fprintf (stderr, "rol-fb: mode %dx%d, %d bpp, ncolour %u, flags &%x, extra %d\n",
+		     width, height, 1 << log2bpp, ncolour, modeflags, extra);
+	  }
+	  send_report (R_MODE_SYNC, 0, 0, 0);
+	  break;
+	case C_SET_PALETTE:		/* colour (0xBBGGRR00), index, type */
+	  if (c.w[3] == 0 && c.w[2] < 256)
+	    {
+	      palette[c.w[2]] = c.w[1] >> 8;
+	      mode_changed = 1;
+	    }
+	  else if (c.w[3] == 2 && c.w[2] < 4)
+	    {
+	      uint32_t v = c.w[1];
+	      ptr_pal[c.w[2]] = (((v >> 8) & 0xFF) << 16) | (((v >> 16) & 0xFF) << 8) | ((v >> 24) & 0xFF);
+	      ptr_changed = 1;
+	    }
+	  break;
+	case C_POINTER:			/* width, height, active x, y, visible, data */
+	  {
+	    const unsigned char *p = c.b + 4;
+	    ptr_h = p[4] ? p[1] : 0;
+	    if (ptr_h > 32)
+	      ptr_h = 32;
+	    ptr_ax = p[2];
+	    ptr_ay = p[3];
+	    const unsigned char *src = p + 5;
+	    for (int y = 0; y < 32; y++)
+	      for (int x = 0; x < 32; x++)
+		ptr_shape[y][x] = y < ptr_h ? (src[y * 8 + x / 4] >> ((x & 3) * 2)) & 3 : 0;
+	    ptr_changed = 1;
+	    break;
+	  }
+	case C_VERSION:
+	  for (int k = 0; k < 256; k++)
+	    if (key_down[k])
+	      send_report (R_KEYDOWN, k, 0, 0);
+	  send_report (R_VERSION, 1, 0, 0);
+	  break;
+	case C_ACTIVESCREEN:
+	  active_addr = c.w[1];
+	  have_active = 1;
+	  break;
+	case C_STARTSCREEN:
+	  start_addr = c.w[1];
+	  have_start = 1;
+	  break;
+	default:
+	  break;
+	}
+    }
+}
+
+/* --- input ------------------------------------------------------------- */
+static void
+scan_inputs (void)
+{
+  DIR *d = opendir ("/dev/input");
+  if (!d)
+    return;
+  struct dirent *e;
+  while ((e = readdir (d)) && ninputs < MAX_INPUTS)
+    {
+      if (strncmp (e->d_name, "event", 5))
+	continue;
+      int known = 0;
+      for (int i = 0; i < ninputs; i++)
+	known |= !strcmp (inputs[i].name, e->d_name);
+      if (known)
+	continue;
+      char path[300];
+      snprintf (path, sizeof path, "/dev/input/%s", e->d_name);
+      int fd = open (path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+      if (fd < 0)
+	continue;
+      struct input_absinfo ax = { 0 }, ay = { 0 };
+      ioctl (fd, EVIOCGABS (ABS_X), &ax);
+      ioctl (fd, EVIOCGABS (ABS_Y), &ay);
+      ioctl (fd, EVIOCGRAB, 1);		/* keys don't go to the console too */
+      inputs[ninputs].fd = fd;
+      snprintf (inputs[ninputs].name, sizeof inputs[ninputs].name, "%s", e->d_name);
+      inputs[ninputs].absmax_x = ax.maximum;
+      inputs[ninputs].absmax_y = ay.maximum;
+      char nm[128] = "";
+      ioctl (fd, EVIOCGNAME (sizeof nm), nm);
+      fprintf (stderr, "rol-fb: input %s: %s\n", e->d_name, nm);
+      ninputs++;
+    }
+  closedir (d);
+}
+
+static int
+clampi (int v, int lo, int hi)
+{
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+/* Ctrl+Break (or Ctrl+Alt+Backspace, for keyboards without Break): stop
+   RISC OS at once, as Ctrl+Break resets a real RISC OS machine, so a hung
+   RISC OS can always be left. What each of its threads was doing goes to
+   the log first. */
+static pid_t riscos_pid;
+static int ctrl_l, ctrl_r, alt_l, alt_r, hard_quit;
+
+/* A running thread: where it is. Stopped (ptrace, no signal), its
+   registers read, let go, a few times over: a hung RISC OS shows the loop
+   it's in. The 32-bit registers (r0-r15, cpsr) as a 64-bit tracer gets
+   them. */
+static void
+sample_thread (int tid)
+{
+  if (ptrace (PTRACE_SEIZE, tid, 0, 0) != 0)
+    {
+      fprintf (stderr, "rol-fb:     (can't look: %s)\n", strerror (errno));
+      return;
+    }
+  for (int i = 0; i < 12; i++)
+    {
+      int st;
+      if (ptrace (PTRACE_INTERRUPT, tid, 0, 0) != 0
+	  || waitpid (tid, &st, __WALL) != tid)
+	break;
+      uint32_t r[18] = { 0 };
+      struct iovec io = { r, sizeof r };
+      if (ptrace (PTRACE_GETREGSET, tid, (void *) NT_PRSTATUS, &io) == 0)
+	{
+	  uint32_t code[2] = { 0, 0 };
+	  struct iovec l = { code, sizeof code }, rm = { (void *) (uintptr_t) (r[15] & ~3u), sizeof code };
+	  if (!(r[16] & 0x20))
+	    process_vm_readv (tid, &l, 1, &rm, 1, 0);
+	  fprintf (stderr, "rol-fb:     pc %08x lr %08x sp %08x psr %08x"
+		   " r0 %08x r1 %08x r2 %08x r3 %08x [%08x %08x]\n",
+		   r[15], r[14], r[13], r[16], r[0], r[1], r[2], r[3], code[0], code[1]);
+	}
+      ptrace (PTRACE_CONT, tid, 0, 0);
+      struct timespec t = { 0, 40000000 };
+      nanosleep (&t, 0);
+    }
+  ptrace (PTRACE_DETACH, tid, 0, 0);
+}
+
+static void
+stop_riscos (void)
+{
+  if (hard_quit || riscos_pid <= 0)
+    return;
+  hard_quit = 1;
+  fprintf (stderr, "rol-fb: Ctrl+Break: stopping RISC OS. Its threads were:\n");
+  char path[64];
+  snprintf (path, sizeof path, "/proc/%d/task", (int) riscos_pid);
+  DIR *d = opendir (path);
+  struct dirent *e;
+  while (d && (e = readdir (d)))
+    {
+      if (e->d_name[0] == '.')
+	continue;
+      char f[400], stat[512] = "", sys[256] = "";
+      snprintf (f, sizeof f, "%s/%s/stat", path, e->d_name);
+      int fd = open (f, O_RDONLY | O_CLOEXEC);
+      ssize_t n = fd >= 0 ? read (fd, stat, sizeof stat - 1) : -1;
+      if (fd >= 0)
+	close (fd);
+      stat[n > 0 ? n : 0] = 0;
+      /* "pid (comm) S ...": the name and the state */
+      char *rp = strrchr (stat, ')');
+      snprintf (f, sizeof f, "%s/%s/syscall", path, e->d_name);
+      fd = open (f, O_RDONLY | O_CLOEXEC);
+      n = fd >= 0 ? read (fd, sys, sizeof sys - 1) : -1;
+      if (fd >= 0)
+	close (fd);
+      sys[n > 0 ? n : 0] = 0;
+      sys[strcspn (sys, "\n")] = 0;
+      fprintf (stderr, "rol-fb:   thread %s %.*s state %c; syscall/sp/pc: %s\n",
+	       e->d_name, rp ? (int) (rp - strchr (stat, '(') + 1) : 0,
+	       rp ? strchr (stat, '(') : "", rp && rp[1] ? rp[2] : '?', sys);
+      if (rp && rp[1] == ' ' && rp[2] == 'R')
+	sample_thread (atoi (e->d_name));
+    }
+  if (d)
+    closedir (d);
+  kill (riscos_pid, SIGKILL);
+}
+
+static void
+button (int key, unsigned bit, int down)
+{
+  send_report (down ? R_KEYDOWN : R_KEYUP, key, 0, 0);
+  if (down)
+    buttons |= bit;
+  else
+    buttons &= ~bit;
+}
+
+static void
+read_input (int i)
+{
+  struct input_event ev[64];
+  ssize_t n;
+  while ((n = read (inputs[i].fd, ev, sizeof ev)) > 0)
+    {
+      int moved = 0;
+      int w = width > 0 ? width : fb_w, h = height > 0 ? height : fb_h;
+      for (int k = 0; k < n / (ssize_t) sizeof ev[0]; k++)
+	{
+	  struct input_event *e = &ev[k];
+	  if (e->type == EV_KEY)
+	    {
+	      int down = e->value != 0;
+	      if (e->value == 2)
+		continue;		/* autorepeat: RISC OS repeats itself */
+	      switch (e->code)
+		{
+		case KEY_LEFTCTRL: ctrl_l = down; break;
+		case KEY_RIGHTCTRL: ctrl_r = down; break;
+		case KEY_LEFTALT: alt_l = down; break;
+		case KEY_RIGHTALT: alt_r = down; break;
+		}
+	      if (down && (ctrl_l || ctrl_r)
+		  && (((e->code == KEY_PAUSE || e->code == KEY_BREAK) && !(alt_l || alt_r))
+		      || (e->code == KEY_BACKSPACE && (alt_l || alt_r))))
+		{
+		  stop_riscos ();
+		  continue;
+		}
+	      switch (e->code)
+		{
+		case BTN_LEFT:
+		  button (RO_SELECT, 1, down);
+		  continue;
+		case BTN_RIGHT:
+		  button (pcmouse ? RO_MENU : RO_ADJUST, pcmouse ? 2 : 4, down);
+		  continue;
+		case BTN_MIDDLE:
+		  button (pcmouse ? RO_ADJUST : RO_MENU, pcmouse ? 4 : 2, down);
+		  continue;
+		case BTN_TOUCH:
+		  continue;
+		}
+	      if (e->code < 256 && linux2ro[e->code] >= 0)
+		{
+		  key_down[linux2ro[e->code]] = down;
+		  send_report (down ? R_KEYDOWN : R_KEYUP, linux2ro[e->code], 0, 0);
+		}
+	    }
+	  else if (e->type == EV_REL)
+	    {
+	      if (e->code == REL_X)
+		mx = clampi (mx + e->value, 0, w - 1), moved = 1;
+	      else if (e->code == REL_Y)
+		my = clampi (my + e->value, 0, h - 1), moved = 1;
+	      else if (e->code == REL_WHEEL || e->code == REL_HWHEEL)
+		{
+		  /* the scroll wheel: no SocketKVM report for it, so as
+		     key numbers &1F0-&1F3 (up, down, left, right) that the
+		     KVMWheel module turns into PointerV WheelChange */
+		  int key = e->code == REL_WHEEL ? (e->value > 0 ? 0x1F0 : 0x1F1)
+						 : (e->value > 0 ? 0x1F3 : 0x1F2);
+		  for (int c = abs (e->value); c > 0 && c <= 8; c--)
+		    {
+		      send_report (R_KEYDOWN, key, 0, 0);
+		      send_report (R_KEYUP, key, 0, 0);
+		    }
+		}
+	    }
+	  else if (e->type == EV_ABS)
+	    {
+	      if (e->code == ABS_X && inputs[i].absmax_x > 0)
+		{
+		  int fx = (int) ((long long) e->value * fb_w / (inputs[i].absmax_x + 1));
+		  mx = clampi (sw > 0 ? (int) ((long long) (fx - ox) * w / sw) : fx, 0, w - 1);
+		  moved = 1;
+		}
+	      else if (e->code == ABS_Y && inputs[i].absmax_y > 0)
+		{
+		  int fy = (int) ((long long) e->value * fb_h / (inputs[i].absmax_y + 1));
+		  my = clampi (sh > 0 ? (int) ((long long) (fy - oy) * h / sh) : fy, 0, h - 1);
+		  moved = 1;
+		}
+	    }
+	}
+      if (moved)
+	send_report (R_MOUSE, mx, my, buttons);
+    }
+  if (n < 0 && errno == ENODEV)
+    {
+      close (inputs[i].fd);
+      inputs[i] = inputs[--ninputs];
+    }
+}
+
+static long
+now_ms (void)
+{
+  struct timespec t;
+  clock_gettime (CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1000L + t.tv_nsec / 1000000;
+}
+
+
+/* --- protected RISC OS: ROL_CONFINE=UID:GID[:GROUP] (set by init) runs
+   RISC OS as that ordinary user, in its own view of the files: /riscos
+   (its discs and settings, read/write), /opt/riscos (the ROM, read only),
+   /etc (read only), its own /proc, /tmp and /dev (only the devices it uses:
+   the video decoder, the VideoCore, USB devices given to it),
+   and the sound FIFO. It can't change Linux or see the rest of the disc. */
+static int
+c_bind (const char *src, const char *dst, int ro, int dir)
+{
+  struct stat st;
+  if (stat (src, &st))
+    return -1;
+  if (dir || S_ISDIR (st.st_mode))
+    mkdir (dst, 0755);
+  else
+    {
+      int f = open (dst, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+      if (f >= 0)
+	close (f);
+    }
+  if (mount (src, dst, NULL, MS_BIND | MS_REC, NULL))
+    return -1;
+  unsigned long fl = MS_BIND | MS_REMOUNT | MS_NOSUID;
+  if (ro)
+    fl |= MS_RDONLY;
+  if (strncmp (dst + strlen ("/run/rol-root"), "/dev", 4) != 0)
+    fl |= MS_NODEV;
+  mount (NULL, dst, NULL, fl, NULL);
+  return 0;
+}
+
+static int
+confine (void)
+{
+  const char *c = getenv ("ROL_CONFINE");
+  if (!c || !*c)
+    return 0;
+  unsigned uid = 1000, gid = 1000, grp = 0;
+  if (sscanf (c, "%u:%u:%u", &uid, &gid, &grp) < 2)
+    return -1;
+  unsetenv ("ROL_CONFINE");
+  const char *R = "/run/rol-root";
+  char p[256];
+  if (unshare (CLONE_NEWNS))
+    return -1;
+  mount (NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+  mkdir (R, 0755);
+  if (mount ("tmpfs", R, "tmpfs", MS_NOSUID | MS_NODEV, "mode=755"))
+    return -1;
+  const char *dirs[] = { "riscos", "opt", "opt/riscos", "etc", "dev", "proc", "tmp", "run", NULL };
+  for (int i = 0; dirs[i]; i++)
+    {
+      snprintf (p, sizeof p, "%s/%s", R, dirs[i]);
+      mkdir (p, 0755);
+    }
+  snprintf (p, sizeof p, "%s/riscos", R);
+  if (c_bind ("/riscos", p, 0, 1))
+    return -1;
+  snprintf (p, sizeof p, "%s/opt/riscos", R);
+  if (c_bind ("/opt/riscos", p, 1, 1))
+    return -1;
+  snprintf (p, sizeof p, "%s/etc", R);
+  c_bind ("/etc", p, 1, 1);
+  snprintf (p, sizeof p, "%s/tmp", R);
+  mount ("tmpfs", p, "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+  snprintf (p, sizeof p, "%s/run", R);
+  mount ("tmpfs", p, "tmpfs", MS_NOSUID | MS_NODEV, "mode=755");
+  snprintf (p, sizeof p, "%s/run/riscos-sound", R);
+  c_bind ("/run/riscos-sound", p, 0, 0);
+  snprintf (p, sizeof p, "%s/proc", R);
+  if (mount ("proc", p, "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2"))
+    mount ("proc", p, "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+  /* /dev: only what RISC OS uses (the video decoder, the VideoCore) */
+  snprintf (p, sizeof p, "%s/dev", R);
+  mount ("tmpfs", p, "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=755");
+  const char *devs[] = { "null", "zero", "full", "random", "urandom", "vchiq", "vcio", NULL };
+  for (int i = 0; devs[i]; i++)
+    {
+      char s2[64];
+      snprintf (s2, sizeof s2, "/dev/%s", devs[i]);
+      snprintf (p, sizeof p, "%s/dev/%s", R, devs[i]);
+      c_bind (s2, p, 0, 0);
+    }
+  DIR *d = opendir ("/dev");
+  struct dirent *e;
+  while (d && (e = readdir (d)))
+    if (!strncmp (e->d_name, "video", 5) || !strncmp (e->d_name, "media", 5))
+      {
+	char s2[300];
+	snprintf (s2, sizeof s2, "/dev/%s", e->d_name);
+	snprintf (p, sizeof p, "%s/dev/%.40s", R, e->d_name);
+	c_bind (s2, p, 0, 0);
+      }
+  if (d)
+    closedir (d);
+  /* USB devices handed to RISC OS (the phones, cameras and tablets PDFS
+     talks to): the USB helper gives RISC OS's user just those nodes, so
+     the rest stay root's; the directory is live, so later ones appear */
+  snprintf (p, sizeof p, "%s/dev/bus", R);
+  mkdir (p, 0755);
+  snprintf (p, sizeof p, "%s/dev/bus/usb", R);
+  c_bind ("/dev/bus/usb", p, 0, 1);
+  snprintf (p, sizeof p, "%s/dev/shm", R);
+  mkdir (p, 01777);
+  mount ("tmpfs", p, "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+  /* into it */
+  if (chdir (R) || syscall (SYS_pivot_root, ".", ".") || umount2 (".", MNT_DETACH) || chdir ("/riscos"))
+    return -1;
+  gid_t g[1] = { (gid_t) grp };
+  if (setgroups (grp ? 1 : 0, g) || setgid (gid) || setuid (uid))
+    return -1;
+  if (setuid (0) == 0)
+    return -1;			/* (still root: refuse) */
+  prctl (PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+  setenv ("HOME", "/riscos", 1);
+  return 0;
+}
+
+int
+main (int argc, char **argv)
+{
+  int opt;
+  while ((opt = getopt (argc, argv, "+pn")) != -1)
+    switch (opt)
+      {
+      case 'p': pcmouse = 1; break;
+      case 'n': realmonitor = 1; break;
+      default:
+	fprintf (stderr, "usage: rol-fb [-p] [-n] -- COMMAND [ARGS...]\n");
+	return 2;
+      }
+  if (optind >= argc)
+    {
+      fprintf (stderr, "usage: rol-fb [-p] [-n] -- COMMAND [ARGS...]\n");
+      return 2;
+    }
+  if (fb_open ())
+    return 1;
+  pixels = mmap (NULL, SCREEN_MAX, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (pixels == MAP_FAILED)
+    {
+      perror ("rol-fb: mmap");
+      return 1;
+    }
+  /* a plain arrow until RISC OS sends its pointer */
+  ptr_pal[1] = 0xFFFFFF; ptr_pal[2] = 0x000000;
+  for (int y = 0; y < 16; y++)
+    for (int x = 0; x <= y && x < 11; x++)
+      ptr_shape[y][x] = (x == 0 || x == y || y == 15) ? 2 : 1;
+  ptr_h = 16;
+
+  sigset_t set;
+  sigemptyset (&set);
+  sigaddset (&set, SIGCHLD);
+  sigaddset (&set, SIGTERM);
+  sigaddset (&set, SIGINT);
+  sigprocmask (SIG_BLOCK, &set, NULL);
+  int sfd = signalfd (-1, &set, SFD_CLOEXEC | SFD_NONBLOCK);
+
+  int sv[2];
+  if (socketpair (AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv))
+    {
+      perror ("rol-fb: socketpair");
+      return 1;
+    }
+  pid_t self = getpid ();
+  pid_t pid = fork ();
+  if (pid == 0)
+    {
+      prctl (PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
+      int s = fcntl (sv[1], F_DUPFD, 31);
+      char env[64];
+      snprintf (env, sizeof env, "%d", s);
+      setenv ("RISC_OS_SocketKVM_Socket", env, 1);
+      /* the screen's size, for the desktop's first mode: ROL$ScreenWidth
+         and ROL$ScreenHeight in RISC OS (the image's Monitor choices file
+         uses them until a mode is chosen and saved in Configure). Halved
+         until it fits the port's 16 MB screen in 16M colours (shown here
+         scaled up, as other modes are). */
+      {
+	int w = host_w ? host_w : fb_w, h = host_h ? host_h : fb_h;
+	while ((long) w * h * 4 > 16L * 1024 * 1024)
+	  w /= 2, h /= 2;
+	if (w >= 320 && h >= 200)
+	  {
+	    char v[16];
+	    snprintf (v, sizeof v, "%d", w);
+	    setenv ("RISC_OS_ROL_ScreenWidth", v, 1);
+	    snprintf (v, sizeof v, "%d", h);
+	    setenv ("RISC_OS_ROL_ScreenHeight", v, 1);
+	  }
+      }
+      sigprocmask (SIG_UNBLOCK, &set, NULL);
+      if (confine ())
+	{
+	  perror ("rol-fb: protected RISC OS: can't set it up");
+	  _exit (125);
+	}
+      if (getppid () == self)
+	execvp (argv[optind], argv + optind);
+      perror ("rol-fb: exec");
+      _exit (126);
+    }
+  close (sv[1]);
+  sock = sv[0];
+  riscos_pid = pid;
+  /* never wait for RISC OS to read its input: if it hangs, rol-fb must
+     still see Ctrl+Break (events are dropped while it isn't reading) */
+  fcntl (sock, F_SETFL, fcntl (sock, F_GETFL) | O_NONBLOCK);
+  console_graphics (1);
+  ov_start ();
+  /* (no resize report now: the desktop starts in the mode saved in
+     Configure, or the screen's size (ROL$ScreenWidth/Height, above); only
+     later changes of the host's window size ask RISC OS for a new mode) */
+  scan_inputs ();
+  mx = fb_w / 2;
+  my = fb_h / 2;
+
+  int status = 0;
+  long next_frame = now_ms (), next_scan = now_ms () + 2000;
+  for (;;)
+    {
+      struct pollfd p[4 + MAX_INPUTS];
+      p[0] = (struct pollfd) { sfd, POLLIN, 0 };
+      p[1] = (struct pollfd) { sock, POLLIN, 0 };
+      for (int i = 0; i < ninputs; i++)
+	p[2 + i] = (struct pollfd) { inputs[i].fd, POLLIN, 0 };
+      int np = 2 + ninputs;
+      p[np] = (struct pollfd) { ov_listen, POLLIN, 0 };
+      p[np + 1] = (struct pollfd) { ov_client, POLLIN, 0 };
+      long t = now_ms ();
+      int wait = next_frame > t ? (int) (next_frame - t) : 0;
+      if (poll (p, np + 2, wait) < 0 && errno != EINTR)
+	break;
+      if (ov_listen >= 0 && (p[np].revents & POLLIN))
+	ov_accept ();
+      if (ov_client >= 0 && (p[np + 1].revents & (POLLIN | POLLHUP | POLLERR)))
+	ov_message ();
+      if (p[1].revents & POLLIN)
+	read_messages ();
+      if (mode_changed && width > 0 && height > 0)
+	drm_match_mode (width, height);
+      for (int i = ninputs - 1; i >= 0; i--)
+	if (p[2 + i].revents & (POLLIN | POLLERR | POLLHUP))
+	  read_input (i);
+      t = now_ms ();
+      if (t >= next_frame)
+	{
+	  redraw (0);
+	  next_frame = t + 40;		/* 25 frames a second */
+	}
+      if (t >= next_scan)
+	{
+	  scan_inputs ();
+	  if (drm_check_resize ())
+	    send_report (R_RESIZE, host_w, host_h, 0);
+	  next_scan = t + 1000;
+	}
+      if (p[0].revents & POLLIN)
+	{
+	  struct signalfd_siginfo si;
+	  int done = 0;
+	  while (read (sfd, &si, sizeof si) == sizeof si)
+	    {
+	      if (si.ssi_signo == SIGCHLD)
+		{
+		  int ws;
+		  if (waitpid (pid, &ws, WNOHANG) == pid)
+		    {
+		      status = WIFEXITED (ws) ? WEXITSTATUS (ws) : 128 + WTERMSIG (ws);
+		      done = 1;
+		    }
+		}
+	      else
+		{
+		  kill (pid, SIGTERM);
+		}
+	    }
+	  if (done)
+	    break;
+	}
+    }
+  console_graphics (0);
+  return status;
+}

@@ -1,0 +1,83 @@
+# Build the test bed and run tests/run.sh, in the riscos-crossdev container
+# image named in .riscos-crossdev. QEMU (a few minutes to build), the ROM
+# image, HardDisc4, BASICVFP and the patched UnixLib are cached between runs.
+#
+# UnixLib's source is cloned from github.com/adyoull/riscos-unixlib. If that
+# repository is private, add a secret UNIXLIB_TOKEN (a token that can read
+# it) to this repository.
+name: Test bed
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.pin.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: pin
+        run: echo "version=$(tr -d ' \n' < .riscos-crossdev)" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: pin
+    runs-on: ubuntu-24.04
+    container: ghcr.io/adyoull/riscos-crossdev:${{ needs.pin.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Packages for building QEMU
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ninja-build python3-venv libglib2.0-dev
+          pip3 install --break-system-packages meson==1.2.3
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            out/bin/qemu-arm-riscos
+            out/rom/RISCOS.IMG
+          key: qemu-rom-${{ hashFiles('qemu/build.sh', 'qemu/*.patch', 'rom/ROM') }}-crossdev-${{ needs.pin.outputs.version }}
+
+      - uses: actions/cache@v4
+        with:
+          path: out/harddisc/HardDisc4
+          key: harddisc-${{ hashFiles('harddisc/*', 'rom/ROM') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            out/modules/BASICVFP,ffa
+            out/pirom/VFPSupport-ROOL,ffa
+          key: basicvfp-${{ hashFiles('basicvfp/*') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: out/unixlib/libunixlib.a
+          key: unixlib-${{ hashFiles('unixlib/*') }}-crossdev-${{ needs.pin.outputs.version }}
+
+      - name: Build
+        env:
+          TOKEN: ${{ secrets.UNIXLIB_TOKEN }}
+        run: |
+          # The caches restore files older than the checkout: don't rebuild them.
+          for f in out/bin/qemu-arm-riscos out/rom/RISCOS.IMG out/unixlib/libunixlib.a out/modules/BASICVFP,ffa out/pirom/VFPSupport-ROOL,ffa; do
+            [ ! -e "$f" ] || touch "$f"
+          done
+          [ ! -d out/harddisc/HardDisc4 ] || touch out/harddisc/HardDisc4
+          # riscos-unixlib, if it's private: the token only while UnixLib builds.
+          url=https://github.com/adyoull/riscos-unixlib
+          if [ -n "$TOKEN" ]; then
+            git config --global "url.https://x-access-token:${TOKEN}@github.com/adyoull/riscos-unixlib.insteadOf" "$url"
+            trap 'git config --global --remove-section "url.https://x-access-token:${TOKEN}@github.com/adyoull/riscos-unixlib" 2>/dev/null || true' EXIT
+          fi
+          make unixlib
+          git config --global --remove-section "url.https://x-access-token:${TOKEN}@github.com/adyoull/riscos-unixlib" 2>/dev/null || true
+          make
+          make harddisc basicvfp
+
+      - name: Tests in RISC OS for Linux
+        run: make check

@@ -1,0 +1,5 @@
+Dynamic area 261 at &52402000, 258 of 131072 pages in use
+Running program 1, nested 1, callers told apart by stack
+  stack &52403000 257 pages, program 1 <unnamed>
+  stack &52402000 1 pages, program 1 <unnamed>
+

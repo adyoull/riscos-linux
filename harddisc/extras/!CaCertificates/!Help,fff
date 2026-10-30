@@ -1,0 +1,10 @@
+CaCertificates                                  RISC OS on Linux
+==============
+Mozilla's bundle of root certificates (as curl.se and Python's certifi
+publish it), so that programs which check secure (https) connections
+with curl or OpenSSL - PackMan among them - can. It sets
+CaCertificates$Dir when the machine starts; the bundle is
+<CaCertificates$Dir>.ca-certificates/crt.
+
+The certificate data is Mozilla's, under the Mozilla Public Licence 2.0
+(https://mozilla.org/MPL/2.0/).

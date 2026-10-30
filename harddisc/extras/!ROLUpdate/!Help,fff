@@ -1,0 +1,33 @@
+Updates                                         RISC OS on Linux
+=======
+Configure's Updates keeps RISC OS on Linux up to date.
+
+RISC OS on Linux      The parts of RISC OS on Linux itself, from the
+                      riscos-rolpkg repository on GitHub:
+  RISC OS             RISC OS (its ROM)
+  Linux side          what runs RISC OS on Linux (screen, sound,
+                      network, USB, Linux commands)
+  Linux kernel        the kernel (on the card's FAT partition)
+  Desktop parts       this plug-in, Linux network, the hard disc icon,
+                      *Linux and USBDriver
+Linux (Debian)        Debian's own updates, security fixes included.
+
+  Check for updates   asks both repositories what's new.
+  Install updates     installs everything new, keeping your settings
+                      files. Restart (shut down and switch on) afterwards
+                      to use a new RISC OS, Linux side or kernel.
+  Roll back RISC OS   goes back to the RISC OS build before the one you
+                      have (from the repository: it needs the network).
+  Details             shows everything apt-get said.
+
+These run as root, so they ask for Linux's root password (see *Help
+LinuxPassword). Updating needs the network (Configure, Linux network).
+
+If a new RISC OS won't start: put the card in any computer and create an
+empty file called ROLLBACK on its small FAT partition (the one with the
+kernel). The next start puts the RISC OS you had before back in place.
+A new kernel keeps the old one on the FAT partition as *.old (for
+example EFI/BOOT/BOOTAA64.EFI.old): rename it back if the new one won't
+start.
+
+Copyright (c) 2026 Andrew Youll. MIT licence.

@@ -1,0 +1,32 @@
+RISC OS on Linux: where the source is
+=====================================
+This image contains free and open-source software. Its source code is
+available as follows (and on request from the publisher, for three years
+from the date of this image, for the parts under the GPL or LGPL):
+
+  https://github.com/adyoull/riscos-linux
+      Everything specific to RISC OS on Linux: the Linux side (init,
+      rol-fb, rol-snd, rol-netd, rol-cmd, rol-usbd), the RISC OS modules,
+      the patch to QEMU (qemu-arm-riscos), the kernel patches and
+      configurations, the Wi-Fi build (wpa_supplicant, libnl), the
+      desktop parts, ROBench, and how the images are built.
+      Branch riscos-5.31-source: RISC OS 5.31 (RISC OS Open's sources
+      merged into Timothy Baldwin's Linux port).
+  https://github.com/adyoull/riscos-rolpkg
+      The packages Configure's Updates installs.
+  https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source
+      Timothy Baldwin's Linux port of RISC OS.
+  https://gitlab.riscosopen.org
+      RISC OS Open's sources (RISC OS, HardDisc4).
+  https://git.kernel.org (mainline Linux v7.2) and
+  https://github.com/raspberrypi/linux, .../firmware
+      The kernels (with the patches above) and the Pi's firmware.
+  https://www.qemu.org (QEMU 8.2.2), https://w1.fi (wpa_supplicant 2.11),
+  https://github.com/thom311/libnl (libnl 3.11)
+  https://sources.debian.org
+      Debian 13's packages (apt-get source NAME works on the image).
+  https://launchpad.net/ubuntu/+source/u-boot
+      U-Boot 2025.10-0ubuntu2.2 (the Pinebooks' u-boot folder).
+
+The licence texts are in the LICENCES folder on the image's FAT (EFI)
+partition and in HardDisc4.Documents.Licences.

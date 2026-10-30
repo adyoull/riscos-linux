@@ -1,0 +1,4 @@
+| Quick: the same tests, shorter (0.5 s runs, 3 of each): about 4 minutes
+Set ROBench$Quick 1
+Run <Obey$Dir>.!Run -q
+Unset ROBench$Quick

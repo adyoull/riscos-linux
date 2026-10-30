@@ -1,0 +1,244 @@
+REM >!RunImage
+REM DiscIcon: puts HardDisc4 on the icon bar as a hard disc (like ADFS's
+REM or SCSI's drive icons) instead of Pinboard's folder: Select or Adjust
+REM opens it, Menu offers Open '$', Free and Dismount (removes the icon).
+REM Files dropped on it are copied into it, by Filer_Action, as the disc
+REM filers do; a program saving to it saves into it.
+REM Free is RISC OS's own Free window (*ShowFree): this registers a free
+REM space routine for IXFS with the Free module (Free_Register), in the
+REM RMA, which asks Linux (statfs64 of /riscos, through IXSupport).
+REM On RISC OS for Linux, HardDisc4 is IXFS:$.riscos.HardDisc4.
+REM Copyright (c) 2026 Andrew Youll. MIT licence.
+fs%=0 : ws%=0
+ON ERROR PROCderegister : ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
+DIM blk% 1024, ind% 256, menu% 28+24*3
+name$="HardDisc4" : path$="<IXFS$HardDisc4>"
+REM messages wanted (Quit always comes): DataSave, DataLoad
+DIM msgs% 12 : msgs%!0=1 : msgs%!4=3 : msgs%!8=0
+SYS "Wimp_Initialise",310,&4B534154,"HardDisc4",msgs% TO ,task%
+REM the sprite: "harddisc" from the Wimp's pool (as the disc filers use)
+spr$="harddisc"
+SYS "XWimp_SpriteOp",40,,spr$ TO ;f%
+IF f% AND 1 THEN spr$="directory"
+$ind%=name$ : $(ind%+32)="S"+spr$
+SYS "Wimp_TextOp",1,name$,0 TO w%
+IF w%<68 THEN w%=68
+blk%!0=-5 : blk%!4=0 : blk%!8=-16 : blk%!12=w%+16 : blk%!16=84
+blk%!20=&1700310B : blk%!24=ind% : blk%!28=ind%+32 : blk%!32=LEN(name$)+1
+SYS "Wimp_CreateIcon",&60000000,blk% TO icon%
+PROCmenu
+PROCregister
+ON ERROR PROCerror
+quit%=FALSE : pdir$="" : pleaf$=""
+REPEAT
+  IF pdir$<>"" THEN mask%=&3830 ELSE mask%=&3831
+  SYS "Wimp_Poll",mask%,blk% TO reason%
+  CASE reason% OF
+    WHEN 6 : PROCclick
+    WHEN 9 : PROCchoose
+    WHEN 0 : PROCflush
+    WHEN 17,18 : PROCmessage
+  ENDCASE
+UNTIL quit%
+PROCderegister
+SYS "Wimp_CloseDown",task%,&4B534154
+END
+
+DEF PROCerror
+LOCAL e%
+e%=blk%+512 : !e%=ERR : $(e%+4)=REPORT$+CHR$0
+SYS "Wimp_ReportError",e%,1,name$
+ENDPROC
+
+REM --- files dropped on the icon -----------------------------------------
+
+DEF PROCmessage
+CASE blk%!16 OF
+  WHEN 0 : quit%=TRUE
+  WHEN 1 : PROCdatasave
+  WHEN 3 : PROCdataload
+ENDCASE
+ENDPROC
+
+DEF FNours =(blk%!20=-2 AND blk%!24=icon%)
+
+REM a program saving to the icon: tell it where (HardDisc4's root)
+DEF PROCdatasave
+LOCAL leaf$,i%
+IF NOT FNours THEN ENDPROC
+leaf$=FNstring(blk%+44)
+i%=0 : WHILE INSTR(leaf$,".",i%+1) : i%=INSTR(leaf$,".",i%+1) : ENDWHILE
+leaf$=MID$(leaf$,i%+1)
+$(blk%+44)=path$+"."+leaf$+CHR$0
+SYS "XOS_GSTrans",blk%+44,blk%+300,200 TO ,,i%
+$(blk%+44)=LEFT$(FNstring(blk%+300),i%)+CHR$0
+blk%!0=(44+LEN(FNstring(blk%+44))+4) AND NOT 3
+blk%!12=blk%!8 : blk%!16=2 : blk%!36=0
+SYS "Wimp_SendMessage",17,blk%,blk%!4
+ENDPROC
+
+REM a file dropped on the icon: copy it in (several from one directory
+REM go in one Filer_Action, started when the drops stop)
+DEF PROCdataload
+LOCAL f$,d$,l$,i%
+IF NOT FNours THEN ENDPROC
+f$=FNstring(blk%+44)
+REM (acknowledge it: we've taken it)
+blk%!12=blk%!8 : blk%!16=4
+SYS "Wimp_SendMessage",17,blk%,blk%!4
+i%=0 : WHILE INSTR(f$,".",i%+1) : i%=INSTR(f$,".",i%+1) : ENDWHILE
+IF i%=0 THEN ENDPROC
+d$=LEFT$(f$,i%-1) : l$=MID$(f$,i%+1)
+IF d$<>pdir$ OR LEN(pleaf$)+LEN(l$)>200 THEN PROCflush
+pdir$=d$
+IF pleaf$="" THEN pleaf$=l$ ELSE pleaf$+=" "+l$
+ENDPROC
+
+DEF PROCflush
+LOCAL t%,dst$
+IF pdir$="" THEN ENDPROC
+SYS "XOS_GSTrans",path$+CHR$0,blk%+300,200 TO ,,t%
+dst$=LEFT$(FNstring(blk%+300),t%)
+IF pdir$<>dst$ THEN
+  SYS "Wimp_StartTask","Filer_Action" TO t%
+  IF t% THEN
+    PROCsend(t%,&403,pdir$)
+    PROCsend(t%,&404,pleaf$)
+    REM Message_FilerAction: copy (0), verbose (1), to dst$
+    blk%!20=0 : blk%!24=1 : $(blk%+28)=dst$+CHR$0
+    blk%!0=(28+LEN(dst$)+4) AND NOT 3 : blk%!12=0 : blk%!16=&405
+    SYS "Wimp_SendMessage",17,blk%,t%
+  ENDIF
+ENDIF
+pdir$="" : pleaf$=""
+ENDPROC
+
+DEF PROCsend(t%,m%,d$)
+$(blk%+20)=d$+CHR$0
+blk%!0=(20+LEN(d$)+4) AND NOT 3 : blk%!12=0 : blk%!16=m%
+SYS "Wimp_SendMessage",17,blk%,t%
+ENDPROC
+
+DEF FNstring(p%)
+LOCAL s$
+WHILE ?p%>=32 AND LEN(s$)<250 : s$+=CHR$?p% : p%+=1 : ENDWHILE
+=s$
+
+DEF PROCmenu
+LOCAL i%
+$menu%=name$
+menu%?12=7 : menu%?13=2 : menu%?14=7 : menu%?15=0
+menu%!16=200 : menu%!20=44 : menu%!24=0
+i%=menu%+28 : PROCitem(i%,0,"Open '$'")
+i%+=24 : PROCitem(i%,0,"Free")
+i%+=24 : PROCitem(i%,&80,"Dismount")
+ENDPROC
+
+DEF PROCitem(i%,f%,t$)
+i%!0=f% : i%!4=-1 : i%!8=&07000021 : $(i%+12)=t$
+ENDPROC
+
+DEF PROCclick
+IF blk%!12<>-2 OR blk%!16<>icon% THEN ENDPROC
+CASE blk%!8 OF
+  WHEN 4,1 : OSCLI "Filer_OpenDir "+path$
+  WHEN 2 : SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
+ENDCASE
+ENDPROC
+
+DEF PROCchoose
+LOCAL c%
+c%=blk%!0
+SYS "Wimp_GetPointerInfo",,blk%
+CASE c% OF
+  WHEN 0 : OSCLI "Filer_OpenDir "+path$
+  WHEN 1 : PROCfree
+  WHEN 2 : quit%=TRUE : ENDPROC
+ENDCASE
+IF blk%!8=1 THEN SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
+ENDPROC
+
+REM --- the Free window --------------------------------------------------
+
+DEF PROCfree
+OSCLI "ShowFree -fs IXFS "+name$
+ENDPROC
+
+REM Free's routine for IXFS (PRM 5a, Free: the routine's entry). It runs
+REM in User mode, with R12 = ws% and only the return address on the stack.
+REM ws%: +0 saved registers, +64 statfs64's buffer, +160 the Linux path,
+REM +176 the device's name, +192 an error block, +256 the code.
+DEF PROCregister
+LOCAL p%,pass%,code%
+REM (OS_FSControl 13 gives the filing system's number in R1)
+SYS "XOS_FSControl",13,"IXFS",0 TO ,fs%;f%
+fs%=fs% AND &FF
+IF (f% AND 1) OR fs%=0 THEN fs%=0 : ENDPROC
+SYS "OS_Module",6,,,1024 TO ,,ws%
+$(ws%+160)="/riscos"+CHR$0
+$(ws%+176)=name$+CHR$0
+ws%!192=0 : $(ws%+196)="Linux didn't say how much space is free"+CHR$0
+code%=ws%+256
+FOR pass%=0 TO 2 STEP 2
+  P%=code%
+  [OPT pass%
+  CMP R0,#1 : BEQ fr_name
+  CMP R0,#3 : BEQ fr_compare
+  CMP R0,#4 : CMPNE R0,#2
+  LDMNEIA R13!,{PC}
+  STMIA R12,{R0-R11,R14}
+  MOV R9,R2 : MOV R10,R0
+  ADD R0,R12,#160 : MOV R1,#84 : ADD R2,R12,#64
+  MOV R3,#0 : MOV R4,#0 : MOV R5,#0 : MOV R6,#0 : MOV R7,#256 : ADD R7,R7,#10
+  SWI &79EC0
+  BVS fr_fail
+  CMP R0,#0 : BNE fr_fail
+  ADD R8,R12,#64
+  LDR R11,[R8,#4]
+  LDR R4,[R8,#8] : LDR R5,[R8,#12]
+  UMULL R0,R1,R4,R11 : MLA R1,R5,R11,R1
+  LDR R4,[R8,#24] : LDR R5,[R8,#28]
+  UMULL R2,R3,R4,R11 : MLA R3,R5,R11,R3
+  SUBS R4,R0,R2 : SBC R5,R1,R3
+  CMP R10,#4 : BNE fr_legacy
+  STMIA R9,{R0-R5}
+  LDMIA R12,{R0-R11,R14}
+  MOV R0,#0
+  LDMIA R13!,{PC}
+  .fr_legacy
+  CMP R1,#0 : MVNNE R0,#0
+  CMP R3,#0 : MVNNE R2,#0
+  CMP R5,#0 : MVNNE R4,#0
+  STR R0,[R9] : STR R2,[R9,#4] : STR R4,[R9,#8]
+  LDMIA R12,{R0-R11,R14}
+  LDMIA R13!,{PC}
+  .fr_fail
+  LDMIA R12,{R0-R11,R14}
+  ADD R0,R12,#192
+  MSR CPSR_f,#&10000000
+  LDMIA R13!,{PC}
+  .fr_name
+  STMIA R12,{R1-R4}
+  ADD R4,R12,#176
+  .fr_copy
+  LDRB R0,[R4],#1 : STRB R0,[R2],#1
+  CMP R0,#0 : BNE fr_copy
+  LDMIA R12,{R1-R4}
+  MOV R0,#LEN(name$)+1
+  LDMIA R13!,{PC}
+  .fr_compare
+  CMP R0,R0
+  LDMIA R13!,{PC}
+  ]
+NEXT
+SYS "OS_SynchroniseCodeAreas",1,code%,P%
+SYS &644C0,fs%,code%,ws% TO ;f%
+IF f% AND 1 THEN SYS "OS_Module",7,,ws% : ws%=0
+ENDPROC
+
+DEF PROCderegister
+IF ws%=0 THEN ENDPROC
+SYS &644C1,fs%,ws%+256,ws%
+SYS "XOS_Module",7,,ws%
+ws%=0
+ENDPROC

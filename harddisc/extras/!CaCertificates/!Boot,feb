@@ -1,0 +1,3 @@
+| CaCertificates: Mozilla's root certificates, for programs using curl or
+| OpenSSL (PackMan, ported programs): /<CaCertificates$Dir>/ca-certificates.crt
+Set CaCertificates$Dir <Obey$Dir>

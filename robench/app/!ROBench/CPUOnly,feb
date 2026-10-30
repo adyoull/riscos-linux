@@ -1,0 +1,5 @@
+| CPUOnly: the processor and memory tests only, in a task window or here
+Set ROBench$Dir <Obey$Dir>
+WimpSlot -min 4096K -max 4096K
+CDir <ROBench$Dir>.Results
+<ROBench$Dir>.robench -only int,fp,neon,mem -o <ROBench$Dir>.Results.C%%T

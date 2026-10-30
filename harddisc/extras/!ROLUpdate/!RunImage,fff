@@ -1,0 +1,678 @@
+REM >!RunImage
+REM ROLUpdate: Configure's Updates plug-in for RISC OS on Linux. It keeps
+REM RISC OS on Linux (the riscos-* packages from the riscos-rolpkg
+REM repository: RISC OS, its Linux side, kernel and desktop parts) and
+REM Debian up to date, through apt-get run by the image's rol-cmd (the
+REM Linux side), with files in IXFS:$.riscos.cmd: NAME/req the command,
+REM NAME/out its output, NAME/rc its exit status, NAME/kill stops it.
+REM Commands run as root, so rol-cmd wants Linux's root password
+REM ("@password" line first; rc 77 when it's wrong, 78 when none is set
+REM yet, 79 after too many) and gives a token (NAME/tok) for five idle
+REM minutes ("@token" line). "@info" alone (rol-info: versions installed
+REM and available) needs no password.
+REM Copyright (c) 2026 Andrew Youll. MIT licence.
+ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
+DIM blk% 4096, ind% 8192, buf% 4100
+MAXL%=800 : DIM line$(MAXL%)
+NP%=4 : DIM pk$(NP%), pkname$(NP%), inst$(NP%), avail$(NP%), ic%(40)
+pk$(1)="riscos-rom" : pkname$(1)="RISC OS"
+pk$(2)="riscos-support" : pkname$(2)="Linux side"
+REM the kernel this machine starts (rol-info's "@machine": pi, wdk2023
+REM or generic); any other is held
+pk$(3)="riscos-kernel-generic" : pkname$(3)="Linux kernel"
+pk$(4)="riscos-harddisc" : pkname$(4)="Desktop parts"
+DIM romv$(50) : nromv%=0
+nl%=0 : cur$="" : indp%=0 : task%=0 : quit%=FALSE
+job$="" : pos%=0 : mode%=0 : sect$="" : ndeb%=0 : neterr%=FALSE
+rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
+tok$="" : pendcmd$="" : pendm%=0 : sentpw%=FALSE : pwmode%=0 : chain%=0
+dir$="IXFS:$.riscos.cmd."
+LH%=40 : LW%=1600
+SYS "Wimp_Initialise",380,&4B534154,"Updates",0 TO ,task%
+PROCwindows
+PROCopen_main
+PROCset(ic%(1),"Reading what's installed...")
+PROCbuttons
+ON ERROR PROCerror
+PROCinfo
+REPEAT
+  IF job$<>"" THEN mask%=&3830 ELSE mask%=&3831
+  SYS "OS_ReadMonotonicTime" TO t%
+  SYS "Wimp_PollIdle",mask%,blk%,t%+25 TO reason%
+  CASE reason% OF
+    WHEN 0 : PROCpoll_job
+    WHEN 1 : PROCredraw(blk%!0)
+    WHEN 2 : SYS "Wimp_OpenWindow",,blk%
+    WHEN 3 : IF blk%!0=win% THEN quit%=TRUE ELSE IF blk%!0=pww% THEN PROCpwcancel ELSE SYS "Wimp_CloseWindow",,blk%
+    WHEN 6 : PROCclick(blk%!12,blk%!16,blk%!8)
+    WHEN 8 : PROCkey(blk%!0,blk%!4,blk%!24)
+    WHEN 17,18 : IF blk%!16=0 THEN quit%=TRUE
+  ENDCASE
+UNTIL quit%
+IF job$<>"" AND mode%=4 THEN PROCstop
+SYS "Wimp_CloseDown",task%,&4B534154
+END
+
+DEF PROCerror
+LOCAL e%,r%
+e%=blk%+3000
+!e%=0 : $(e%+4)=REPORT$+" (line "+STR$ERL+")"+CHR$0
+SYS "Wimp_ReportError",e%,%10011,"Updates" TO ,r%
+IF r%=2 THEN SYS "Wimp_CloseDown",task%,&4B534154 : END
+ENDPROC
+
+REM --- the windows -----------------------------------------------------
+
+DEF FNstr(s$,len%)
+LOCAL p%
+p%=ind%+indp%
+IF len%<LEN(s$)+1 THEN len%=LEN(s$)+1
+$p%=s$
+indp%+=(len%+3) AND NOT 3
+=p%
+
+DEF FNicon(w%,x0%,y0%,x1%,y1%,fl%,t$,v$,len%)
+LOCAL i%
+blk%!0=w% : blk%!4=x0% : blk%!8=y0% : blk%!12=x1% : blk%!16=y1%
+blk%!20=fl%
+IF len%<LEN(t$)+1 THEN len%=LEN(t$)+1
+blk%!24=FNstr(t$,len%)
+IF v$="" THEN blk%!28=-1 ELSE blk%!28=FNstr(v$,0)
+blk%!32=len%
+SYS "Wimp_CreateIcon",,blk% TO i%
+=i%
+
+DEF FNbutton(w%,x0%,x1%,y%,t$)
+=FNicon(w%,x0%,y%-60,x1%,y%-8,&1700313D,t$,"R5,3",0)
+
+DEF FNdisplay(w%,x0%,x1%,y%)
+=FNicon(w%,x0%,y%-52,x1%,y%,&1700013D,"","R2",200)
+
+DEF FNlabel(w%,x0%,x1%,y%,t$)
+=FNicon(w%,x0%,y%-52,x1%,y%,&17000311,t$,"",120)
+
+DEF FNwritable(w%,x0%,x1%,y%)
+=FNicon(w%,x0%,y%-52,x1%,y%,&0700F13D,"","D*",128)
+
+REM a group box headed T$ (made first, so it's under the icons in it)
+DEF FNgroup(w%,x0%,x1%,top%,bot%,t$)
+LOCAL i%,j%
+i%=FNicon(w%,x0%,bot%,x1%,top%,&1700011D,"","R4",0)
+j%=FNicon(w%,x0%+32,top%-24,x0%+32+LEN(t$)*16+24,top%+24,&17000139,t$,"",0)
+=i%
+
+DEF FNwin(x0%,y0%,w%,h%,ey%,flags%,t$)
+LOCAL b%
+b%=blk%+1024
+b%!0=x0% : b%!4=y0% : b%!8=x0%+w% : b%!12=y0%+h%
+b%!16=0 : b%!20=0 : b%!24=-1
+b%!28=flags%
+b%?32=7 : b%?33=2 : b%?34=7 : b%?35=1 : b%?36=3 : b%?37=1 : b%?38=12 : b%?39=0
+IF flags%=&FF000002 THEN b%?35=0
+b%!40=0 : b%!44=-ey% : b%!48=w% : b%!52=0
+b%!56=&13D : b%!60=0 : b%!64=1 : b%!68=0
+b%!72=FNstr(t$,0) : b%!76=-1 : b%!80=LEN(t$)+1
+b%!84=0
+SYS "Wimp_CreateWindow",,b% TO h1%
+=h1%
+
+DEF PROCwindows
+LOCAL y%,g%,i%,L%,F%,R%,top%,b%
+W%=1120 : L%=40 : F%=380 : R%=W%-40 : H%=1000
+win%=FNwin(300,400,W%,H%,H%,&87000012,"Updates")
+REM RISC OS on Linux
+y%=-40 : top%=y%
+g%=FNgroup(win%,16,W%-16,top%,top%-100,"RISC OS on Linux")
+y%-=40
+ic%(30)=FNicon(win%,F%,y%-44,F%+340,y%,&17000111,"Installed","",0)
+ic%(31)=FNicon(win%,F%+350,y%-44,R%,y%,&17000111,"New","",0)
+y%-=48
+FOR i%=1 TO NP%
+  ic%(10+i%)=FNlabel(win%,L%,F%-16,y%,pkname$(i%))
+  ic%(15+i%)=FNdisplay(win%,F%,F%+340,y%)
+  ic%(20+i%)=FNdisplay(win%,F%+350,R%,y%)
+  y%-=60
+NEXT
+y%-=16
+SYS "Wimp_ResizeIcon",win%,g%,16,y%,W%-16,top%
+REM Debian
+y%-=48 : top%=y%
+g%=FNgroup(win%,16,W%-16,top%,top%-100,"Linux (Debian 13)")
+y%-=40
+ic%(9)=FNlabel(win%,L%,F%-16,y%,"Packages")
+ic%(10)=FNdisplay(win%,F%,R%,y%)
+y%-=60+16
+SYS "Wimp_ResizeIcon",win%,g%,16,y%,W%-16,top%
+REM the status, the last line, the buttons
+y%-=32
+ic%(1)=FNdisplay(win%,16,W%-16,y%)
+y%-=60
+ic%(2)=FNdisplay(win%,16,W%-16,y%)
+y%-=68
+ic%(3)=FNbutton(win%,16,294,y%,"Check for updates")
+ic%(4)=FNbutton(win%,306,570,y%,"Install updates")
+ic%(5)=FNbutton(win%,582,856,y%,"Roll back RISC OS")
+ic%(6)=FNbutton(win%,868,978,y%,"Stop")
+ic%(7)=FNbutton(win%,990,W%-16,y%,"Details")
+H%=-(y%-76)
+b%=blk%+2000
+b%!0=0 : b%!4=-H% : b%!8=W% : b%!12=0
+SYS "Wimp_SetExtent",win%,b%
+logw%=FNwin(200,120,LW%,560,600,&FF000002,"Updates: details")
+REM the password dialogue: ic%(37) says what's wanted, ic%(38)/ic%(40)
+REM the password (twice when choosing one; ic%(39) labels the second)
+pww%=FNwin(340,500,1000,300,300,&87000012,"Root password")
+ic%(37)=FNicon(pww%,16,-72,984,-20,&17000111,"","",120)
+ic%(38)=FNwritable(pww%,300,984,-84)
+ic%(36)=FNicon(pww%,16,-136,290,-84,&17000111,"Password","",40)
+ic%(39)=FNicon(pww%,16,-200,290,-148,&17000111,"","",40)
+ic%(40)=FNwritable(pww%,300,984,-148)
+pwok%=FNbutton(pww%,760,984,-220,"OK")
+pwcan%=FNbutton(pww%,560,744,-220,"Cancel")
+ENDPROC
+
+REM Configure starts plug-ins with "-openat x y"
+DEF PROCopen_main
+LOCAL b%,sw%,sh%,ex%,ey%,x%,y%,a$,i%
+SYS "OS_ReadModeVariable",-1,11 TO ,,sw%
+SYS "OS_ReadModeVariable",-1,12 TO ,,sh%
+SYS "OS_ReadModeVariable",-1,4 TO ,,ex%
+SYS "OS_ReadModeVariable",-1,5 TO ,,ey%
+sw%=(sw%+1)<<ex% : sh%=(sh%+1)<<ey%
+x%=(sw%-W%)DIV2 : y%=(sh%+H%)DIV2
+IF y%>sh%-48 THEN y%=sh%-48
+SYS "OS_GetEnv" TO a$
+i%=INSTR(a$,"-openat ")
+IF i% THEN a$=MID$(a$,i%+8) : x%=VAL(a$) : a$=MID$(a$,INSTR(a$," ")+1) : y%=VAL(a$)
+b%=blk%
+b%!0=win% : b%!4=x% : b%!8=y%-H% : b%!12=x%+W% : b%!16=y%
+b%!20=0 : b%!24=0 : b%!28=-1
+SYS "Wimp_OpenWindow",,b%
+ENDPROC
+
+DEF PROCopen(w%)
+blk%!0=w%
+SYS "Wimp_GetWindowState",,blk%
+blk%!28=-1
+SYS "Wimp_OpenWindow",,blk%
+ENDPROC
+
+DEF PROCset(i%,t$) : PROCseti(win%,i%,t$) : ENDPROC
+
+DEF FNget(w%,i%)
+LOCAL p%,s$
+blk%!0=w% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+p%=blk%!28
+WHILE ?p%>=32 : s$+=CHR$?p% : p%+=1 : ENDWHILE
+=s$
+
+DEF PROCseti(w%,i%,t$)
+LOCAL p%
+blk%!0=w% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+p%=blk%!28
+IF LEN(t$)>=blk%!36 THEN t$=LEFT$(t$,blk%!36-1)
+IF $p%=t$ THEN ENDPROC
+$p%=t$
+blk%!0=w% : blk%!4=i% : blk%!8=0 : blk%!12=0
+SYS "Wimp_SetIconState",,blk%
+ENDPROC
+
+DEF PROCfade(i%,off%)
+blk%!0=win% : blk%!4=i%
+IF off% THEN blk%!8=&400000 ELSE blk%!8=0
+blk%!12=&400000
+SYS "Wimp_SetIconState",,blk%
+ENDPROC
+
+DEF PROCbuttons
+LOCAL busy%,new%,i%
+busy%=(job$<>"" OR pwmode%<>0)
+new%=(ndeb%>0)
+FOR i%=1 TO NP% : IF avail$(i%)<>"" THEN new%=TRUE
+NEXT
+PROCfade(ic%(3),busy%)
+PROCfade(ic%(4),busy%)
+PROCfade(ic%(5),busy% OR FNprevrom="")
+PROCfade(ic%(6),job$="")
+ENDPROC
+
+REM the table, from what rol-info said
+DEF PROCshow
+LOCAL i%,t$
+FOR i%=1 TO NP%
+  IF inst$(i%)="" THEN t$="-" ELSE t$=inst$(i%)
+  PROCset(ic%(15+i%),t$)
+  IF avail$(i%)<>"" THEN
+    t$=avail$(i%)
+  ELSE
+    IF inst$(i%)<>"" AND debknown% THEN t$="Up to date" ELSE t$=""
+  ENDIF
+  PROCset(ic%(20+i%),t$)
+NEXT
+IF debknown% THEN
+  IF ndeb%=0 THEN t$="Up to date" ELSE t$=STR$ndeb%+" package"+FNs(ndeb%)+" can be updated"
+ELSE
+  t$="Not checked yet"
+ENDIF
+PROCset(ic%(10),t$)
+ENDPROC
+
+DEF FNs(n%) IF n%=1 THEN ="" ELSE ="s"
+
+REM the RISC OS (riscos-rom) the repository has that's just older than
+REM the installed one: what Roll back goes back to
+DEF FNprevrom
+LOCAL i%,best$
+IF inst$(1)="" THEN =""
+FOR i%=1 TO nromv%
+  IF FNvercmp(romv$(i%),inst$(1))<0 THEN
+    IF best$="" THEN best$=romv$(i%) ELSE IF FNvercmp(romv$(i%),best$)>0 THEN best$=romv$(i%)
+  ENDIF
+NEXT
+=best$
+
+REM Debian's version order, enough for ours: digits as numbers, then the
+REM rest; "~" before anything
+DEF FNvercmp(a$,b$)
+LOCAL x$,y$,n%,m%
+WHILE a$<>"" OR b$<>""
+  x$=FNlead(a$,FALSE) : y$=FNlead(b$,FALSE)
+  a$=MID$(a$,LEN(x$)+1) : b$=MID$(b$,LEN(y$)+1)
+  n%=FNstrcmp(x$,y$) : IF n% THEN =n%
+  x$=FNlead(a$,TRUE) : y$=FNlead(b$,TRUE)
+  a$=MID$(a$,LEN(x$)+1) : b$=MID$(b$,LEN(y$)+1)
+  n%=VAL(x$) : m%=VAL(y$)
+  IF n%<m% THEN =-1
+  IF n%>m% THEN =1
+ENDWHILE
+=0
+
+REM the leading digits (D%) or non-digits of S$
+DEF FNlead(s$,d%)
+LOCAL i%,c%
+i%=1
+WHILE i%<=LEN(s$)
+  c%=ASC(MID$(s$,i%,1))
+  IF (c%>=48 AND c%<=57)<>d% THEN =LEFT$(s$,i%-1)
+  i%+=1
+ENDWHILE
+=s$
+
+DEF FNord(c$)
+IF c$="~" THEN =-1
+IF c$="" THEN =0
+IF (c$>="A" AND c$<="Z") OR (c$>="a" AND c$<="z") THEN =ASC(c$)
+=ASC(c$)+256
+
+DEF FNstrcmp(x$,y$)
+LOCAL i%,a%,b%,n%
+n%=LEN(x$) : IF LEN(y$)>n% THEN n%=LEN(y$)
+FOR i%=1 TO n%+1
+  a%=FNord(MID$(x$,i%,1)) : b%=FNord(MID$(y$,i%,1))
+  IF a%<b% THEN =-1
+  IF a%>b% THEN =1
+NEXT
+=0
+
+DEF PROCclick(w%,i%,b%)
+IF w%=pww% THEN
+  IF i%=pwok% THEN PROCpwok
+  IF i%=pwcan% THEN PROCpwcancel
+ENDIF
+IF w%<>win% THEN ENDPROC
+CASE i% OF
+  WHEN ic%(3) : PROCcheck
+  WHEN ic%(4) : PROCinstall
+  WHEN ic%(5) : PROCrollback
+  WHEN ic%(6) : PROCstop
+  WHEN ic%(7) : PROCopen(logw%) : PROClogchanged
+ENDCASE
+ENDPROC
+
+DEF PROCcheck
+PROCrun("apt-get update --error-on=any && /usr/lib/riscos/rol-info",1)
+ENDPROC
+
+DEF PROCinstall
+PROCrun("apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade && apt-get -y autoremove --purge && apt-get clean && /usr/lib/riscos/rol-info",2)
+ENDPROC
+
+DEF PROCrollback
+LOCAL v$,e%,r%
+v$=FNprevrom
+IF v$="" THEN ENDPROC
+e%=blk%+3000 : !e%=0
+$(e%+4)="Put RISC OS "+v$+" back in place of "+inst$(1)+"? It takes effect when you restart."+CHR$0
+SYS "Wimp_ReportError",e%,%10011,"Updates" TO ,r%
+IF r%<>1 THEN ENDPROC
+PROCrun("apt-get install -y --allow-downgrades riscos-rom="+v$+" && /usr/lib/riscos/rol-info",3)
+ENDPROC
+
+REM --- running commands through rol-cmd ----------------------------------
+
+REM rol-info: no password needed
+DEF PROCinfo
+PROCrunh("@info"+CHR$10,"",4)
+ENDPROC
+
+DEF PROCrun(cmd$,m%)
+LOCAL h$
+IF tok$<>"" THEN h$="@token "+tok$+CHR$10
+sentpw%=FALSE
+PROCrunh(h$,cmd$,m%)
+ENDPROC
+
+REM h$: the header lines (password, token) before the command
+DEF PROCrunh(h$,cmd$,m%)
+LOCAL f%,t%
+IF job$<>"" THEN ENDPROC
+IF m%<>4 THEN pendcmd$=cmd$ : pendm%=m%
+SYS "OS_ReadMonotonicTime" TO t%
+job$="u"+RIGHT$("0000000"+STR$~t%,8)
+SYS "XOS_File",8,LEFT$(dir$,LEN(dir$)-1)
+f%=OPENOUT(dir$+job$+"/new")
+IF f%=0 THEN ERROR 1,"Can't write to "+dir$
+BPUT#f%,h$+cmd$
+CLOSE#f%
+h$=STRING$(LEN(h$)," ")
+OSCLI "Rename "+dir$+job$+"/new "+dir$+job$+"/req"
+pos%=0 : mode%=m% : started%=t% : heard%=FALSE : neterr%=FALSE
+IF m%=1 OR m%=2 OR m%=3 OR m%=4 THEN sect$="" : sawinfo%=FALSE
+IF m%<>4 THEN PROCaddtext("> "+cmd$+CHR$10)
+CASE m% OF
+  WHEN 1 : PROCset(ic%(1),"Checking for updates...")
+  WHEN 2 : PROCset(ic%(1),"Installing updates...")
+  WHEN 3 : PROCset(ic%(1),"Putting the earlier RISC OS back...")
+ENDCASE
+IF m%<>4 THEN PROCset(ic%(2),"")
+PROCbuttons
+ENDPROC
+
+DEF PROCstop
+LOCAL f%
+IF job$="" THEN ENDPROC
+f%=OPENOUT(dir$+job$+"/kill") : IF f% THEN CLOSE#f%
+PROCset(ic%(1),"Stopping...")
+ENDPROC
+
+DEF PROCpoll_job
+LOCAL f%,rc%,t%,i%
+IF job$="" THEN ENDPROC
+PROCpoll_rest
+f%=OPENIN(dir$+job$+"/rc")
+IF f%=0 THEN
+  SYS "OS_ReadMonotonicTime" TO t%
+  SYS "XOS_File",17,dir$+job$+"/req" TO i%
+  IF NOT heard% AND t%-started%>500 AND i%<>0 THEN PROCfinish(-1)
+  ENDPROC
+ENDIF
+rc%=VAL(GET$#f%) : CLOSE#f%
+PROCpoll_rest
+PROCfinish(rc%)
+ENDPROC
+
+REM whatever has come since the last look
+DEF PROCpoll_rest
+LOCAL f%,n%,i%,t$
+f%=OPENIN(dir$+job$+"/out")
+IF f%=0 THEN ENDPROC
+heard%=TRUE
+n%=EXT#f%-pos%
+WHILE n%>0
+  IF n%>4096 THEN n%=4096
+  PTR#f%=pos% : SYS "OS_GBPB",4,f%,buf%,n%
+  pos%+=n% : t$=""
+  FOR i%=0 TO n%-1 : t$+=CHR$(buf%?i%) : IF LEN(t$)=250 THEN PROCaddtext(t$) : t$=""
+  NEXT
+  PROCaddtext(t$)
+  n%=EXT#f%-pos%
+ENDWHILE
+CLOSE#f%
+ENDPROC
+
+DEF PROCfinish(rc%)
+LOCAL m%,f%,i%,anyro%
+m%=mode%
+f%=OPENIN(dir$+job$+"/tok")
+IF f% THEN tok$=GET$#f% : CLOSE#f% : IF LEN(tok$)<>32 THEN tok$=""
+SYS "XOS_File",6,dir$+job$+"/tok"
+SYS "XOS_File",6,dir$+job$+"/out"
+SYS "XOS_File",6,dir$+job$+"/rc"
+SYS "XOS_File",6,dir$+job$+"/req"
+SYS "XOS_File",6,dir$+job$+"/kill"
+IF cur$<>"" THEN PROCline(cur$) : cur$=""
+job$="" : mode%=0
+IF rc%=77 OR rc%=78 THEN
+  tok$=""
+  PROCset(ic%(1),"That needs Linux's root password")
+  PROCpwask(rc%)
+  PROCbuttons
+  ENDPROC
+ENDIF
+IF rc%=79 THEN
+  PROCset(ic%(1),"Too many wrong passwords: try again in a minute")
+  PROCbuttons
+  ENDPROC
+ENDIF
+IF sawinfo% THEN PROCshow
+CASE TRUE OF
+  WHEN rc%=-1 : PROCset(ic%(1),"Linux didn't take the command (is rol-cmd running?)")
+  WHEN m%=4 AND rc%=0
+    IF checked%>0 THEN PROCset(ic%(1),"Last checked "+FNago(nowt%-checked%)) ELSE PROCset(ic%(1),"Not checked for updates yet")
+  WHEN m%=4 : PROCset(ic%(1),"Couldn't read what's installed (exit status "+STR$rc%+")")
+  WHEN rc%=143 : PROCset(ic%(1),"Stopped")
+  WHEN rc%<>0 AND neterr% : PROCset(ic%(1),"Couldn't reach the servers: is the network up?")
+  WHEN rc%<>0 : PROCset(ic%(1),"That failed (exit status "+STR$rc%+"): see Details")
+  WHEN m%=1
+    anyro%=FALSE : FOR i%=1 TO NP% : IF avail$(i%)<>"" THEN anyro%=TRUE
+    NEXT
+    IF anyro% OR ndeb%>0 THEN PROCset(ic%(1),"There are updates: click Install updates") ELSE PROCset(ic%(1),"Everything is up to date")
+    PROCset(ic%(2),"")
+  WHEN m%=2
+    PROCset(ic%(1),"The updates are installed")
+    PROCset(ic%(2),"Restart (shut down and switch on) to use a new RISC OS, Linux side or kernel")
+  WHEN m%=3
+    PROCset(ic%(1),"RISC OS "+inst$(1)+" is back")
+    PROCset(ic%(2),"Restart (shut down and switch on) to use it")
+ENDCASE
+IF m%<>4 THEN PROCaddtext(CHR$10)
+PROCbuttons
+ENDPROC
+
+DEF FNago(s%)
+IF s%<120 THEN ="just now"
+IF s%<7200 THEN =STR$(s%DIV60)+" minutes ago"
+IF s%<172800 THEN =STR$(s%DIV3600)+" hours ago"
+=STR$(s%DIV86400)+" days ago"
+
+REM --- the output --------------------------------------------------------
+
+REM adds text: LF ends a line, CR starts the current one again (apt's
+REM progress), other control characters go
+DEF PROCaddtext(t$)
+LOCAL i%,c%,changed%
+IF t$="" THEN ENDPROC
+FOR i%=1 TO LEN(t$)
+  c%=ASC(MID$(t$,i%,1))
+  CASE TRUE OF
+    WHEN c%=10 : PROCline(cur$) : cur$="" : changed%=TRUE
+    WHEN c%=13 : cur$=""
+    WHEN c%<32 OR c%=127 :
+    OTHERWISE : IF LEN(cur$)<240 THEN cur$+=CHR$c%
+  ENDCASE
+NEXT
+IF cur$<>"" AND sect$="" THEN PROCset(ic%(2),cur$)
+IF changed% THEN PROClogchanged
+ENDPROC
+
+DEF PROCline(l$)
+LOCAL i%,n$,v$
+IF LEFT$(l$,1)="@" THEN
+  sect$=MID$(l$,2) : sawinfo%=TRUE
+  CASE sect$ OF
+    WHEN "installed" : FOR i%=1 TO NP% : inst$(i%)="" : NEXT
+    WHEN "upgradable" : FOR i%=1 TO NP% : avail$(i%)="" : NEXT : ndeb%=0
+    WHEN "rom-versions" : nromv%=0
+    WHEN "rollback" : rollback$=""
+    WHEN "checked" : checked%=0 : nowt%=0 : ckn%=0
+    WHEN "end" : sect$=""
+    WHEN "machine" :
+  ENDCASE
+  ENDPROC
+ENDIF
+IF sect$<>"" THEN
+  CASE sect$ OF
+    WHEN "installed"
+      n$=LEFT$(l$,INSTR(l$+" "," ")-1) : v$=MID$(l$,LEN(n$)+2)
+      FOR i%=1 TO NP% : IF pk$(i%)=n$ THEN inst$(i%)=v$
+      NEXT
+      known%=TRUE
+    WHEN "upgradable"
+      IF INSTR(l$,"/")>0 THEN
+        n$=LEFT$(l$,INSTR(l$,"/")-1)
+        v$=MID$(l$,INSTR(l$," ")+1) : v$=LEFT$(v$,INSTR(v$+" "," ")-1)
+        IF LEFT$(n$,7)="riscos-" THEN
+          FOR i%=1 TO NP% : IF pk$(i%)=n$ THEN avail$(i%)=v$
+          NEXT
+        ELSE
+          ndeb%+=1
+        ENDIF
+      ENDIF
+    WHEN "rom-versions" : IF l$<>"" AND nromv%<50 THEN nromv%+=1 : romv$(nromv%)=l$
+    WHEN "rollback" : rollback$=l$
+    WHEN "machine" : IF l$<>"" THEN pk$(3)="riscos-kernel-"+l$
+    WHEN "checked" : ckn%+=1 : IF ckn%=1 THEN checked%=VAL(l$) ELSE nowt%=VAL(l$)
+  ENDCASE
+  IF sect$="upgradable" OR sect$="checked" THEN debknown%=(checked%<>0 OR mode%=1 OR mode%=2)
+ENDIF
+IF INSTR(l$,"Could not resolve")>0 OR INSTR(l$,"Temporary failure resolving")>0 OR INSTR(l$,"Unable to connect")>0 THEN neterr%=TRUE
+IF l$<>"" AND sect$="" AND LEFT$(l$,1)<>"@" THEN PROCset(ic%(2),l$)
+IF nl%=MAXL% THEN
+  FOR i%=1 TO MAXL%-1 : line$(i%-1)=line$(i%) : NEXT
+  nl%-=1
+ENDIF
+line$(nl%)=l$ : nl%+=1
+ENDPROC
+
+DEF PROClogchanged
+LOCAL h%,b%
+h%=nl%*LH%+32 : IF h%<600 THEN h%=600
+b%=blk%+2048
+b%!0=0 : b%!4=-h% : b%!8=LW% : b%!12=0
+SYS "Wimp_SetExtent",logw%,b%
+b%!0=logw%
+SYS "Wimp_GetWindowState",,b%
+IF b%!32 AND &10000 THEN
+  b%!24=-(h%-(b%!16-b%!8))
+  IF b%!24>0 THEN b%!24=0
+  SYS "Wimp_OpenWindow",,b%
+  SYS "Wimp_ForceRedraw",logw%,0,-h%,LW%,0
+ENDIF
+ENDPROC
+
+DEF PROCredraw(w%)
+LOCAL more%,ox%,oy%,top%,bot%,i%,y%
+IF w%<>logw% THEN
+  SYS "Wimp_RedrawWindow",,blk% TO more%
+  WHILE more% : SYS "Wimp_GetRectangle",,blk% TO more% : ENDWHILE
+  ENDPROC
+ENDIF
+SYS "Wimp_RedrawWindow",,blk% TO more%
+WHILE more%
+  ox%=blk%!4-blk%!20 : oy%=blk%!16-blk%!24
+  top%=(oy%-blk%!40) DIV LH% : bot%=(oy%-blk%!32) DIV LH%+1
+  IF top%<0 THEN top%=0
+  IF bot%>nl%-1 THEN bot%=nl%-1
+  SYS "Wimp_TextOp",0,&00000000,&FFFFFF00
+  FOR i%=top% TO bot%
+    y%=oy%-16-(i%+1)*LH%+10
+    IF line$(i%)<>"" THEN SYS "Wimp_TextOp",2,line$(i%),-1,-1,ox%+16,y%
+  NEXT
+  SYS "Wimp_GetRectangle",,blk% TO more%
+ENDWHILE
+ENDPROC
+
+REM --- the password ------------------------------------------------------
+
+REM rc%: 77 the password (again, if one was sent), 78 choose one
+DEF PROCpwask(rc%)
+IF rc%=78 THEN
+  pwmode%=2
+  PROCseti(pww%,ic%(37),"Linux has no root password yet: choose one")
+  PROCseti(pww%,ic%(36),"New password")
+  PROCseti(pww%,ic%(39),"Again")
+  PROCplace(TRUE)
+ELSE
+  pwmode%=1
+  IF sentpw% THEN PROCseti(pww%,ic%(37),"Wrong password: try again") ELSE PROCseti(pww%,ic%(37),"Enter Linux's root password")
+  PROCseti(pww%,ic%(36),"Password")
+  PROCseti(pww%,ic%(39),"")
+  PROCplace(FALSE)
+ENDIF
+PROCseti(pww%,ic%(38),"") : PROCseti(pww%,ic%(40),"")
+PROCopen(pww%)
+SYS "Wimp_SetCaretPosition",pww%,ic%(38),0,0,-1,0
+ENDPROC
+
+REM the second field: there (choosing a password) or out of sight
+DEF PROCplace(on%)
+LOCAL d%
+IF on% THEN d%=0 ELSE d%=-4000
+SYS "Wimp_ResizeIcon",pww%,ic%(39),16+d%,-200,290+d%,-148
+SYS "Wimp_ResizeIcon",pww%,ic%(40),300+d%,-200,984+d%,-148
+SYS "Wimp_ForceRedraw",pww%,0,-300,1000,0
+ENDPROC
+
+DEF PROCkey(w%,i%,k%)
+IF w%=pww% THEN
+  CASE k% OF
+    WHEN 13 : IF pwmode%=2 AND i%=ic%(38) THEN SYS "Wimp_SetCaretPosition",pww%,ic%(40),0,0,-1,0 ELSE PROCpwok
+    WHEN 27 : PROCpwcancel
+    WHEN &18A,&18E : IF pwmode%=2 THEN IF i%=ic%(38) THEN SYS "Wimp_SetCaretPosition",pww%,ic%(40),0,0,-1,0 ELSE SYS "Wimp_SetCaretPosition",pww%,ic%(38),0,0,-1,0
+    OTHERWISE : SYS "Wimp_ProcessKey",k%
+  ENDCASE
+ELSE
+  SYS "Wimp_ProcessKey",k%
+ENDIF
+ENDPROC
+
+DEF PROCpwok
+LOCAL a$,b$
+a$=FNget(pww%,ic%(38)) : b$=FNget(pww%,ic%(40))
+IF a$="" THEN ENDPROC
+IF pwmode%=2 AND a$<>b$ THEN
+  PROCseti(pww%,ic%(37),"The two passwords are different: try again")
+  PROCseti(pww%,ic%(38),"") : PROCseti(pww%,ic%(40),"")
+  SYS "Wimp_SetCaretPosition",pww%,ic%(38),0,0,-1,0
+  ENDPROC
+ENDIF
+PROCwipe
+blk%!0=pww% : SYS "Wimp_CloseWindow",,blk%
+sentpw%=(pwmode%=1)
+IF pwmode%=2 THEN a$="@newpassword "+a$ ELSE a$="@password "+a$
+pwmode%=0
+PROCrunh(a$+CHR$10,pendcmd$,pendm%)
+a$=STRING$(LEN(a$)," ") : b$=a$
+ENDPROC
+
+DEF PROCpwcancel
+PROCwipe
+pwmode%=0
+blk%!0=pww% : SYS "Wimp_CloseWindow",,blk%
+PROCset(ic%(1),"Cancelled")
+PROCbuttons
+ENDPROC
+
+REM (the password out of the icons' buffers)
+DEF PROCwipe
+LOCAL i%,j%,p%
+FOR i%=38 TO 40 STEP 2
+  blk%!0=pww% : blk%!4=ic%(i%)
+  SYS "Wimp_GetIconState",,blk%
+  p%=blk%!28 : FOR j%=0 TO blk%!36-1 : p%?j%=0 : NEXT
+  blk%!0=pww% : blk%!4=ic%(i%) : blk%!8=0 : blk%!12=0
+  SYS "Wimp_SetIconState",,blk%
+NEXT
+ENDPROC

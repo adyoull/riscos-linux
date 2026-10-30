@@ -1,0 +1,88 @@
+# RISC OS on Linux 1.0.0001 (30 October 2026)
+
+The first release: version 1.0, build 0001.
+
+RISC OS 5.31 (RISC OS Open's nightly of 29 October 2026, in Timothy
+Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
+
+## The images
+
+| Image | For | File |
+|---|---|---|
+| Generic | Raspberry Pi 3/3B+/CM3, Zero 2 W, 4/400/CM4, 5/500/CM5; UEFI machines (UTM, QEMU, ARM boards and servers); Pinebook and Pinebook Pro | `riscos-generic.img.xz` |
+| UTM | Apple Silicon Macs | `RISC OS 1.0.0001.utm` |
+| Windows Dev Kit 2023 | Snapdragon 8cx Gen 3 ("Project Volterra") | `riscos-wdk2023.img.xz` |
+
+Write the .img.xz to a card or USB disc with Raspberry Pi Imager ("Use
+custom") or balenaEtcher. Double-click the .utm to add it to UTM. Each
+image starts straight into the RISC OS desktop. Shutdown powers the
+machine off.
+
+## What's in it
+
+- **Updates for RISC OS itself.** Configure → Updates checks for and
+  installs new builds of RISC OS, its Linux side, the machine's kernel and
+  the desktop parts (packages from
+  [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg)), and Debian's
+  own updates. Roll back RISC OS returns to the build before. If a new
+  RISC OS won't start, an empty file called `ROLLBACK` on the FAT partition
+  puts the old one back.
+- **Debian 13 underneath** (minimal, no desktop), kept up to date by Updates.
+- **Protected RISC OS.** RISC OS runs as an ordinary Linux user and sees
+  only its own files. `*Linux` runs Linux commands as root after asking for
+  Linux's root password: you choose one the first time, `*LinuxPassword`
+  changes it, and an empty file called `RESETPW` on the FAT partition
+  clears it if it's forgotten.
+- **USB for RISC OS programs.** USBDriver gives RISC OS programs the USB
+  devices Linux has no driver for (phones, cameras), so PDFS works.
+- **HardDisc4 as a hard disc icon**, with RISC OS's own Free window and
+  drag-to-copy.
+- **The screen mode** starts at the screen's own size. A mode chosen and
+  set in Configure → Screen is kept.
+- **Scroll wheel direction.** Configure → Scroll wheel offers Normal or
+  Reversed ("natural", as on a Mac).
+- **PackMan** comes set up with
+  [riscos-packages](https://github.com/adyoull/riscos-packages) and
+  riscosdev.com's autobuilt list as well as RISC OS Open's lists, and
+  with root certificates for secure downloads.
+- **The version** (Task manager → Info, `*Fx 0`) says the nightly's date:
+  "RISC OS 5.31 (29 Oct 2026) nightly".
+- **Wi-Fi:** Raspberry Pi 4/5/500/CM4/CM5, Pinebook and Pinebook Pro
+  (Configure → Linux network).
+- **In UTM**, only RISC OS's pointer shows (UTM's own arrow is hidden).
+- **Included:** ROBench, PDFS 0.15 beta, the VideoCore stand-ins, PackMan,
+  and GCCSDK's UnixLib modules. Iris isn't included: get it from
+  riscosdev.com or PackMan.
+
+## Tested
+
+In QEMU (UEFI, and the Dev Kit's kernel): booting to the desktop, Updates
+(against a signed local copy of the repository, over https), Roll back and
+ROLLBACK, the root password, USB with QEMU's MTP device (PDFS), the screen
+mode, the Scroll wheel option and PackMan's set-up. The UTM image is used
+on an Apple Silicon Mac.
+
+**Not yet tried on real hardware:**
+
+| Machine | Status |
+|---|---|
+| Raspberry Pi | untried |
+| Pinebook, Pinebook Pro | untried; treat as beta |
+| Windows Dev Kit 2023 | untried; treat as beta |
+
+Wi-Fi and PDFS with a real phone are untried on all of them. Please
+report what works.
+
+## Version numbers
+
+Each release is 1.0.<build>, and each package in
+[riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg) carries the
+build it came from (`1.0.0001-1`). RISC OS itself is 5.31; the modules
+keep their own versions.
+
+## Source and licences
+
+All the source is at [riscos-linux](https://github.com/adyoull/riscos-linux)
+(RISC OS 5.31 on the `riscos-5.31-source` branch). Each image carries
+`SOURCE.txt` and a `LICENCES` folder on its FAT partition, and
+HardDisc4.Documents.Licences.

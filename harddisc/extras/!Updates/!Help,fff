@@ -1,0 +1,7 @@
+Updates                                         RISC OS on Linux
+=======
+Opens Configure's Updates, which keeps RISC OS on Linux (RISC OS, its
+Linux side, the kernel and the desktop parts) and Debian up to date. See
+its help (Configure, Updates, then Help) for more.
+
+Copyright (c) 2026 Andrew Youll. MIT licence.

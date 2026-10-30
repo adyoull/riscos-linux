@@ -1,0 +1,5 @@
+# The UnixLib the test bed builds: riscos-unixlib at this commit, plus
+# linux-port-pvops.patch (threads and signals on RISC OS for Linux; sent to
+# UnixLib as a handoff on 2026-10-17, not in a release yet).
+# unixlib/build.sh builds it into out/unixlib/libunixlib.a.
+riscos-unixlib https://github.com/adyoull/riscos-unixlib.git edf696513566149b1b25fb514b41821e83750a25

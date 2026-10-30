@@ -1,0 +1,3 @@
+| WheelSetup: Configure's plug-in for the scroll wheel's direction
+If "<WheelSetup$Dir>" = "" then Set WheelSetup$Dir <Obey$Dir>
+IconSprites <WheelSetup$Dir>.!Sprites

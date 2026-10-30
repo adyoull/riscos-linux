@@ -1,0 +1,9 @@
+| Loads the VideoCore stand-ins: RISC OS's VCHIQ, BCMSupport and PCI
+| modules' SWIs, answered with Linux's /dev/vchiq and /dev/vcio, so that
+| programs written for the Raspberry Pi's VideoCore (ReelHWAccel: Reel,
+| Matinee, FFmpeg's h264_vchiq) work under RISC OS for Linux on a Pi 3/4.
+| VCHIQ won't load where Linux has no VideoCore (QEMU, UTM, other
+| machines), so the programs decode in software there.
+RMEnsure VCHIQ 0 RMLoad <Obey$Dir>.VCHIQ
+RMEnsure BCMSupport 0 RMLoad <Obey$Dir>.BCMSupport
+RMEnsure PCI 0 RMLoad <Obey$Dir>.PCI

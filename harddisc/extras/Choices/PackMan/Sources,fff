@@ -1,0 +1,5 @@
+# Sources written by PackMan
+pkg http://packages.riscosopen.org/packages/pkg/programs-armv5
+pkg http://packages.riscosopen.org/packages/pkg/thirdparty
+pkg https://adyoull.github.io/riscos-packages/pkg/index
+pkg http://packages.riscosdev.com/pkg/autobuilt

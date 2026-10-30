@@ -1,0 +1,8 @@
+# Messages file for WheelSetup
+_TaskName:Scroll wheel
+_Purpose:Which way the scroll wheel scrolls
+_Author:Andrew Youll, 2026
+_Version:1.00 (30-Oct-26)
+_ConfigText:Scroll wheel
+_ConfigHelp:Click SELECT to choose which way the mouse's scroll wheel (or a trackpad's two-finger scroll) scrolls: the normal way, or reversed ("natural" scrolling, as on a Mac).
+_ConfigSprite:co_wheel
