@@ -106,7 +106,13 @@ endif
 	    echo '#define VERSION "GIT commit: '$$COMMIT'\n"' > version
 	    cmp --quiet version mixed/Linux/HAL/h/version || cp version mixed/Linux/HAL/h/version
 	  fi
-	  echo -e 'VersionNo SETS "$$VString ($$Date) Git: '$$COMMIT'"\nUseNewFX0Error SETL {FALSE}\n END' > version
+	  # the version: the date of RISC OS Open's nightly the sources are from
+	  # (NightlyDate), or else the kernel's own date and the commit
+	  if test -f NightlyDate; then
+	    echo -e 'VersionNo SETS "$$VString ('"$$(cat NightlyDate)"') nightly"\nUseNewFX0Error SETL {FALSE}\n END' > version
+	  else
+	    echo -e 'VersionNo SETS "$$VString ($$Date) Git: '$$COMMIT'"\nUseNewFX0Error SETL {FALSE}\n END' > version
+	  fi
 	  cmp --quiet version RiscOS/Sources/Kernel/hdr/AutoVersion || cp version RiscOS/Sources/Kernel/hdr/AutoVersion
 	}
 ifeq ($(INSECURE), YES)
