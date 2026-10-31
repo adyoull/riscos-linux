@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0002 for 64-bit ARM machines (31 October 2026)
+RISC OS on Linux 1.0.0003 for 64-bit ARM machines (31 October 2026)
 ===================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
@@ -12,7 +12,7 @@ One image for:
   - Pine64's Pinebook (Allwinner A64) and Pinebook Pro (Rockchip RK3399),
     with U-Boot (below) starting EFI/BOOT/BOOTAA64.EFI.
 
-Version 1.0, build 0002: RISC OS 5.31 (RISC OS Open's
+Version 1.0, build 0003: RISC OS 5.31 (RISC OS Open's
 sources of 29 October 2026 merged into Timothy Baldwin's Linux port) with
 RISC OS Open's HardDisc4 5.30, on Debian 13 (the slim base
 Debian's own container images use, about 100 MB: no Linux desktop, no

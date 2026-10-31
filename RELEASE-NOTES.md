@@ -1,6 +1,6 @@
-# RISC OS on Linux 1.0.0002 (31 October 2026)
+# RISC OS on Linux 1.0.0003 (31 October 2026)
 
-The first release: version 1.0, build 0002.
+The first release: version 1.0, build 0003.
 
 RISC OS 5.31 (RISC OS Open's nightly of 29 October 2026, in Timothy
 Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
@@ -10,7 +10,7 @@ Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
 | Image | For | File |
 |---|---|---|
 | Generic | Raspberry Pi 3/3B+/CM3, Zero 2 W, 4/400/CM4, 5/500/CM5; UEFI machines (UTM, QEMU, ARM boards and servers); Pinebook and Pinebook Pro | `riscos-generic.img.xz` |
-| UTM | Apple Silicon Macs | `RISC OS 1.0.0002.utm` |
+| UTM | Apple Silicon Macs | `RISC OS 1.0.0003.utm` |
 | Windows Dev Kit 2023 | Snapdragon 8cx Gen 3 ("Project Volterra") | `riscos-wdk2023.img.xz` |
 
 Write the .img.xz to a card or USB disc with Raspberry Pi Imager ("Use
@@ -71,7 +71,8 @@ on an Apple Silicon Mac.
 
 | Machine | Status |
 |---|---|
-| Raspberry Pi | untried |
+| Raspberry Pi 4 | starts and runs; the screen fixed in 1.0.0003 (its HDMI driver was waiting for a missing part) |
+| Raspberry Pi 3, 5 | untried |
 | Pinebook, Pinebook Pro | untried; treat as beta |
 | Windows Dev Kit 2023 | untried; treat as beta |
 
@@ -82,7 +83,7 @@ report what works.
 
 Each release is 1.0.<build>, and each package in
 [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg) carries the
-build it came from (`1.0.0002-1`). RISC OS itself is 5.31; the modules
+build it came from (`1.0.0003-1`). RISC OS itself is 5.31; the modules
 keep their own versions.
 
 ## Source and licences

@@ -12,6 +12,7 @@ the top-level README for which part is under which):
 | `LICENCE.wpa_supplicant`, `LICENCE.libnl` | wpa_supplicant (BSD-3-Clause), libnl |
 | `LICENCE.cypress`, `LICENCE.broadcom_bcm43xx`, `LICENCE.rtlwifi_firmware.txt` | Wi-Fi firmware |
 | `RaspberryPi-firmware-LICENCE.broadcom` | the Raspberry Pi start-up firmware |
+| `wireless-regdb-copyright` | `regulatory.db`, the Wi-Fi regulatory database built into the kernels (ISC) |
 | `U-Boot-copyright` | U-Boot (Ubuntu's packages) |
 | `CaCertificates-certifi-LICENSE` | Mozilla's root certificates (MPL-2.0) |
 

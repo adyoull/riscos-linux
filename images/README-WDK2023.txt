@@ -1,6 +1,6 @@
-RISC OS on Linux 1.0.0002 for the Windows Dev Kit 2023 ("Project Volterra")
+RISC OS on Linux 1.0.0003 for the Windows Dev Kit 2023 ("Project Volterra")
 ===========================================================================
-Version 1.0, build 0002 (31 October 2026): Timothy
+Version 1.0, build 0003 (31 October 2026): Timothy
 Baldwin's Linux port of RISC OS 5 (RISC OS 5.31) with RISC OS Open's
 HardDisc4 5.30, on Debian 13 (minimal) with the mainline 7.2 kernel. The same system as the generic
 image (Raspberry Pi, UEFI machines, Pinebooks). The Dev Kit's processor (Snapdragon 8cx Gen 3) runs 32-bit ARM

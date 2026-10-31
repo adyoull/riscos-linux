@@ -1332,8 +1332,8 @@ CONFIG_PREVENT_FIRMWARE_BUILD=y
 # Firmware loader
 #
 CONFIG_FW_LOADER=y
-CONFIG_EXTRA_FIRMWARE="brcm/brcmfmac43455-sdio.bin brcm/brcmfmac43455-sdio.clm_blob brcm/brcmfmac43455-sdio.txt brcm/brcmfmac43430-sdio.bin brcm/brcmfmac43430-sdio.clm_blob brcm/brcmfmac43430-sdio.txt brcm/brcmfmac43436-sdio.bin brcm/brcmfmac43436-sdio.clm_blob brcm/brcmfmac43436-sdio.txt brcm/brcmfmac43436s-sdio.bin brcm/brcmfmac43436s-sdio.txt"
-CONFIG_EXTRA_FIRMWARE_DIR="firmware"
+CONFIG_EXTRA_FIRMWARE="brcm/brcmfmac43455-sdio.bin brcm/brcmfmac43455-sdio.clm_blob brcm/brcmfmac43455-sdio.txt brcm/brcmfmac43430-sdio.bin brcm/brcmfmac43430-sdio.clm_blob brcm/brcmfmac43430-sdio.txt brcm/brcmfmac43436-sdio.bin brcm/brcmfmac43436-sdio.clm_blob brcm/brcmfmac43436-sdio.txt brcm/brcmfmac43436s-sdio.bin brcm/brcmfmac43436s-sdio.txt regulatory.db regulatory.db.p7s"
+CONFIG_EXTRA_FIRMWARE_DIR="/home/claude/wifi/kfw"
 # CONFIG_FW_LOADER_USER_HELPER is not set
 # CONFIG_FW_LOADER_COMPRESS is not set
 # CONFIG_FW_UPLOAD is not set
@@ -2498,8 +2498,8 @@ CONFIG_I2C_HELPER_AUTO=y
 #
 # I2C system bus drivers (mostly embedded / system-on-chip)
 #
-# CONFIG_I2C_BCM2835 is not set
-# CONFIG_I2C_BRCMSTB is not set
+CONFIG_I2C_BCM2835=y
+CONFIG_I2C_BRCMSTB=y
 # CONFIG_I2C_CADENCE is not set
 # CONFIG_I2C_CBUS_GPIO is not set
 # CONFIG_I2C_DESIGNWARE_PLATFORM is not set
