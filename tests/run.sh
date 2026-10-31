@@ -123,6 +123,11 @@ check vfpsupport-cortex-a8 0 '^PASS$' 60 QEMU_CPU=cortex-a8 -- "$T/t_vfpsupport"
 check elementary-functions 0 '^PASS$' 120 '' -- "$T/t_elementary"
 check elementary-functions-vfpv3 0 '^PASS$' 120 QEMU_CPU=cortex-a8 -- "$T/t_elementary"
 check vfp-switch-atomic 0 '^PASS$' 60 '' -- "$T/t_vfp_irq"
+# Floating point errors: the FPSCR's exception flags from VFP instructions,
+# trap enables (not supported: they read as zero, and 1/0 just sets DZC),
+# flags kept per context, and VFPSupport's own error numbers.
+check vfp-errors 0 '^PASS$' 60 '' -- "$T/t_vfp_errors"
+check vfp-errors-cortex-a8 0 '^PASS$' 60 QEMU_CPU=cortex-a8 -- "$T/t_vfp_errors"
 # Every VFP/NEON float instruction on special values in 16 FPSCR modes, and
 # the NEON integer ops QEMU does with whole-instruction helpers: CRCs of
 # all the results and flags. The CRCs are those of QEMU's exact (soft)

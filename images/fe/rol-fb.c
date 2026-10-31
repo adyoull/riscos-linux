@@ -396,19 +396,6 @@ drm_match_mode (int w, int h)
   return -1;
 }
 
-static void
-flush (void)
-{
-  if (drm_fd >= 0 && drm_fb)
-    {
-      struct drm_clip_rect r = { 0, 0, (unsigned short) fb_w, (unsigned short) fb_h };
-      struct drm_mode_fb_dirty_cmd d = { .fb_id = drm_fb, .num_clips = 1, .clips_ptr = (uintptr_t) &r };
-      static int reported;
-      if (ioctl (drm_fd, DRM_IOCTL_MODE_DIRTYFB, &d) && !reported++)
-	perror ("rol-fb: DIRTYFB");
-    }
-}
-
 /* --- the video overlay: a YUV plane under the desktop (Raspberry Pi) ---
 
    LinuxCodec (a RISC OS module) connects to the abstract socket
@@ -647,7 +634,13 @@ ov_message (void)
 	    break;
 	  }
 	ov_shown = i;
-	map_valid = 0;			/* redraw with the key area */
+	{
+	  /* redraw with the key area, when it moved or the video wasn't shown */
+	  static int lx = -1, ly, lw, lh;
+	  if (prev < 0 || lx != ov_x || ly != ov_y || lw != ov_w || lh != ov_h)
+	    map_valid = 0;
+	  lx = ov_x; ly = ov_y; lw = ov_w; lh = ov_h;
+	}
 	ov_reply (0, prev == i ? -1 : prev, 0);
 	break;
       }
@@ -831,11 +824,110 @@ make_maps (void)
   map_valid = 1;
 }
 
-/* Redraw if the screen, the palette, the pointer or its position changed. */
+/* Copy the output rectangle [x0,x1) x [y0,y1) from back to the display,
+   with the key colour made clear in the video's area and the pointer
+   (32x32 at px,py, unscaled) drawn on. */
+static void
+out_rect (int x0, int y0, int x1, int y1, int px, int py)
+{
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > fb_w) x1 = fb_w;
+  if (y1 > fb_h) y1 = fb_h;
+  for (int y = y0; y < y1; y++)
+    {
+      const uint32_t *row = back + (size_t) y * fb_w;
+      unsigned char *d = fb + (size_t) y * fb_stride;
+      int pr = y - py;
+      int has_ptr = pr >= 0 && pr < ptr_h && pr < 32;
+      if (fb_bpp == 32)
+	{
+	  uint32_t *d32 = (uint32_t *) d;
+	  if (!ov_need)
+	    memcpy (d32 + x0, row + x0, (size_t) (x1 - x0) * 4);
+	  else
+	    {
+	      /* opaque, but for the key colour inside the video's area */
+	      int ky = ov_shown >= 0 && ov_w > 0 && ymap[y] >= ov_y && ymap[y] < ov_y + ov_h;
+	      for (int x = x0; x < x1; x++)
+		{
+		  uint32_t c = row[x];
+		  int k = ky && c == OV_KEY && xmap[x] >= ov_x && xmap[x] < ov_x + ov_w;
+		  d32[x] = k ? 0 : c | 0xFF000000u;
+		}
+	    }
+	  if (!has_ptr)
+	    continue;
+	  for (int i = 0; i < 32; i++)
+	    {
+	      int x = px + i;
+	      if (x < x0 || x >= x1)
+		continue;
+	      unsigned c = ptr_shape[pr][i];
+	      if (c)
+		d32[x] = ptr_pal[c] | 0xFF000000u;
+	    }
+	}
+      else
+	{
+	  uint16_t *d16 = (uint16_t *) d;
+	  for (int x = x0; x < x1; x++)
+	    {
+	      uint32_t c = row[x];
+	      if (has_ptr && x >= px && x < px + 32 && ptr_shape[pr][x - px])
+		c = ptr_pal[ptr_shape[pr][x - px]];
+	      d16[x] = ((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x1F);
+	    }
+	}
+    }
+}
+
+/* Tell the display which parts changed (drivers that need it) */
+static void
+flush_rects (const struct drm_clip_rect *r, int n)
+{
+  if (drm_fd >= 0 && drm_fb && n > 0)
+    {
+      struct drm_mode_fb_dirty_cmd d = { .fb_id = drm_fb, .num_clips = (uint32_t) n, .clips_ptr = (uintptr_t) r };
+      static int reported;
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_DIRTYFB, &d) && !reported++)
+	perror ("rol-fb: DIRTYFB");
+    }
+}
+
+/* The first and last bytes that differ in a and b (n bytes, known to
+   differ) */
+static void
+diff_span (const unsigned char *a, const unsigned char *b, size_t n, size_t *first, size_t *last)
+{
+  size_t f = 0, l = n;
+  while (f + 8 <= n && !memcmp (a + f, b + f, 8))
+    f += 8;
+  while (f < n && a[f] == b[f])
+    f++;
+  while (l >= f + 8 && !memcmp (a + l - 8, b + l - 8, 8))
+    l -= 8;
+  while (l > f && a[l - 1] == b[l - 1])
+    l--;
+  *first = f;
+  *last = l ? l - 1 : 0;
+}
+
+/* Redraw what changed: the screen (only the part of it that changed:
+   RISC OS's screen memory is compared row by row with a copy, and only
+   the rectangle that changed is converted, scaled and sent), the palette
+   or mode (all of it), or the pointer (where it was and where it is).
+   ROL_FB_FULL=1 in rol-fb's environment redraws everything every time. */
 static void
 redraw (int force)
 {
-  static int last_mx = -1, last_my = -1;
+  static int last_mx = -1, last_my = -1, last_px = 0, last_py = 0, drawn;
+  static int full_always = -1;
+  if (full_always < 0)
+    {
+      const char *e = getenv ("ROL_FB_FULL");
+      full_always = e && *e == '1';
+    }
   if (log2bpp < 3 || width <= 0 || height <= 0 || screen_fd < 0 || !fb)
     return;
   const unsigned char *base = pixels;
@@ -850,10 +942,41 @@ redraw (int force)
       make_maps ();
       force = 1;
     }
-  int screen_changed = force || mode_changed || len != last_len || !last_src
-		       || memcmp (last_src, base, len);
+  int full = force || full_always || mode_changed || len != last_len || !last_src || !drawn;
+  /* the source rectangle that changed, in RISC OS pixels (x1, y1 inclusive) */
+  int sx0 = width, sy0 = height, sx1 = -1, sy1 = -1;
+  int shift = log2bpp - 3;			/* bytes per pixel = 1 << shift */
+  size_t rb = (size_t) width << shift;
+  if (rb > (size_t) row_bytes)
+    rb = row_bytes;
+  if (full)
+    {
+      sx0 = 0; sy0 = 0; sx1 = width - 1; sy1 = height - 1;
+    }
+  else
+    {
+      for (int y = 0; y < height; y++)
+	{
+	  const unsigned char *a = base + (size_t) y * row_bytes;
+	  const unsigned char *b = (const unsigned char *) last_src + (size_t) y * row_bytes;
+	  if (!memcmp (a, b, rb))
+	    continue;
+	  size_t f, l;
+	  diff_span (a, b, rb, &f, &l);
+	  int fx = (int) (f >> shift), lx = (int) (l >> shift);
+	  if (fx < sx0) sx0 = fx;
+	  if (lx > sx1) sx1 = lx;
+	  if (y < sy0) sy0 = y;
+	  sy1 = y;
+	}
+    }
+  int screen_changed = sy1 >= 0;
   if (!screen_changed && !ptr_changed && mx == last_mx && my == last_my)
     return;
+  struct drm_clip_rect clips[3];
+  int nclips = 0;
+  int px = ox + (int) ((long long) mx * sw / width) - ptr_ax;
+  int py = oy + (int) ((long long) my * sh / height) - ptr_ay;
   if (screen_changed)
     {
       if (len != last_len)
@@ -861,82 +984,90 @@ redraw (int force)
 	  free (last_src);
 	  last_src = malloc (len);
 	  last_len = len;
+	  full = 1;
+	  sx0 = 0; sy0 = 0; sx1 = width - 1; sy1 = height - 1;
 	}
       if (last_src)
-	memcpy (last_src, base, len);
+	{
+	  size_t a = (size_t) sx0 << shift, n = ((size_t) (sx1 - sx0 + 1)) << shift;
+	  for (int y = sy0; y <= sy1; y++)
+	    memcpy ((unsigned char *) last_src + (size_t) y * row_bytes + a, base + (size_t) y * row_bytes + a, n);
+	}
       mode_changed = 0;
       const unsigned char *src = last_src ? (const unsigned char *) last_src : base;
-      for (int y = 0; y < fb_h; y++)
+      /* the output rectangle those pixels scale to */
+      int ox0 = fb_w, ox1 = -1, oy0 = fb_h, oy1 = -1;
+      if (full)
 	{
-	  uint32_t *row = back + (size_t) y * fb_w;
-	  int sy = ymap[y];
-	  if (sy < 0)
-	    {
-	      memset (row, 0, (size_t) fb_w * 4);
-	      continue;
-	    }
-	  if (y > 0 && ymap[y - 1] == sy)
-	    {
-	      memcpy (row, row - fb_w, (size_t) fb_w * 4);
-	      continue;
-	    }
+	  ox0 = 0; ox1 = fb_w - 1; oy0 = 0; oy1 = fb_h - 1;
+	}
+      else
+	{
 	  for (int x = 0; x < fb_w; x++)
-	    row[x] = xmap[x] < 0 ? 0 : src_pixel (src, xmap[x], sy);
+	    if (xmap[x] >= sx0 && xmap[x] <= sx1)
+	      {
+		if (x < ox0) ox0 = x;
+		ox1 = x;
+	      }
+	  for (int y = 0; y < fb_h; y++)
+	    if (ymap[y] >= sy0 && ymap[y] <= sy1)
+	      {
+		if (y < oy0) oy0 = y;
+		oy1 = y;
+	      }
+	}
+      if (ox1 >= ox0 && oy1 >= oy0)
+	{
+	  for (int y = oy0; y <= oy1; y++)
+	    {
+	      uint32_t *row = back + (size_t) y * fb_w;
+	      int sy = ymap[y];
+	      if (sy < 0)
+		{
+		  memset (row + ox0, 0, (size_t) (ox1 - ox0 + 1) * 4);
+		  continue;
+		}
+	      if (y > oy0 && ymap[y - 1] == sy)
+		{
+		  memcpy (row + ox0, row - fb_w + ox0, (size_t) (ox1 - ox0 + 1) * 4);
+		  continue;
+		}
+	      for (int x = ox0; x <= ox1; x++)
+		row[x] = xmap[x] < 0 ? 0 : src_pixel (src, xmap[x], sy);
+	    }
+	  out_rect (ox0, oy0, ox1 + 1, oy1 + 1, px, py);
+	  clips[nclips++] = (struct drm_clip_rect) { (unsigned short) ox0, (unsigned short) oy0,
+						     (unsigned short) (ox1 + 1), (unsigned short) (oy1 + 1) };
+	}
+    }
+  /* the pointer: put back what was under it, and draw it where it is */
+  if (!full && (ptr_changed || mx != last_mx || my != last_my || screen_changed))
+    {
+      int rx[2] = { last_px, px }, ry[2] = { last_py, py };
+      for (int i = 0; i < 2; i++)
+	{
+	  int x0 = rx[i] < 0 ? 0 : rx[i], y0 = ry[i] < 0 ? 0 : ry[i];
+	  int x1 = rx[i] + 32 > fb_w ? fb_w : rx[i] + 32, y1 = ry[i] + 32 > fb_h ? fb_h : ry[i] + 32;
+	  if (x1 <= x0 || y1 <= y0)
+	    continue;
+	  out_rect (x0, y0, x1, y1, px, py);
+	  clips[nclips++] = (struct drm_clip_rect) { (unsigned short) x0, (unsigned short) y0,
+						     (unsigned short) x1, (unsigned short) y1 };
 	}
     }
   last_mx = mx;
   last_my = my;
+  last_px = px;
+  last_py = py;
   ptr_changed = 0;
-  /* copy to the output, with the pointer drawn on (unscaled) */
-  int px = ox + (int) ((long long) mx * sw / width) - ptr_ax;
-  int py = oy + (int) ((long long) my * sh / height) - ptr_ay;
-  for (int y = 0; y < fb_h; y++)
+  drawn = 1;
+  if (full)
     {
-      const uint32_t *row = back + (size_t) y * fb_w;
-      unsigned char *d = fb + (size_t) y * fb_stride;
-      int pr = y - py;
-      int has_ptr = pr >= 0 && pr < ptr_h && pr < 32;
-      if (fb_bpp == 32)
-	{
-	  uint32_t *d32 = (uint32_t *) d;
-	  if (!ov_need)
-	    memcpy (d32, row, (size_t) fb_w * 4);
-	  else
-	    {
-	      /* opaque, but for the key colour inside the video's area */
-	      int ky = ov_shown >= 0 && ov_w > 0 && ymap[y] >= ov_y && ymap[y] < ov_y + ov_h;
-	      for (int x = 0; x < fb_w; x++)
-		{
-		  uint32_t c = row[x];
-		  int k = ky && c == OV_KEY && xmap[x] >= ov_x && xmap[x] < ov_x + ov_w;
-		  d32[x] = k ? 0 : c | 0xFF000000u;
-		}
-	    }
-	  if (!has_ptr)
-	    continue;
-	  for (int i = 0; i < 32; i++)
-	    {
-	      int x = px + i;
-	      if (x < 0 || x >= fb_w)
-		continue;
-	      unsigned c = ptr_shape[pr][i];
-	      if (c)
-		d32[x] = ptr_pal[c] | 0xFF000000u;
-	    }
-	}
-      else
-	{
-	  uint16_t *d16 = (uint16_t *) d;
-	  for (int x = 0; x < fb_w; x++)
-	    {
-	      uint32_t c = row[x];
-	      if (has_ptr && x >= px && x < px + 32 && ptr_shape[pr][x - px])
-		c = ptr_pal[ptr_shape[pr][x - px]];
-	      d16[x] = ((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x1F);
-	    }
-	}
+      out_rect (0, 0, fb_w, fb_h, px, py);
+      clips[0] = (struct drm_clip_rect) { 0, 0, (unsigned short) fb_w, (unsigned short) fb_h };
+      nclips = 1;
     }
-  flush ();
+  flush_rects (clips, nclips);
   static int frames;
   if (frames++ < 3)
     fprintf (stderr, "rol-fb: frame %d drawn (%dx%d at %d,%d)\n", frames, sw, sh, ox, oy);
