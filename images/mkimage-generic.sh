@@ -68,7 +68,7 @@ dtparam=audio=on
 arm_boost=1
 [all]
 CFG
-echo "console=serial0,115200 console=tty1 root=PARTUUID=$DISKID-02 rootfstype=ext4 rw rootwait loglevel=3 fbcon=nodefer mac80211_hwsim.radios=0" > "$BOOT/cmdline.txt"
+echo "console=serial0,115200 console=tty1 root=PARTUUID=$DISKID-02 rootfstype=ext4 rw rootwait loglevel=3 vt.global_cursor_default=0 fbcon=nodefer mac80211_hwsim.radios=0" > "$BOOT/cmdline.txt"
 IMG=$U/generic5.img
 START_MB=16; BOOT_MB=256; ROOT_MB=3072
 rm -f $IMG

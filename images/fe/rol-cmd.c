@@ -120,8 +120,8 @@ random_bytes (unsigned char *b, int n)
 
 /* The password is Linux's own root password (/etc/shadow): checked with
    perl's crypt() (perl-base is always there; it uses libcrypt, so any
-   hash Linux makes), set with chpasswd. Both get it on a pipe, never on
-   a command line. */
+   hash Linux makes), set with chpasswd -e (the hash made with perl's
+   crypt). Both get it on a pipe, never on a command line. */
 
 /* root's hash from /etc/shadow into h; 0 if it has none (locked, "*") */
 static int
@@ -205,11 +205,26 @@ check_password (const char *pw)
 static int
 set_password (const char *pw)
 {
-  char t[600];
+  /* the hash made here (SHA-512, perl's crypt) and given to chpasswd -e,
+     which then doesn't go through PAM: PAM's "password changed" note goes
+     to syslog, and with no syslog daemon onto the screen (Linux's console,
+     behind RISC OS, seen when RISC OS ends) */
+  static const char sc[] =
+    "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  unsigned char b[16];
+  char salt[17], t[600];
   if (strchr (pw, '\n'))
     return -1;
-  snprintf (t, sizeof t, "root:%s\n", pw);
-  char *argv[] = { "/usr/sbin/chpasswd", NULL };
+  random_bytes (b, 16);
+  for (int i = 0; i < 16; i++)
+    salt[i] = sc[b[i] & 63];
+  salt[16] = 0;
+  snprintf (t, sizeof t, "%s\n%s\n", pw, salt);
+  char *argv[] = { "/usr/bin/perl", "-e",
+    "$p=<STDIN>;chomp $p;$s=<STDIN>;chomp $s;$h=crypt($p,'$6$'.$s.'$');"
+    "exit 1 unless defined $h && substr($h,0,3) eq '$6$';"
+    "open(C,'|-','/usr/sbin/chpasswd','-e') or exit 1;print C \"root:$h\\n\";"
+    "close C;exit($? >> 8)", NULL };
   int r = feed (argv, t);
   memset (t, 0, sizeof t);
   return r == 0 ? 0 : -1;

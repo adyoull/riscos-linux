@@ -31,6 +31,7 @@
 #include <limits.h>
 static int net_time (const char *dns, int quiet);
 static int nogrow;
+static void splash (const char *what);
 static char fat_dev[96];
 
 /* "Raspberry Pi 5 Model B Rev 1.0" etc., or "" (a VM) */
@@ -48,13 +49,15 @@ read_model (void)
     }
 }
 
+static int splash_on;
+
 static void
 say (const char *fmt, const char *a)
 {
   char buf[512];
   int n = snprintf (buf, sizeof buf, fmt, a);
   const char *outs[] = { "/dev/ttyAMA0", "/dev/tty1" };
-  for (int i = 0; i < 2; i++)
+  for (int i = 0; i < (splash_on ? 1 : 2); i++)
     {
       int fd = open (outs[i], O_WRONLY | O_NOCTTY | O_CLOEXEC);
       if (fd >= 0)
@@ -137,7 +140,10 @@ network_up (void)
     }
   say ("\n", "");
   if (dns[0] && addr[0])
-    net_time (dns, 0);
+    {
+      splash ("Setting the clock from the internet");
+      net_time (dns, 0);
+    }
 }
 
 /* --- the time from the network (SNTP), before RISC OS starts: a machine
@@ -1173,6 +1179,9 @@ grow_root (void)
       char m[64];
       snprintf (m, sizeof m, "%llu MB", (unsigned long long) newsec * lbs >> 20);
       say ("Growing the file system to fill the disc (%s)...\n", m);
+      char sm[96];
+      snprintf (sm, sizeof sm, "Enlarging HardDisc4 to fill the disc (%s): first start only", m);
+      splash (sm);
       if (ioctl (rfd, EXT4_IOC_RESIZE_FS, &blocks) == 0)
 	say ("The file system now fills the disc (%s)\n", m);
       else
@@ -1215,6 +1224,120 @@ set_ram_size (int native)
   say ("RISC OS's memory: %s MB\n", v);
 }
 
+/* The start-up screen: on the screen's text console (before RISC OS takes
+   the screen over), "RISC OS on Linux" and its version, and a list of
+   what's happening, each ticked off as it's done: the file system growing
+   to fill the disc (the first start), the network, the clock, RISC OS
+   starting. Messages still go to the serial port (say). */
+#define SPLASH_MAX 8
+static char splash_items[SPLASH_MAX][96];
+static int splash_n, splash_done;
+static char splash_version[48];
+
+static void
+splash_draw (void)
+{
+  int fd = open ("/dev/tty1", O_WRONLY | O_NOCTTY | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  struct winsize ws = { 0 };
+  if (ioctl (fd, TIOCGWINSZ, &ws) || ws.ws_col < 40 || ws.ws_row < 12)
+    ws.ws_col = 80, ws.ws_row = 25;
+  char out[4096];
+  int n = 0;
+  /* black, quiet: no cursor, cleared; the title in bright white, the
+     version and the finished steps in grey, the step under way in white
+     after an amber marker */
+  n += snprintf (out + n, sizeof out - n, "\033[?25l\033[0m\033[2J");
+  int top = ws.ws_row / 2 - (splash_n + 5) / 2;
+  if (top < 1)
+    top = 1;
+  int left = ws.ws_col / 2 - 32;
+  if (left < 2)
+    left = 2;
+  n += snprintf (out + n, sizeof out - n, "\033[%d;%dH\033[1;97mRISC OS on Linux\033[0m", top, left);
+  if (splash_version[0])
+    n += snprintf (out + n, sizeof out - n, "\033[%d;%dH\033[90m%s\033[0m", top + 1, left, splash_version);
+  char rule[65];
+  memset (rule, '-', 64);
+  rule[64] = 0;
+  n += snprintf (out + n, sizeof out - n, "\033[%d;%dH\033[90m%s\033[0m", top + 2, left, rule);
+  for (int i = 0; i < splash_n; i++)
+    n += snprintf (out + n, sizeof out - n, "\033[%d;%dH%s", top + 4 + i, left,
+		   i < splash_done ? "\033[32m*\033[0m  \033[90m" : "\033[33m>\033[0m  \033[97m"),
+    n += snprintf (out + n, sizeof out - n, "%s\033[0m", splash_items[i]);
+  if (n > 0 && write (fd, out, n) < 0) { }
+  close (fd);
+}
+
+/* a new step (the one before it is done) */
+static void
+splash (const char *what)
+{
+  if (!splash_on)
+    return;
+  splash_done = splash_n;
+  if (splash_n == SPLASH_MAX)
+    {
+      memmove (splash_items[0], splash_items[1], sizeof splash_items[0] * (SPLASH_MAX - 1));
+      splash_n--;
+      splash_done = splash_n;
+    }
+  snprintf (splash_items[splash_n++], sizeof splash_items[0], "%s", what);
+  splash_draw ();
+}
+
+static void
+splash_start (void)
+{
+  /* the version: riscos-support's, from dpkg (1.0.0006-1: 1.0.0006) */
+  FILE *f = fopen ("/var/lib/dpkg/status", "re");
+  if (f)
+    {
+      char line[256];
+      int in = 0;
+      while (fgets (line, sizeof line, f))
+	{
+	  if (!strncmp (line, "Package: ", 9))
+	    in = !strcmp (line + 9, "riscos-support\n");
+	  else if (in && !strncmp (line, "Version: ", 9))
+	    {
+	      line[strcspn (line, "-\n")] = 0;
+	      snprintf (splash_version, sizeof splash_version, "Version %s", line + 9);
+	      break;
+	    }
+	}
+      fclose (f);
+    }
+  /* only the kernel's most urgent messages on the screen from now on (the
+     generic kernel's built-in command line has no loglevel): they'd land on
+     the start-up screen; all of them still go to kernel-log.txt */
+  int pk = open ("/proc/sys/kernel/printk", O_WRONLY | O_CLOEXEC);
+  if (pk >= 0)
+    {
+      if (write (pk, "2", 1) < 0) { }
+      close (pk);
+    }
+  splash_on = 1;
+  splash ("Starting");
+}
+
+/* back to an ordinary text screen (RISC OS takes it over, or has ended) */
+static void
+splash_end (void)
+{
+  if (!splash_on)
+    return;
+  splash_on = 0;
+  int fd = open ("/dev/tty1", O_WRONLY | O_NOCTTY | O_CLOEXEC);
+  if (fd >= 0)
+    {
+      const char *r = "\033[0m\033[2J\033[H\033[?25h";
+      if (write (fd, r, strlen (r)) < 0) { }
+      close (fd);
+    }
+}
+
 int
 main (void)
 {
@@ -1229,6 +1352,7 @@ main (void)
   mount ("tmpfs", "/run", "tmpfs", 0, "mode=755");
   mount (NULL, "/", NULL, MS_REMOUNT, NULL);
   kernel_log ();
+  splash_start ();
   reset_root_password ();
   grow_root ();
   fat_logs ();
@@ -1272,6 +1396,7 @@ main (void)
   if (wdk)
     wdk_firmware ();
   restore_time ();
+  splash ("Starting the network");
   network_up ();
   time_daemon ();
   cmd_up ();
@@ -1338,6 +1463,7 @@ main (void)
 	  }
       }
   }
+  splash ("Starting RISC OS");
   say (native ? "Starting RISC OS (native)...\n"
 	      : "Starting RISC OS...\n", "");
   /* natively, NativeSupport (the test bed's: what its QEMU does for code
@@ -1443,11 +1569,15 @@ main (void)
     }
   if (log >= 0)
     close (log);
+  int quick = time (NULL) - t0 < 20;
+  if (!quick)
+    splash ("RISC OS has ended: saving the clock and the logs, then switching off");
   save_time ();
   sync ();
   fat_logs_once ();
-  if (time (NULL) - t0 < 20)
+  if (quick)
     {
+      splash_end ();
       char s[16];
       snprintf (s, sizeof s, "%d", status);
       say ("\nRISC OS stopped (status %s). The last of /riscos/log.txt:\n\n", s);

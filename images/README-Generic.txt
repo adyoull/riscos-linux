@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0005 for 64-bit ARM machines (31 October 2026)
+RISC OS on Linux 1.0.0006 for 64-bit ARM machines (31 October 2026)
 ===================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
@@ -12,7 +12,7 @@ One image for:
   - Pine64's Pinebook (Allwinner A64) and Pinebook Pro (Rockchip RK3399),
     with U-Boot (below) starting EFI/BOOT/BOOTAA64.EFI.
 
-Version 1.0, build 0005: RISC OS 5.31 (RISC OS Open's
+Version 1.0, build 0006: RISC OS 5.31 (RISC OS Open's
 sources of 29 October 2026 merged into Timothy Baldwin's Linux port) with
 RISC OS Open's HardDisc4 5.30, on Debian 13 (the slim base
 Debian's own container images use, about 100 MB: no Linux desktop, no
@@ -178,6 +178,11 @@ The disc: at each start, if the card or disc (or a VM's disc) is bigger
 than the image, the Linux partition and its file system are enlarged to
 fill it, so HardDisc4 gets all the space. An empty file called NOGROW on
 the FAT partition stops that.
+
+Starting up: a start-up screen says what's happening (the disc being
+enlarged on the first start, the network, the clock, RISC OS starting),
+and again when RISC OS ends, while Linux saves the clock and logs and
+switches off.
 
 The time: Linux sets the clock from the internet (NTP, pool.ntp.org) as
 soon as the network is up, however late that is, and every hour after;

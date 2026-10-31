@@ -1,6 +1,6 @@
-# RISC OS on Linux 1.0.0005 (31 October 2026)
+# RISC OS on Linux 1.0.0006 (31 October 2026)
 
-The first release: version 1.0, build 0005.
+The first release: version 1.0, build 0006.
 
 RISC OS 5.31 (RISC OS Open's nightly of 29 October 2026, in Timothy
 Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
@@ -10,7 +10,7 @@ Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
 | Image | For | File |
 |---|---|---|
 | Generic | Raspberry Pi 3/3B+/CM3, Zero 2 W, 4/400/CM4, 5/500/CM5; UEFI machines (UTM, QEMU, ARM boards and servers); Pinebook and Pinebook Pro | `riscos-generic.img.xz` |
-| UTM | Apple Silicon Macs | `RISC OS 1.0.0005.utm` |
+| UTM | Apple Silicon Macs | `RISC OS 1.0.0006.utm` |
 | Windows Dev Kit 2023 | Snapdragon 8cx Gen 3 ("Project Volterra") | `riscos-wdk2023.img.xz` |
 
 Write the .img.xz to a card or USB disc with Raspberry Pi Imager ("Use
@@ -49,6 +49,9 @@ machine off.
   "RISC OS 5.31 (29 Oct 2026) nightly".
 - **Wi-Fi:** Raspberry Pi 4/5/500/CM4/CM5, Pinebook and Pinebook Pro
   (Configure → Linux network).
+- **A start-up screen** says what's happening: the disc being enlarged
+  on the first start, the network, the clock, RISC OS starting, and when
+  RISC OS ends, Linux saving and switching off.
 - **The right time:** Linux sets the clock by NTP as soon as the network
   is up, and every hour; RISC OS reads Linux's clock. A Pi keeps the time
   on its card between starts, so it never starts in 1970 (which made
