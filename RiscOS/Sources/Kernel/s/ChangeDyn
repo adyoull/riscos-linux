@@ -1025,11 +1025,18 @@ DAC_PullEnv_ReturnError
         BEQ     %FT44
         ; Allocate and initialise PMP for this DA
         Push    "r0-r3"
+  [ MEMM_Type = "Linux"
+        ; No CAM to limit it. A word per pool page (its physical page, or
+        ; -1), and one more for c.LinuxC's records (-1: none yet)
+        ADD     r3, r9, #1
+        MOV     r3, r3, LSL #2
+  |
         LDR     r0, =ZeroPage
         LDR     r0, [r0, #MaxCamEntry]
         CMP     r9, r0
         ADDHI   r9, r0, #1
         MOV     r3, r9, LSL #2
+  ]
         BL      ClaimSysHeapNode
         BVS     DAC_PMP_ClaimSysHeapNode_Error
         MOV     r10, r2
@@ -1516,6 +1523,10 @@ DAR_notPMP
 
 DAR_delink
  [ MEMM_Type = "Linux"
+        Push    "r0-r3, r12"
+        MOV     r0, r10
+        BL      do_PMP_Free                     ; c.LinuxC's records of a PMP area
+        Pull    "r0-r3, r12"
         Push    "r0-r2, r7"
         LDR     r2, [r10, #DANode_Flags]
         LDR     r0, [r10, #DANode_Base]

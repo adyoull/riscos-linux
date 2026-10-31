@@ -108,6 +108,72 @@ void eprintf(const char *fmt, ...) {
 
 static _kernel_oserror bad_path = {0, "Bad Path"};
 
+/* Errors as RISC OS's own filing systems give them: the FileCore error
+   numbers (the low byte, which programs test: &C6 is "Disc full" whatever
+   the filing system) in IXFS's range (&10000 + filing system 197 << 8), and
+   FileCore's words. Linux errors these don't cover keep IXSupport's own
+   (convert_error: "ENOSPC" and so on). */
+#define FS_ERR(code) (0x10000 + (197 << 8) + (code))
+static _kernel_oserror err_dir_not_empty = {FS_ERR(0xB4), "Directory not empty"};
+static _kernel_oserror err_access = {FS_ERR(0xBD), "The access details for this item do not allow this"};
+static _kernel_oserror err_too_many_open = {FS_ERR(0xC0), "Too many open files"};
+static _kernel_oserror err_open = {FS_ERR(0xC2), "This file is already open"};
+static _kernel_oserror err_locked = {FS_ERR(0xC3), "This item is locked to stop changes being made to it"};
+static _kernel_oserror err_exists = {FS_ERR(0xC4), "Already exists"};
+static _kernel_oserror err_types = {FS_ERR(0xC5), "Types don't match"};
+static _kernel_oserror err_disc_full = {FS_ERR(0xC6), "The disc has no more available space"};
+static _kernel_oserror err_too_big = {FS_ERR(0xC6), "The file is too big for this disc"};
+static _kernel_oserror err_disc = {FS_ERR(0xC7), "Disc error"};
+static _kernel_oserror err_write_prot = {FS_ERR(0xC9), "The disc is write protected"};
+static _kernel_oserror err_bad_name = {FS_ERR(0xCC), "Name not recognised"};
+static _kernel_oserror err_not_found = {FS_ERR(0xD6), "Not found"};
+static _kernel_oserror err_not_same_disc = {FS_ERR(0x9F), "Not same disc"};
+
+static _kernel_oserror *fs_error(int r) {
+  switch (-r) {
+    case ix_ENOSPC:
+    case ix_EDQUOT:       return &err_disc_full;
+    case ix_EFBIG:        return &err_too_big;
+    case ix_EROFS:        return &err_write_prot;
+    case ix_EACCES:
+    case ix_EPERM:        return &err_access;
+    case ix_EBUSY:
+    case ix_ETXTBSY:      return &err_open;
+    case ix_EEXIST:       return &err_exists;
+    case ix_ENOTEMPTY:    return &err_dir_not_empty;
+    case ix_EMFILE:
+    case ix_ENFILE:       return &err_too_many_open;
+    case ix_EIO:          return &err_disc;
+    case ix_ENAMETOOLONG:
+    case ix_EILSEQ:       return &err_bad_name;
+    case ix_ENOENT:       return &err_not_found;
+    case ix_ENOTDIR:
+    case ix_EISDIR:       return &err_types;
+    case ix_EXDEV:        return &err_not_same_disc;
+  }
+  return convert_error(r);
+}
+
+/* A whole-file lock that another handle holds (lock_file's EAGAIN or
+   EACCES) is RISC OS's "already open" */
+static _kernel_oserror *lock_error(int r) {
+  return r == -ix_EAGAIN || r == -ix_EACCES ? &err_open : fs_error(r);
+}
+
+/* RISC OS's L attribute (bit 3, kept in user.RISC_OS.LoadExec): locked
+   items can't be deleted, renamed or written over */
+static int is_locked_fd(int fd) {
+  struct { unsigned load, exec, attributes; } a;
+  return ix_fgetxattr(fd, "user.RISC_OS.LoadExec", &a, sizeof(a)) >= 9 && (a.attributes & 8);
+}
+
+static int is_locked_path(int fd) {
+  struct { unsigned load, exec, attributes; } a;
+  char name[28];
+  sprintf(name, "/proc/self/fd/%i", fd);
+  return ix_lgetxattr(name, "user.RISC_OS.LoadExec", &a, sizeof(a)) >= 9 && (a.attributes & 8);
+}
+
 static inline int pd_get(struct path_data *pd) {
   int fd = pd->fd;
   pd->fd = -1;
@@ -188,7 +254,7 @@ static _kernel_oserror *pd_convert_filename(struct path_data *pd, const char *s,
   }
 
   int fd2, fd = ix_open("/", dopenflags, 0);
-  if (fd < 0) return convert_error(fd);
+  if (fd < 0) return fs_error(fd);
 
   if (!*s) {
     // Asking for the root
@@ -247,7 +313,7 @@ static _kernel_oserror *pd_convert_filename(struct path_data *pd, const char *s,
           }
           if (remaining < 0) {
             ix_close(fd);
-            return convert_error(remaining);
+            return fs_error(remaining);
           }
           dentry = (struct linux_dirent *)buffer;
         }
@@ -293,7 +359,7 @@ static _kernel_oserror *pd_convert_filename(struct path_data *pd, const char *s,
       }
       pd->dir_fd = fd;
       pd->fd = fd2;
-      return fd2 == -ix_ENOENT ? 0 : convert_error(fd2);
+      return fd2 == -ix_ENOENT ? 0 : fs_error(fd2);
     }
 
     // Out of loop if end of path.
@@ -321,7 +387,7 @@ static _kernel_oserror *read_dent(void) {
     if (r <= 0) {
       ix_close(dir_fd);
       dir_fd = -1;
-      if (r < 0) return convert_error(r);
+      if (r < 0) return fs_error(r);
     }
     dents_size = r;
     dents_ptr = (struct linux_dirent*)dents_buffer;
@@ -348,7 +414,7 @@ static _kernel_oserror *open_dir(const char *sf, const char *n, unsigned pos) {
   int r = ix_fstat(pd1.fd, &s);
   if (r) {
     pd_close(&pd1);
-    return convert_error(r);
+    return fs_error(r);
   }
 
   if (dir_fd >= 0 && pos && dents_pos <= pos && dir_dev == s.st_dev && dir_ino == s.st_ino) {
@@ -396,7 +462,7 @@ static _kernel_oserror *read_meta(struct ro_dirent *out, int dir_fd, const char 
     out->size = 0;
     out->type = 0;
     out->attributes = 0;
-    return r == -ix_ENOENT ? 0 : convert_error(r);
+    return r == -ix_ENOENT ? 0 : fs_error(r);
   }
 
   if (filetype == -1) {
@@ -412,7 +478,7 @@ static _kernel_oserror *read_meta(struct ro_dirent *out, int dir_fd, const char 
   if (suffix < 4) {
     r = ix_getxattr(name, "user.RISC_OS.LoadExec", &attr, sizeof(attr));
     if (r < 0 && r != -ix_EACCES && r != -ix_ENOENT && r != -ix_ENODATA && r != -ix_EOPNOTSUPP) {
-      return convert_error(r);
+      return fs_error(r);
     }
   }
   if (r < 8 || filetype >= 0) {
@@ -490,6 +556,12 @@ _kernel_oserror *FSEntry_Func_handler(_kernel_swi_regs *regs, void *pw) {
       char name[28];
       sprintf(name, "/proc/self/fd/%i", pd1.fd);
 
+      if (is_locked_path(pd1.fd)) {
+        pd_close(&pd1);
+        pd_close(&pd2);
+        return &err_locked;
+      }
+
       if (pd1.filetype != -1) {
         int r = ix_lgetxattr(name, "user.RISC_OS.LoadExec", &attr, sizeof(attr));
         if (r >= 0 || r == -ix_ENODATA) {
@@ -506,9 +578,13 @@ _kernel_oserror *FSEntry_Func_handler(_kernel_swi_regs *regs, void *pw) {
 
       int rc = ix_renameat2(pd1.dir_fd, pd1.name, pd2.dir_fd, pd2.name, ix_RENAME_NOREPLACE);
       if (rc == -ix_ENOSYS || rc == -ix_EINVAL) rc = ix_renameat(pd1.dir_fd, pd1.name, pd2.dir_fd, pd2.name);
+      /* "not a valid rename" (FileSwitch's Bad rename, or a copy across
+         discs) when the names are the trouble; otherwise Linux's reason */
       regs->r[1] = !!rc;
       pd_close(&pd1);
       pd_close(&pd2);
+      if (rc && rc != -ix_EEXIST && rc != -ix_EXDEV && rc != -ix_EINVAL && rc != -ix_ENOTEMPTY)
+        return fs_error(rc);
       break;
     }
     case fsfunc_Bootup:
@@ -565,7 +641,7 @@ _kernel_oserror *FSEntry_Func_handler(_kernel_swi_regs *regs, void *pw) {
 
       struct ix_statfs s;
       int r = ix_fstatfs(pd1.fd, &s);
-      if (r) return convert_error(r);
+      if (r) return fs_error(r);
       regs->r[2] = mul_sat32(s.f_blocks, s.f_bsize);
       regs->r[0] = mul_sat32(s.f_bfree, s.f_bsize);
       regs->r[1] = mul_sat32(s.f_bavail, s.f_bsize);
@@ -577,7 +653,7 @@ _kernel_oserror *FSEntry_Func_handler(_kernel_swi_regs *regs, void *pw) {
 
       struct ix_statfs s;
       int r = ix_fstatfs(pd1.fd, &s);
-      if (r) return convert_error(r);
+      if (r) return fs_error(r);
       mul_sat64(regs->r + 3, s.f_blocks, s.f_bsize);
       mul_sat64(regs->r + 0, s.f_bfree, s.f_bsize);
       regs->r[2] = mul_sat32(s.f_bavail, s.f_bsize);
@@ -645,8 +721,13 @@ _kernel_oserror *FSEntry_File_handler(_kernel_swi_regs *regs, void *pw) {
       e = pd_convert_filename(&pd1, (const char *)regs->r[1], ix_O_RDWR | ix_O_CREAT);
       if (e) goto out;
 
+      if (is_locked_fd(pd1.fd)) {
+        e = &err_locked;
+        goto out;
+      }
+
       res = lock_file(pd1.fd, ix_F_WRLCK);
-      if (res) goto linux_error;
+      if (res) goto lock_failed;
 
       res = ix_ftruncate(pd1.fd, 0);
       if (res) goto linux_error;
@@ -720,8 +801,12 @@ _kernel_oserror *FSEntry_File_handler(_kernel_swi_regs *regs, void *pw) {
       regs->r[3] = out.exec;
       regs->r[4] = out.size;
       regs->r[5] = out.attributes;
+      if (out.attributes & 8) {
+        e = &err_locked;
+        goto out;
+      }
       res = ix_unlinkat(pd1.dir_fd, pd1.name, out.type == 2 ? ix_AT_REMOVEDIR : 0);
-      if (res & res != -ix_ENOENT) goto linux_error;
+      if (res && res != -ix_ENOENT) goto linux_error;
       break;
     }
 
@@ -730,8 +815,13 @@ _kernel_oserror *FSEntry_File_handler(_kernel_swi_regs *regs, void *pw) {
       e = pd_convert_filename(&pd1, (const char *)regs->r[1], ix_O_RDWR | ix_O_CREAT);
       if (e) return e;
 
+      if (is_locked_fd(pd1.fd)) {
+        e = &err_locked;
+        goto out;
+      }
+
       res = lock_file(pd1.fd, ix_F_WRLCK);
-      if (res) goto linux_error;
+      if (res) goto lock_failed;
 
       res = ix_ftruncate(pd1.fd, 0);
       if (res) goto linux_error;
@@ -773,7 +863,7 @@ _kernel_oserror *FSEntry_File_handler(_kernel_swi_regs *regs, void *pw) {
       if (e) return e;
 
       res = lock_file(pd1.fd, ix_F_RDLCK);
-      if (res) goto linux_error;
+      if (res) goto lock_failed;
 
       e = read_meta(&out, pd1.dir_fd, pd1.name, pd1.fd, pd1.filetype, pd1.sf.suffix);
       if (e) goto out;
@@ -801,7 +891,11 @@ _kernel_oserror *FSEntry_File_handler(_kernel_swi_regs *regs, void *pw) {
       break;
 
     linux_error:
-      e = convert_error(res);
+      e = fs_error(res);
+      break;
+
+    lock_failed:
+      e = lock_error(res);
       break;
   }
 out:
@@ -853,12 +947,22 @@ _kernel_oserror *FSEntry_Open_handler(_kernel_swi_regs *r, void *pw) {
   int res = ix_fstat(fd, &s);
   if (res) goto linux_error;
 
+  /* opening for output (OPENOUT) writes over the file: not if it's locked
+     (opening for update is allowed, as with FileCore) */
+  if (r->r[0] == fsopen_CreateUpdate && ix_S_ISREG(s.st_mode) && is_locked_fd(fd)) {
+    ix_close(fd);
+    return &err_locked;
+  }
+
   if (ix_S_ISDIR(s.st_mode)) info |= fsopen_IsDirectory;
   // FIXME Test for ttys.
 
   if (ix_S_ISREG(s.st_mode)) {
     res = lock_file(fd, (info & fsopen_WritePermission) ? ix_F_WRLCK : ix_F_RDLCK);
-    if (res) goto linux_error;
+    if (res) {
+      ix_close(fd);
+      return lock_error(res);
+    }
 
     if (r->r[0] == fsopen_CreateUpdate) {
       res = ix_ftruncate(fd, 0);
@@ -875,7 +979,7 @@ _kernel_oserror *FSEntry_Open_handler(_kernel_swi_regs *r, void *pw) {
 
 linux_error:
   ix_close(fd);
-  return convert_error(res);
+  return fs_error(res);
 }
 
 _kernel_oserror *FSEntry_Args_handler(_kernel_swi_regs *r, void *pw) {
@@ -889,38 +993,38 @@ _kernel_oserror *FSEntry_Args_handler(_kernel_swi_regs *r, void *pw) {
     case fsargs_ReadPTR:
       res = ix_lseek(fd, 0, ix_SEEK_CUR);
       if (res == -ix_ESPIPE) res = 0;
-      if (res < 0) return convert_error(res);
+      if (res < 0) return fs_error(res);
       r->r[2] = res;
       break;
     case fsargs_SetPTR:
       res = ix_lseek(fd, r->r[2], ix_SEEK_SET);
-      if (res < 0) return convert_error(res);
+      if (res < 0) return fs_error(res);
       break;
     case fsargs_ReadEXT:
       res = ix_fstat(fd, &s);
-      if (res) return convert_error(res);
+      if (res) return fs_error(res);
       r->r[2] = s.st_size;
       break;
     case fsargs_SetEXT:
       res = ix_ftruncate(fd, r->r[2]);
-      if (res) return convert_error(res);
+      if (res) return fs_error(res);
       break;
     case fsargs_ReadSize:
       res = ix_fstat(fd, &s);
-      if (res) return convert_error(res);
+      if (res) return fs_error(res);
       r->r[2] = s.st_blocks * 512;
       break;
     case fsargs_EOFCheck: // EOF Check
       res = ix_fstat(fd, &s);
-      if (res) return convert_error(res);
+      if (res) return fs_error(res);
       res = ix_lseek(fd, 0, ix_SEEK_CUR);
-      if (res < 0 && res != -ix_ESPIPE) return convert_error(res);
+      if (res < 0 && res != -ix_ESPIPE) return fs_error(res);
       r->r[2] = res >= s.st_size ? -1 : 0;
       break;
     case fsargs_Flush:
       if (r->r[2] & 1) {
         res = ix_fsync(fd);
-        if (res) return convert_error(res);
+        if (res) return fs_error(res);
       }
       break;
     case fsargs_ReadLoadExec:
@@ -950,32 +1054,32 @@ _kernel_oserror *FSEntry_GBPB_handler(_kernel_swi_regs *r, void *pw) {
     case 1: // Write at specified pointer
       pos = r->r[4];
       moved = ix_pwrite(fd, (const char *)r->r[2], r->r[3], pos);
-      if (moved < 0) return convert_error(moved);
+      if (moved < 0) return fs_error(moved);
       pos = ix_lseek(fd, pos + moved, ix_SEEK_SET);
-      if (pos < 0) return convert_error(pos);
+      if (pos < 0) return fs_error(pos);
       break;
 
     case 2: // Write at current pointer
       pos = ix_lseek(fd, 0, ix_SEEK_CUR);
-      if (pos < 0 && pos != -ix_ESPIPE) return convert_error(pos);
+      if (pos < 0 && pos != -ix_ESPIPE) return fs_error(pos);
       moved = ix_write(fd, (const char *)r->r[2], r->r[3]);
-      if (moved < 0) return convert_error(moved);
+      if (moved < 0) return fs_error(moved);
       pos = pos < 0 ? 0 : pos + moved;
       break;
 
     case 3: // Read from specified pointer
       pos = r->r[4];
       moved = ix_pread(fd, (char *)r->r[2], r->r[3], pos);
-      if (moved < 0) return convert_error(moved);
+      if (moved < 0) return fs_error(moved);
       pos = ix_lseek(fd, pos + moved, ix_SEEK_SET);
-      if (pos < 0) return convert_error(pos);
+      if (pos < 0) return fs_error(pos);
       break;
 
     case 4: // Read from current pointer
       pos = ix_lseek(fd, 0, ix_SEEK_CUR);
-      if (pos < 0 && pos != -ix_ESPIPE) return convert_error(pos);
+      if (pos < 0 && pos != -ix_ESPIPE) return fs_error(pos);
       moved = ix_read(fd, (char *)r->r[2], r->r[3]);
-      if (moved < 0) return convert_error(moved);
+      if (moved < 0) return fs_error(moved);
       pos = pos < 0 ? 0 : pos + moved;
       break;
 
@@ -998,7 +1102,7 @@ _kernel_oserror *FSEntry_GetBytes_handler(_kernel_swi_regs *r, void *pw) {
   if (res == 0) {
     r->r[0] = -1;
   } else if (res < 0) {
-    return convert_error(res);
+    return fs_error(res);
   }
   return 0;
 }
@@ -1008,7 +1112,7 @@ _kernel_oserror *FSEntry_PutBytes_handler(_kernel_swi_regs *r, void *pw) {
 
   int res = ix_write(r->r[1], &r->r[0], 1);
   if (res < 0) {
-    return convert_error(res);
+    return fs_error(res);
   }
   return 0;
 }

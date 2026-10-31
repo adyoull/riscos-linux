@@ -21,6 +21,13 @@
         IMPORT  do_DynArea_AlterFile
         IMPORT  __HAL_hwcap
         IMPORT  __HAL_rampages
+        IMPORT  do_PMP_PhysOp
+        IMPORT  do_PMP_LogOp
+        IMPORT  do_PMP_Resize
+        IMPORT  do_PMP_GetPages
+        IMPORT  do_PMP_Free
+        EXPORT  pmp_heap_claim
+        EXPORT  pmp_heap_free
 
         EXPORT  __rt_udiv
         EXPORT  CheckAppSpace
@@ -233,18 +240,100 @@ AMBControl_Init
 ARM_PrintProcessorType
         MOV     pc, lr
 
+;**************************************************************************
+;
+; Physical memory pool (PMP) areas, OS_DynamicArea 21-25: done in c.LinuxC
+; (do_PMP_*), with a Linux memory file for each area's pool. In: r0 reason,
+; r1 area number, r2/r3 as the reason code says; out as RISC OS's kernel:
+; r2, r3 updated (PhysOp, LogOp), r2 = pages changed by (Resize), r10-r12
+; may be corrupted; V set and r0 -> error if not all done.
+
 DynArea_PMP_PhysOp
-        DebugTX "DynArea_PMP_PhysOp"
-        UND
+        Push    "r0-r3, r11, lr"
+        BL      PMP_Node
+        BVS     PMP_Error
+        MOV     r0, r10
+        ADD     r1, sp, #2*4                    ; the saved r2, r3
+        BL      do_PMP_PhysOp
+        B       PMP_Exit
+
 DynArea_PMP_LogOp
-        DebugTX "DynArea_PMP_LogOp"
-        UND
+        Push    "r0-r3, r11, lr"
+        BL      PMP_Node
+        BVS     PMP_Error
+        MOV     r0, r10
+        ADD     r1, sp, #2*4
+        BL      do_PMP_LogOp
+        B       PMP_Exit
+
 DynArea_PMP_Resize
-        DebugTX "DynArea_PMP_Resize"
-        UND
+        Push    "r0-r3, r11, lr"
+        BL      PMP_Node
+        BVS     PMP_Error
+        MOV     r0, r10
+        ADD     r1, sp, #2*4                    ; the saved r2
+        BL      do_PMP_Resize
+        B       PMP_Exit
+
 DynArea_PMP_GetPages
-        DebugTX "DynArea_PMP_GetPages"
-        UND
+        Push    "r0-r3, r11, lr"
+        BL      PMP_Node
+        BVS     PMP_Error
+        MOV     r0, r10
+        LDR     r1, [sp, #2*4]
+        LDR     r2, [sp, #3*4]
+        BL      do_PMP_GetPages
+        MOV     r0, #0
+
+PMP_Exit
+        TEQ     r0, #0
+        BNE     PMP_Error
+        Pull    "r0-r3, r11, lr"
+        CLRV
+        MOV     pc, lr
+
+PMP_Error
+ [ International
+        BL      TranslateError
+ ]
+        STR     r0, [sp]
+        Pull    "r0-r3, r11, lr"
+        SETV
+        MOV     pc, lr
+
+; In: r1 = area number. Out: r10 -> its node, or V set and r0 -> error (no
+; such area, or not a PMP area)
+PMP_Node
+        Push    "lr"
+        BL      QCheckAreaNumber
+        LDRCC   r0, =ErrorBlock_BadDynamicArea
+        BCC     %FT90
+        LDR     lr, [r10, #DANode_Flags]
+        TST     lr, #DynAreaFlags_PMP
+        LDREQ   r0, =ErrorBlock_BadParameters
+        BEQ     %FT90
+        CLRV
+        Pull    "pc"
+90      SETV
+        Pull    "pc"
+
+; void *pmp_heap_claim(uint32_t bytes): a block from the system heap, or 0
+pmp_heap_claim
+        Push    "r4, lr"
+        MOV     r3, r0
+        BL      ClaimSysHeapNode
+        MOVVC   r0, r2
+        MOVVS   r0, #0
+        Pull    "r4, pc"
+
+; void pmp_heap_free(void *block)
+pmp_heap_free
+        Push    "r4, lr"
+        MOV     r2, r0
+        BL      FreeSysHeapNode
+        Pull    "r4, pc"
+
+        LTORG
 
 DynArea_AlterFile
         Push    "r2, r6-r8, lr"

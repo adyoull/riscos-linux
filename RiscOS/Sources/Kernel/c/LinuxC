@@ -155,6 +155,9 @@ __value_in_regs struct MMresult do_MoveMemory(uint32_t number, int amount, struc
     }
   }
 
+  // PMP areas change size with OS_DynamicArea 21-23 only
+  if (da->Flags & DynAreaFlags_PMP) goto error;
+
   uint32_t Size = da->Size - fudge;
 
   if (amount > 0) {
@@ -469,4 +472,246 @@ __value_in_regs struct AplSpaceLimit_result do_DynArea_AplSpaceLimit(const void 
   }
   AplWorkMaxSize = limit;
   return result;
+}
+
+/*
+ * Physical memory pool (PMP) dynamic areas (OS_DynamicArea 21-25).
+ *
+ * RISC OS on Linux has no physical pages, so a PMP area's pool is a Linux
+ * memory file (memfd, kept in DANode_File): pool page n is file page n,
+ * and "mapping" pool page n at area page l maps that file page there. The
+ * kernel's array (DANode_PMP: a word per pool page, its physical page
+ * number or -1) holds made-up physical page numbers (PMP_PHYS_BASE + n,
+ * or the one asked for), and one more word after the last points to this
+ * file's records for the area (struct pmp_rec, in memory from Linux):
+ * which area page each pool page is at and the reverse. Claimed pages
+ * come from the free pool (free_take), so the Task Manager's free memory
+ * stays right. The area's size is reported as its whole logical size
+ * (the port checks addresses against base + size; there are no sparse
+ * areas), and SparseHWM covers the highest page mapped, for removal.
+ */
+
+#define PMP_PHYS_BASE 0x00400000u
+#define PMP_NONE      0xFFFFFFFFu
+#define FALLOC_PUNCH_HOLE_KEEP_SIZE 3
+
+struct pmp_rec {
+  uint32_t bytes;       // size of this record (Linux memory)
+  uint32_t pcap;        // pool pages log[] has room for
+  uint32_t lpages;      // area pages
+  int32_t *log;         // per pool page: area page, or -1
+  int32_t *pool;        // per area page: pool page, or -1
+};
+
+struct pmp_entry { uint32_t a, b, c; };
+
+extern void *pmp_heap_claim(uint32_t bytes);
+extern void pmp_heap_free(void *block);
+
+static struct pmp_rec *pmp_rec_alloc(uint32_t pcap, uint32_t lpages) {
+  uint32_t bytes = (sizeof(struct pmp_rec) + 4 * (pcap + lpages) + PageSize - 1) & ~(PageSize - 1);
+  struct pmp_rec *p = mmap(0, bytes, ix_PROT_READ | ix_PROT_WRITE, ix_MAP_PRIVATE | ix_MAP_ANONYMOUS, -1, 0);
+  uint32_t i;
+  if ((uint32_t)p >= (uint32_t)-4096) return 0;
+  p->bytes = bytes;
+  p->pcap = pcap;
+  p->lpages = lpages;
+  p->log = (int32_t *)(p + 1);
+  p->pool = p->log + pcap;
+  for (i = 0; i < pcap + lpages; ++i) p->log[i] = -1;
+  return p;
+}
+
+// The area's records (made the first time, with its memory file), or 0.
+static struct pmp_rec *pmp_get(struct DANode *da) {
+  uint32_t *phys = (uint32_t *)da->PMP;
+  struct pmp_rec *p;
+  if (!phys) return 0;
+  if (phys[da->PMPMaxSize] != PMP_NONE) return (struct pmp_rec *)phys[da->PMPMaxSize];
+  if (da->File < 0) {
+    int fd = MakeTempFile("RISC OS PMP");
+    if (fd < 0) return 0;
+    if (ix_ftruncate(fd, 0)) { ix_close(fd); return 0; }
+    da->File = fd;
+  }
+  p = pmp_rec_alloc(da->PMPMaxSize, da->MaxSize / PageSize);
+  if (!p) return 0;
+  phys[da->PMPMaxSize] = (uint32_t)p;
+  return p;
+}
+
+// The file holds the pool's pages: as many as there are pool pages.
+static int pmp_file_size(struct DANode *da, uint32_t pages) {
+  if (pages >= 0x80000) pages = 0x7FFFF;     // ix_off_t is 32-bit signed
+  return ix_ftruncate(da->File, pages * PageSize);
+}
+
+static void pmp_unmap(struct DANode *da, struct pmp_rec *p, uint32_t l) {
+  int32_t q = p->pool[l];
+  if (q < 0) return;
+  mmap(da->Base + l * PageSize, PageSize, ix_PROT_NONE, MY_MAP | ix_MAP_NORESERVE, -1, 0);
+  p->pool[l] = -1;
+  p->log[q] = -1;
+}
+
+static void pmp_sync(struct DANode *da) {
+  da->Size = da->MaxSize;
+}
+
+// PhysOp (21): r2 -> {pool page, phys page (-1 release, -2 any), flags}
+const void *do_PMP_PhysOp(struct DANode *da, uint32_t *r2r3) {
+  struct pmp_entry *e = (struct pmp_entry *)r2r3[0];
+  uint32_t *phys = (uint32_t *)da->PMP;
+  struct pmp_rec *p = pmp_get(da);
+  const void *err = 0;
+  if (!p) return r2r3[1] ? ErrorBlock_BadParameters : 0;
+  if (pmp_file_size(da, da->PMPMaxSize)) return ErrorBlock_BadParameters;
+  for (; r2r3[1]; --r2r3[1], ++e) {
+    uint32_t q = e->a;
+    if (q >= da->PMPMaxSize) { err = ErrorBlock_BadParameters; break; }
+    if (e->b == PMP_NONE) {
+      if (phys[q] != PMP_NONE) {
+        if (p->log[q] >= 0) pmp_unmap(da, p, p->log[q]);
+        ix_fallocate(da->File, FALLOC_PUNCH_HOLE_KEEP_SIZE, q * PageSize, PageSize);
+        phys[q] = PMP_NONE;
+        da->PMPSize--;
+        free_give(1);
+      }
+    } else if (phys[q] == PMP_NONE) {
+      if (!free_take(1)) { err = ErrorBlock_BadParameters; break; }
+      phys[q] = e->b == 0xFFFFFFFEu ? PMP_PHYS_BASE + q : e->b;
+      da->PMPSize++;
+    }
+  }
+  r2r3[0] = (uint32_t)e;
+  pmp_sync(da);
+  return err;
+}
+
+// LogOp (22): r2 -> {area page, pool page (-1 unmap), flags}
+const void *do_PMP_LogOp(struct DANode *da, uint32_t *r2r3) {
+  struct pmp_entry *e = (struct pmp_entry *)r2r3[0];
+  uint32_t *phys = (uint32_t *)da->PMP;
+  struct pmp_rec *p = pmp_get(da);
+  const void *err = 0;
+  if (!p) {
+    // nothing in the pool, so nothing mapped: unmapping is all there is
+    for (; r2r3[1]; --r2r3[1], ++e) if (e->b != PMP_NONE) { err = ErrorBlock_BadParameters; break; }
+    r2r3[0] = (uint32_t)e;
+    return err;
+  }
+  for (; r2r3[1]; --r2r3[1], ++e) {
+    uint32_t l = e->a, q = e->b;
+    char *a;
+    if (l >= p->lpages) { err = ErrorBlock_BadParameters; break; }
+    if (q == PMP_NONE) { pmp_unmap(da, p, l); continue; }
+    if (q >= da->PMPMaxSize || phys[q] == PMP_NONE) { err = ErrorBlock_BadParameters; break; }
+    if (p->log[q] >= 0 && p->log[q] != (int32_t)l) pmp_unmap(da, p, p->log[q]);
+    a = da->Base + l * PageSize;
+    // bit 15 (PageFlags_Unavailable): mapped but not accessible
+    if (ix_mmap2(a, PageSize, (e->c & (1u << 15)) ? ix_PROT_NONE : MY_PROT,
+                 ix_MAP_SHARED | ix_MAP_FIXED, da->File, q) != a) {
+      err = ErrorBlock_BadParameters;
+      break;
+    }
+    if (p->pool[l] >= 0 && p->pool[l] != (int32_t)q) p->log[p->pool[l]] = -1;
+    p->pool[l] = q;
+    p->log[q] = l;
+    if ((uint32_t)a + PageSize > da->SparseHWM) da->SparseHWM = (uint32_t)a + PageSize;
+  }
+  r2r3[0] = (uint32_t)e;
+  pmp_sync(da);
+  return err;
+}
+
+// Resize (23): r2 = change in pool pages -> r2 = pages changed by
+const void *do_PMP_Resize(struct DANode *da, uint32_t *r2) {
+  uint32_t old = da->PMPMaxSize, want, i;
+  int32_t change = (int32_t)r2[0];
+  uint32_t *phys = (uint32_t *)da->PMP;
+  struct pmp_rec *p = phys ? pmp_get(da) : 0;
+  if (phys && !p) return ErrorBlock_BadParameters;
+  if (change < 0) {
+    // only unclaimed pages at the top can go
+    want = (uint32_t)-change > old ? 0 : old + change;
+    while (old > want && phys[old - 1] == PMP_NONE) {
+      phys[old - 1] = p ? (uint32_t)p : PMP_NONE;   // the records move down a word
+      phys[old] = PMP_NONE;
+      --old;
+    }
+    r2[0] = da->PMPMaxSize - old;
+    da->PMPMaxSize = old;
+    if (p) pmp_file_size(da, old);
+    return 0;
+  }
+  if (change == 0) { r2[0] = 0; return 0; }
+  want = old + change;
+  {
+    uint32_t *nphys = pmp_heap_claim((want + 1) * 4);
+    struct pmp_rec *np;
+    if (!nphys) return ErrorBlock_BadParameters;
+    for (i = 0; i < old; ++i) nphys[i] = phys[i];
+    for (; i <= want; ++i) nphys[i] = PMP_NONE;
+    if (!p) {
+      // the first pool pages: make the records now
+      da->PMP = (uint32_t)nphys;
+      da->PMPMaxSize = want;
+      if (phys) pmp_heap_free(phys);
+      np = pmp_get(da);
+      if (!np) return ErrorBlock_BadParameters;
+    } else {
+      if (want > p->pcap) {
+        np = pmp_rec_alloc(want + want / 4, p->lpages);
+        if (!np) { pmp_heap_free(nphys); return ErrorBlock_BadParameters; }
+        for (i = 0; i < old; ++i) np->log[i] = p->log[i];
+        for (i = 0; i < p->lpages; ++i) np->pool[i] = p->pool[i];
+        munmap(p, p->bytes);
+      } else {
+        np = p;
+      }
+      nphys[want] = (uint32_t)np;
+      da->PMP = (uint32_t)nphys;
+      da->PMPMaxSize = want;
+      pmp_heap_free(phys);
+    }
+  }
+  r2[0] = want - old;
+  return 0;
+}
+
+// GetPages (25): r2 -> {pool page, phys page, area page, flags}, one of
+// the first three given, the others -1
+void do_PMP_GetPages(struct DANode *da, uint32_t *e, uint32_t n) {
+  uint32_t *phys = (uint32_t *)da->PMP;
+  struct pmp_rec *p = phys ? pmp_get(da) : 0;
+  for (; n; --n, e += 4) {
+    int32_t q = -1;
+    if (e[0] != PMP_NONE) {
+      q = e[0] < da->PMPMaxSize ? (int32_t)e[0] : -1;
+    } else if (e[2] != PMP_NONE) {
+      q = p && e[2] < p->lpages ? p->pool[e[2]] : -1;
+    } else if (e[1] != PMP_NONE && phys) {
+      uint32_t i;
+      for (i = 0; i < da->PMPMaxSize; ++i) if (phys[i] == e[1]) { q = i; break; }
+    }
+    if (q < 0 || !phys || phys[q] == PMP_NONE) {
+      if (q >= 0) { e[0] = q; e[1] = PMP_NONE; e[2] = PMP_NONE; }
+      e[3] = 0;
+      continue;
+    }
+    e[0] = q;
+    e[1] = phys[q];
+    e[2] = p ? (uint32_t)p->log[q] : PMP_NONE;
+    e[3] = (da->Flags & 0xFF) | DynAreaFlags_PMP;
+  }
+}
+
+// When the area goes (DAR_delink): its records' memory
+void do_PMP_Free(struct DANode *da) {
+  uint32_t *phys = (uint32_t *)da->PMP;
+  if ((da->Flags & DynAreaFlags_PMP) && phys && phys[da->PMPMaxSize] != PMP_NONE) {
+    struct pmp_rec *p = (struct pmp_rec *)phys[da->PMPMaxSize];
+    phys[da->PMPMaxSize] = PMP_NONE;
+    munmap(p, p->bytes);
+  }
 }

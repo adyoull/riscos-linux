@@ -22,8 +22,8 @@ sub sys {
   my $suffix = "";
   $scno = "__NR_" . $name unless defined $scno;
   my @argsl = split(/,/, $args);
-  $args =~ s/LARGE //;
-  $args =~ s/SMALL //;
+  $args =~ s/LARGE //g;
+  $args =~ s/SMALL //g;
 
   print "static inline ${type} ix_${name}${suffix}(${args}) {\n#ifdef __GNUC__\n";
 
@@ -192,6 +192,7 @@ sys "int",    "fstatat",          "int fd, const char *path, struct ix_stat *buf
 sys "int",    "fstatfs",          "int fd, struct ix_statfs *buf", "__NR_fstatfs64";
 sys "int",    "fsync",            "int fd";
 sys "int",    "ftruncate",        "int fd, ix_off_t length";
+sys "int",    "fallocate",        "int fd, int mode, SMALL uint32_t offset, SMALL uint32_t len";
 sys "int",    "getdents",         "int fd, void *dirp, unsigned size", "__NR_getdents64";
 sys "int",    "getpeername",      "int sockfd, void *addr, ix_socklen_t *addrlen";
 sys "int",    "getsockname",      "int sockfd, void *addr, ix_socklen_t *addrlen";
