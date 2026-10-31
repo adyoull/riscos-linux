@@ -1350,6 +1350,11 @@ main (void)
   mount ("proc", "/proc", "proc", 0, NULL);
   mount ("sysfs", "/sys", "sysfs", 0, NULL);
   mount ("devtmpfs", "/dev", "devtmpfs", 0, NULL);	/* already, usually */
+  /* pseudo-terminals: apt (Updates) runs dpkg on one, and without them
+     says "Can not write log (Is /dev/pts mounted?)" */
+  mkdir ("/dev/pts", 0755);
+  mount ("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "gid=5,mode=620,ptmxmode=666");
+  symlink ("pts/ptmx", "/dev/ptmx");
   mkdir ("/dev/shm", 01777);
   mount ("tmpfs", "/dev/shm", "tmpfs", 0, "mode=1777");
   mount ("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
