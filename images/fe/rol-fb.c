@@ -171,10 +171,18 @@ drm_pick (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id)
 	    break;
 	  }
       *mode = modes[best];
-      fprintf (stderr, "rol-fb: connector %u (type %u-%u): %u modes, using %ux%u %u Hz%s\n",
-	       conns[i], c.connector_type, c.connector_type_id, c.count_modes,
-	       modes[best].hdisplay, modes[best].vdisplay, modes[best].vrefresh,
-	       modes[best].type & DRM_MODE_TYPE_PREFERRED ? " (preferred)" : "");
+      /* (said once, and again only when it changes: this is asked often) */
+      static uint32_t said_conn, said_w, said_h;
+      int say_it = conns[i] != said_conn || modes[best].hdisplay != said_w
+		   || modes[best].vdisplay != said_h;
+      if (say_it)
+	fprintf (stderr, "rol-fb: connector %u (type %u-%u): %u modes, using %ux%u %u Hz%s\n",
+		 conns[i], c.connector_type, c.connector_type_id, c.count_modes,
+		 modes[best].hdisplay, modes[best].vdisplay, modes[best].vrefresh,
+		 modes[best].type & DRM_MODE_TYPE_PREFERRED ? " (preferred)" : "");
+      said_conn = conns[i];
+      said_w = modes[best].hdisplay;
+      said_h = modes[best].vdisplay;
       *conn_id = conns[i];
       *crtc_id = crtcs[0];
       if (c.encoder_id)
@@ -183,7 +191,8 @@ drm_pick (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id)
 	  if (!ioctl (drm_fd, DRM_IOCTL_MODE_GETENCODER, &e) && e.crtc_id)
 	    *crtc_id = e.crtc_id;
 	}
-      fprintf (stderr, "rol-fb: encoder %u, CRTC %u\n", c.encoder_id, *crtc_id);
+      if (say_it)
+	fprintf (stderr, "rol-fb: encoder %u, CRTC %u\n", c.encoder_id, *crtc_id);
       return 0;
     }
   return -1;

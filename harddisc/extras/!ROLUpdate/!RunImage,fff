@@ -27,8 +27,9 @@ job$="" : pos%=0 : mode%=0 : sect$="" : ndeb%=0 : neterr%=FALSE
 rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
 tok$="" : pendcmd$="" : pendm%=0 : sentpw%=FALSE : pwmode%=0 : chain%=0
 dir$="IXFS:$.riscos.cmd."
-LH%=40 : LW%=1600
+LH%=40 : LW%=1600 : BL%=10
 SYS "Wimp_Initialise",380,&4B534154,"Updates",0 TO ,task%
+PROClineheight
 PROCwindows
 PROCopen_main
 PROCset(ic%(1),"Reading what's installed...")
@@ -572,6 +573,21 @@ IF b%!32 AND &10000 THEN
 ENDIF
 ENDPROC
 
+REM The details' line height: the desktop font's height (it's bigger than
+REM 40 OS units on some screens), with a gap; its descent sets the baseline
+DEF PROClineheight
+LOCAL f%,x0%,y0%,x1%,y1%,e%,ye%
+SYS "XWimp_ReadSysInfo",8 TO f%;e%
+IF (e% AND 1) OR f%=0 THEN ENDPROC
+SYS "XFont_ReadInfo",f% TO ,x0%,y0%,x1%,y1%;e%
+IF e% AND 1 THEN ENDPROC
+REM (Font_ReadInfo's box is in pixels: to OS units)
+SYS "OS_ReadModeVariable",-1,5 TO ,,ye%
+y0%=y0%<<ye% : y1%=y1%<<ye%
+IF y1%-y0%+12>LH% THEN LH%=y1%-y0%+12
+IF -y0%+4>BL% THEN BL%=-y0%+4
+ENDPROC
+
 DEF PROCredraw(w%)
 LOCAL more%,ox%,oy%,top%,bot%,i%,y%
 IF w%<>logw% THEN
@@ -582,12 +598,13 @@ ENDIF
 SYS "Wimp_RedrawWindow",,blk% TO more%
 WHILE more%
   ox%=blk%!4-blk%!20 : oy%=blk%!16-blk%!24
-  top%=(oy%-blk%!40) DIV LH% : bot%=(oy%-blk%!32) DIV LH%+1
+  REM every line that reaches into the rectangle, a line either side to be sure
+  top%=(oy%-16-blk%!40) DIV LH%-1 : bot%=(oy%-16-blk%!32) DIV LH%+1
   IF top%<0 THEN top%=0
   IF bot%>nl%-1 THEN bot%=nl%-1
   SYS "Wimp_TextOp",0,&00000000,&FFFFFF00
   FOR i%=top% TO bot%
-    y%=oy%-16-(i%+1)*LH%+10
+    y%=oy%-16-(i%+1)*LH%+BL%
     IF line$(i%)<>"" THEN SYS "Wimp_TextOp",2,line$(i%),-1,-1,ox%+16,y%
   NEXT
   SYS "Wimp_GetRectangle",,blk% TO more%
