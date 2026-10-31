@@ -19,7 +19,7 @@
 title-string: Internet
 help-string: Internet
 initialisation-code: init
-//finalisation-code: final
+finalisation-code: final
 
 
 //service-call-handler: sc_handler Service_UKCompression
@@ -60,8 +60,13 @@ swi-decoding-table: \
   Sendmsg_1         \
   Getpeername_1     \
   Getsockname_1     \
-  InternalLookup
+  InternalLookup    \
+  Version
 
 swi-handler-code: swi_handler
 
 irq-handlers: sigio
+
+// the Internet 5 counters (Socket_InternalLookup) kept up to date once a
+// second, from Linux, after the first lookup: c.main
+generic-veneers: stats_tick/stats_tick_handler, stats_callback/stats_callback_handler

@@ -44,6 +44,7 @@
 #include "sysctl.h"
 
 static int socket_server = -1;
+static bool stats_ticking, stats_pending;
 
 typedef union {
   volatile uint32_t word;
@@ -488,6 +489,20 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
       }
       break;
     }
+    case Socket_InternalLookup - Socket_00:
+      // kvm_nlist: Internet 5's counters (_tcpstat, _udpstat, _ipstat), kept
+      // up to date once a second from now on
+      result = rol_lookup((void *)r->r[1]);
+      if (!stats_ticking) {
+        if (!_swix(OS_CallEvery, _INR(0, 2), 99, stats_tick, pw))
+          stats_ticking = true;
+      }
+      break;
+    case Socket_Version - Socket_00:
+      // The Internet 5 interface (RISC OS Open's TCPIPLibs layouts, which
+      // c.sysctl gives): reported as Internet 5.73, as RISC OS 5.31's own
+      result = 573;
+      break;
     case Socket_Sysctl - Socket_00:
       // The network status calls (interfaces, routes, ARP, TCP/UDP/IP
       // counters) from Linux, in the ROD stack's layout: c.sysctl
@@ -530,6 +545,30 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
 }
 
 extern void raise_event(void);
+
+// Socket_InternalLookup's counters: a ticker once a second, which only
+// asks for a callback (the work, reading Linux's files, is done there)
+
+int stats_tick_handler(_kernel_swi_regs *r, void *pw) {
+  (void)r;
+  if (!stats_pending && !_swix(OS_AddCallBack, _INR(0, 1), stats_callback, pw))
+    stats_pending = true;
+  return 1;
+}
+
+int stats_callback_handler(_kernel_swi_regs *r, void *pw) {
+  (void)r; (void)pw;
+  stats_pending = false;
+  rol_stats_refresh();
+  return 1;
+}
+
+_kernel_oserror *final(int fatal, int podule, void *pw) {
+  (void)fatal; (void)podule;
+  if (stats_ticking) _swix(OS_RemoveTickerEvent, _INR(0, 1), stats_tick, pw);
+  if (stats_pending) _swix(OS_RemoveCallBack, _INR(0, 1), stats_callback, pw);
+  return 0;
+}
 
 int sigio_handler(_kernel_swi_regs *regs, void *pw) {
   int s = regs->r[0];

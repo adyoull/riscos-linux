@@ -1,24 +1,27 @@
 /*
- * Socket_Sysctl for RISC OS on Linux: the network status calls that
- * programs use to show interfaces, traffic, routes, the ARP table and the
- * TCP/UDP/IP counters, answered from Linux (/proc/net and the interface
- * ioctls) in the layout of the RISC OS Developments TCP/IP stack (OpenBSD
- * 6.8 headers, 64-bit fields 4-byte aligned, as Norcroft lays them out):
+ * The network status calls of RISC OS Open's Internet module (Internet 5,
+ * TCPIPLibs: 4.4BSD/FreeBSD layouts), for RISC OS on Linux, answered from
+ * Linux (/proc/net and the interface ioctls), so that programs written for
+ * Internet 5 (InetStat, NetStats, SockStats...) work unchanged:
  *
- *   net.route.0.<af>.iflist   (B_CTL_NET, B_PF_ROUTE, 0, af, B_NET_RT_IFLIST, 0)
- *       B_RTM_IFINFO (if_msghdr + if_data + sockaddr_dl) for each interface,
- *       B_RTM_NEWADDR (ifa_msghdr + netmask, sockaddr_dl, address) for each
- *       IPv4 and IPv6 address
- *   net.route.0.<af>.dump     (..., B_NET_RT_DUMP, 0): routes (rt_msghdr +
- *       destination, gateway, netmask) and the ARP table (B_RTF_LLINFO)
- *   net.route.0.<af>.flags.F  (..., B_NET_RT_FLAGS, F): those with flags F
- *   net.inet.tcp.stats        (B_CTL_NET, B_PF_INET, IPPROTO_TCP, 21): tcpstat
- *   net.inet.udp.stats        (B_CTL_NET, B_PF_INET, IPPROTO_UDP, 5): udpstat
- *   net.inet.ip.stats         (B_CTL_NET, B_PF_INET, 0, 33): ipstat
+ *   Socket_Sysctl
+ *     net.route.0.<af>.iflist   (CTL_NET, PF_ROUTE, 0, af, NET_RT_IFLIST, 0)
+ *         RTM_IFINFO (if_msghdr + if_data + sockaddr_dl) for each interface,
+ *         RTM_NEWADDR (ifa_msghdr + netmask, sockaddr_dl, address) for each
+ *         IPv4 and IPv6 address
+ *     net.route.0.<af>.dump     (..., NET_RT_DUMP, 0): routes (rt_msghdr +
+ *         destination, gateway, netmask) and the ARP table (RTF_LLINFO)
+ *     net.route.0.<af>.flags.F  (..., NET_RT_FLAGS, F): those with flags F
+ *     net.inet.tcp.stats  (CTL_NET, PF_INET, IPPROTO_TCP, TCPCTL_STATS 4)
+ *     net.inet.udp.stats  (CTL_NET, PF_INET, IPPROTO_UDP, UDPCTL_STATS 2)
+ *     net.inet.ip.stats   (CTL_NET, PF_INET, IPPROTO_IP, IPCTL_STATS 13)
+ *   Socket_InternalLookup (kvm_nlist): _tcpstat, _udpstat, _ipstat, the
+ *     same counters at addresses a program reads directly; they are kept up
+ *     to date once a second after the first lookup (rol_stats_refresh)
  *
  * Linux keeps different counters from BSD's: those with a Linux equivalent
- * are filled in (see the tables below), the rest are 0. TCP's byte counts
- * aren't kept by Linux, so they are 0.
+ * are filled in (see the tables below), the rest are 0. Linux doesn't count
+ * TCP bytes, so those are 0.
  *
  * rol_sysctl() returns 0 or a negative Linux errno, as the ix_ calls do.
  *
@@ -63,7 +66,7 @@
 #define B_CTL_NET 4
 #define B_PF_INET 2
 #define B_PF_ROUTE 17
-#define B_AF_INET6 24
+#define B_AF_INET6 28
 #define B_AF_LINK 18
 #define B_NET_RT_DUMP 1
 #define B_NET_RT_FLAGS 2
@@ -96,7 +99,6 @@
 #define L_SIOCETHTOOL 0x8946
 
 #define MAXIF 16
-#define MAXSTAT 160
 
 /* ------------------------------------------------------------ output */
 
@@ -118,7 +120,6 @@ static void put (struct out *o, const void *p, size_t n)
 
 static void le16 (unsigned char *p, unsigned v) { p[0] = v; p[1] = v >> 8; }
 static void le32 (unsigned char *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
-static void le64 (unsigned char *p, uint64_t v) { le32 (p, (uint32_t) v); le32 (p + 4, (uint32_t) (v >> 32)); }
 
 static size_t roundup4 (size_t n) { return n == 0 ? 4 : ((n - 1) | 3) + 1; }
 
@@ -448,55 +449,49 @@ static void sa_mask6 (struct out *o, unsigned prefix)
 
 /* ------------------------------------------------------------ messages */
 
-/* if_msghdr (24) + if_data (136) + sockaddr_dl */
+/* if_msghdr (16) + if_data (80) + sockaddr_dl */
 static void msg_ifinfo (struct out *o, const struct iface *f)
 {
-  unsigned char h[160];
+  unsigned char h[96];
   size_t start = o->n;
   memset (h, 0, sizeof h);
-  le16 (h + 2, 0);
   h[2] = B_RTM_VERSION;
   h[3] = B_RTM_IFINFO;
-  le16 (h + 4, 160);                     /* ifm_hdrlen */
-  le16 (h + 6, f->index);
-  le32 (h + 12, B_RTA_IFP);                /* ifm_addrs */
-  le32 (h + 16, f->flags);
+  le32 (h + 4, B_RTA_IFP);               /* ifm_addrs */
+  le32 (h + 8, f->flags);                /* ifm_flags */
+  le16 (h + 12, f->index);               /* ifm_index */
   /* if_data */
-  h[24] = f->type;
-  h[25] = f->alen;
-  h[26] = f->type == B_IFT_LOOP ? 0 : 14;
-  h[27] = f->link;
-  le32 (h + 28, f->mtu);
-  le64 (h + 40, f->baud);
-  le64 (h + 48, f->ipk);
-  le64 (h + 56, f->ierr);
-  le64 (h + 64, f->opk);
-  le64 (h + 72, f->oerr);
-  le64 (h + 80, f->coll);
-  le64 (h + 88, f->ib);
-  le64 (h + 96, f->ob);
-  le64 (h + 104, f->imc);
-  le64 (h + 112, 0);
-  le64 (h + 120, f->idrop);
-  le64 (h + 128, f->odrop);
-  put (o, h, 160);
+  h[16] = f->type;                       /* ifi_type */
+  h[18] = f->alen;                       /* ifi_addrlen */
+  h[19] = f->type == B_IFT_LOOP ? 0 : 14; /* ifi_hdrlen */
+  le32 (h + 24, f->mtu);
+  le32 (h + 32, f->baud > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t) f->baud);
+  le32 (h + 36, (uint32_t) f->ipk);
+  le32 (h + 40, (uint32_t) f->ierr);
+  le32 (h + 44, (uint32_t) f->opk);
+  le32 (h + 48, (uint32_t) f->oerr);
+  le32 (h + 52, (uint32_t) f->coll);
+  le32 (h + 56, (uint32_t) f->ib);
+  le32 (h + 60, (uint32_t) f->ob);
+  le32 (h + 64, (uint32_t) f->imc);
+  le32 (h + 72, (uint32_t) f->idrop);    /* ifi_iqdrops */
+  put (o, h, 96);
   sa_dl (o, f);
   if (!o->full)
     le16 (o->b + start, o->n - start);   /* ifm_msglen */
 }
 
-/* ifa_msghdr (24): netmask, interface, address */
+/* ifa_msghdr (20): netmask, interface, address */
 static void msg_newaddr_start (struct out *o, const struct iface *f, size_t *start)
 {
-  unsigned char h[24];
+  unsigned char h[20];
   *start = o->n;
   memset (h, 0, sizeof h);
   h[2] = B_RTM_VERSION;
   h[3] = B_RTM_NEWADDR;
-  le16 (h + 4, 24);
-  le16 (h + 6, f->index);
-  le32 (h + 12, B_RTA_NETMASK | B_RTA_IFP | B_RTA_IFA);
-  put (o, h, 24);
+  le32 (h + 4, B_RTA_NETMASK | B_RTA_IFP | B_RTA_IFA);
+  le16 (h + 12, f->index);
+  put (o, h, 20);
 }
 
 static void msg_end (struct out *o, size_t start)
@@ -505,19 +500,18 @@ static void msg_end (struct out *o, size_t start)
     le16 (o->b + start, o->n - start);
 }
 
-/* rt_msghdr (96) */
+/* rt_msghdr (92, with rt_metrics) */
 static void msg_route_start (struct out *o, unsigned index, unsigned flags, unsigned addrs, size_t *start)
 {
-  unsigned char h[96];
+  unsigned char h[92];
   *start = o->n;
   memset (h, 0, sizeof h);
   h[2] = B_RTM_VERSION;
   h[3] = B_RTM_GET;
-  le16 (h + 4, 96);
-  le16 (h + 6, index);
+  le16 (h + 4, index);
+  le32 (h + 8, flags);
   le32 (h + 12, addrs);
-  le32 (h + 16, flags);
-  put (o, h, 96);
+  put (o, h, 92);
 }
 
 /* ------------------------------------------------------------ the lists */
@@ -765,69 +759,102 @@ static uint32_t st (const char *t, const char *g, const char *n)
   return v < 0 ? 0 : (uint32_t) v;
 }
 
-/* tcpstat (OpenBSD 6.8, 536 bytes with 64-bit fields 4-byte aligned) */
-static size_t tcpstat (unsigned char *b, const char *snmp, const char *ns)
+#define NTCP 60
+#define NUDP 9
+#define NIP 26
+/* the counters, as TCPIPLibs' struct tcpstat, udpstat and ipstat (arrays
+   of u_long): Socket_InternalLookup gives their addresses */
+static uint32_t tcp_v[NTCP], udp_v[NUDP], ip_v[NIP];
+
+static void fill_stats (void)
 {
-  uint32_t act = st (snmp, "Tcp", "ActiveOpens"), pas = st (snmp, "Tcp", "PassiveOpens");
-  uint32_t fails = st (snmp, "Tcp", "AttemptFails"), outs = st (snmp, "Tcp", "OutSegs");
-  uint32_t rexmit = st (snmp, "Tcp", "RetransSegs"), ins = st (snmp, "Tcp", "InSegs");
-  uint32_t inerr = st (snmp, "Tcp", "InErrs");
-  memset (b, 0, 536);
-  le32 (b + 0, act);                                  /* tcps_connattempt */
-  le32 (b + 4, pas);                                  /* tcps_accepts */
-  le32 (b + 8, act + pas > fails ? act + pas - fails : 0); /* tcps_connects */
-  le32 (b + 12, st (snmp, "Tcp", "EstabResets"));    /* tcps_drops */
-  le32 (b + 16, fails);                               /* tcps_conndrops */
-  le32 (b + 36, st (ns, "TcpExt", "TCPAbortOnTimeout")); /* tcps_timeoutdrop */
-  le32 (b + 40, st (ns, "TcpExt", "TCPTimeouts"));   /* tcps_rexmttimeo */
-  le32 (b + 64, outs);                                /* tcps_sndtotal */
-  le32 (b + 68, outs > rexmit ? outs - rexmit : 0);  /* tcps_sndpack */
-  le32 (b + 80, rexmit);                              /* tcps_sndrexmitpack */
-  le32 (b + 120, ins);                                /* tcps_rcvtotal */
-  le32 (b + 124, ins > inerr ? ins - inerr : 0);     /* tcps_rcvpack */
-  le32 (b + 136, st (snmp, "Tcp", "InCsumErrors"));  /* tcps_rcvbadsum */
-  le32 (b + 180, st (ns, "TcpExt", "TCPOFOQueue"));  /* tcps_rcvoopack */
-  le32 (b + 256, st (snmp, "Tcp", "OutRsts"));       /* tcps_noport (resets sent) */
-  return 536;
+  char *snmp = slurp ("/proc/net/snmp", 0), *ns = slurp ("/proc/net/netstat", 0);
+  uint32_t act, pas, fails, outs, rexmit, ins, inerr, in, noport, err;
+  if (!snmp) {
+    free (ns);
+    return;
+  }
+  act = st (snmp, "Tcp", "ActiveOpens"); pas = st (snmp, "Tcp", "PassiveOpens");
+  fails = st (snmp, "Tcp", "AttemptFails"); outs = st (snmp, "Tcp", "OutSegs");
+  rexmit = st (snmp, "Tcp", "RetransSegs"); ins = st (snmp, "Tcp", "InSegs");
+  inerr = st (snmp, "Tcp", "InErrs");
+  tcp_v[0] = act;                                      /* tcps_connattempt */
+  tcp_v[1] = pas;                                      /* tcps_accepts */
+  tcp_v[2] = act + pas > fails ? act + pas - fails : 0; /* tcps_connects */
+  tcp_v[3] = st (snmp, "Tcp", "EstabResets");          /* tcps_drops */
+  tcp_v[4] = fails;                                    /* tcps_conndrops */
+  tcp_v[9] = st (ns, "TcpExt", "TCPAbortOnTimeout");   /* tcps_timeoutdrop */
+  tcp_v[10] = st (ns, "TcpExt", "TCPTimeouts");        /* tcps_rexmttimeo */
+  tcp_v[15] = outs;                                    /* tcps_sndtotal */
+  tcp_v[16] = outs > rexmit ? outs - rexmit : 0;       /* tcps_sndpack */
+  tcp_v[18] = rexmit;                                  /* tcps_sndrexmitpack */
+  tcp_v[25] = ins;                                     /* tcps_rcvtotal */
+  tcp_v[26] = ins > inerr ? ins - inerr : 0;           /* tcps_rcvpack */
+  tcp_v[28] = st (snmp, "Tcp", "InCsumErrors");        /* tcps_rcvbadsum */
+  tcp_v[35] = st (ns, "TcpExt", "TCPOFOQueue");        /* tcps_rcvoopack */
+  tcp_v[59] = st (ns, "TcpExt", "ListenDrops");        /* tcps_listendrop */
+  in = st (snmp, "Udp", "InDatagrams"); noport = st (snmp, "Udp", "NoPorts");
+  err = st (snmp, "Udp", "InErrors");
+  udp_v[0] = in + noport + err;                        /* udps_ipackets */
+  udp_v[2] = st (snmp, "Udp", "InCsumErrors");         /* udps_badsum */
+  udp_v[4] = noport;                                   /* udps_noport */
+  udp_v[6] = st (snmp, "Udp", "RcvbufErrors");         /* udps_fullsock */
+  udp_v[8] = st (snmp, "Udp", "OutDatagrams");         /* udps_opackets */
+  ip_v[0] = st (snmp, "Ip", "InReceives");             /* ips_total */
+  ip_v[1] = st (snmp, "Ip", "InHdrErrors");            /* ips_badsum */
+  ip_v[6] = st (snmp, "Ip", "ReasmReqds");             /* ips_fragments */
+  ip_v[7] = st (snmp, "Ip", "ReasmFails");             /* ips_fragdropped */
+  ip_v[9] = st (snmp, "Ip", "ForwDatagrams");          /* ips_forward */
+  ip_v[12] = st (snmp, "Ip", "InUnknownProtos");       /* ips_noproto */
+  ip_v[13] = st (snmp, "Ip", "InDelivers");            /* ips_delivered */
+  ip_v[14] = st (snmp, "Ip", "OutRequests");           /* ips_localout */
+  ip_v[15] = st (snmp, "Ip", "OutDiscards");           /* ips_odropped */
+  ip_v[16] = st (snmp, "Ip", "ReasmOKs");              /* ips_reassembled */
+  ip_v[17] = st (snmp, "Ip", "FragOKs");               /* ips_fragmented */
+  ip_v[18] = st (snmp, "Ip", "FragCreates");           /* ips_ofragments */
+  ip_v[19] = st (snmp, "Ip", "FragFails");             /* ips_cantfrag */
+  ip_v[21] = st (snmp, "Ip", "OutNoRoutes");           /* ips_noroute */
+  free (snmp);
+  free (ns);
 }
 
-/* udpstat (52 bytes) */
-static size_t udpstat (unsigned char *b, const char *snmp)
+void rol_stats_refresh (void)
 {
-  uint32_t in = st (snmp, "Udp", "InDatagrams"), noport = st (snmp, "Udp", "NoPorts");
-  uint32_t err = st (snmp, "Udp", "InErrors");
-  memset (b, 0, 52);
-  le32 (b + 0, in + noport + err);                    /* udps_ipackets */
-  le32 (b + 8, st (snmp, "Udp", "InCsumErrors"));    /* udps_badsum */
-  le32 (b + 20, noport);                              /* udps_noport */
-  le32 (b + 32, st (snmp, "Udp", "RcvbufErrors"));   /* udps_fullsock */
-  le32 (b + 44, st (snmp, "Udp", "OutDatagrams"));   /* udps_opackets */
-  return 52;
+  fill_stats ();
 }
 
-/* ipstat (132 bytes) */
-static size_t ipstat (unsigned char *b, const char *snmp)
+/* Socket_InternalLookup: kvm_nlist's struct nlist (12 bytes: name pointer,
+   type, other, desc, value), ended by a null name; returns how many weren't
+   found */
+int rol_lookup (void *list)
 {
-  memset (b, 0, 132);
-  le32 (b + 0, st (snmp, "Ip", "InReceives"));       /* ips_total */
-  le32 (b + 4, st (snmp, "Ip", "InHdrErrors"));      /* ips_badsum (header errors) */
-  le32 (b + 28, st (snmp, "Ip", "ReasmReqds"));      /* ips_fragments */
-  le32 (b + 32, st (snmp, "Ip", "ReasmFails"));      /* ips_fragdropped */
-  le32 (b + 40, st (snmp, "Ip", "InUnknownProtos")); /* ips_noproto */
-  le32 (b + 44, st (snmp, "Ip", "ForwDatagrams"));   /* ips_forward */
-  le32 (b + 52, st (snmp, "Ip", "InDelivers"));      /* ips_delivered */
-  le32 (b + 56, st (snmp, "Ip", "OutRequests"));     /* ips_localout */
-  le32 (b + 60, st (snmp, "Ip", "OutDiscards") + st (snmp, "Ip", "OutNoRoutes")); /* ips_odropped */
-  le32 (b + 64, st (snmp, "Ip", "ReasmOKs"));        /* ips_reassembled */
-  le32 (b + 68, st (snmp, "Ip", "FragCreates"));     /* ips_fragmented */
-  le32 (b + 76, st (snmp, "Ip", "FragFails"));       /* ips_cantfrag */
-  le32 (b + 84, st (snmp, "Ip", "OutNoRoutes"));     /* ips_noroute */
-  return 132;
+  unsigned char *e = list;
+  int missing = 0;
+  fill_stats ();
+  for (; *(const char **) e; e += 12) {
+    const char *n = *(const char **) e;
+    void *a = 0;
+    if (!strcmp (n, "_tcpstat") || !strcmp (n, "tcpstat"))
+      a = tcp_v;
+    else if (!strcmp (n, "_udpstat") || !strcmp (n, "udpstat"))
+      a = udp_v;
+    else if (!strcmp (n, "_ipstat") || !strcmp (n, "ipstat"))
+      a = ip_v;
+    if (a) {
+      e[4] = 3;                                /* n_type: N_DATA */
+      *(uint32_t *) (e + 8) = (uint32_t) (uintptr_t) a;
+    } else {
+      e[4] = 0;
+      *(uint32_t *) (e + 8) = 0;
+      missing++;
+    }
+  }
+  return missing;
 }
 
 /* ------------------------------------------------------------ entry */
 
-static int give (const unsigned char *b, size_t n, void *oldp, size_t *oldlenp)
+static int give (const void *b, size_t n, void *oldp, size_t *oldlenp)
 {
   if (!oldlenp)
     return -L_EINVAL;
@@ -890,25 +917,19 @@ int rol_sysctl (const int *name, unsigned namelen, void *oldp, size_t *oldlenp,
   }
 
   if (name[1] == B_PF_INET && namelen == 4) {
-    unsigned char b[MAXSTAT * 4];
-    char *snmp = slurp ("/proc/net/snmp", 0), *ns = 0;
+    const void *v = 0;
     size_t n = 0;
-    int r;
-    if (!snmp)
-      return -L_ENOENT;
-    if (name[2] == 6 && name[3] == 21) {
-      ns = slurp ("/proc/net/netstat", 0);
-      n = tcpstat (b, snmp, ns);
-    } else if (name[2] == 17 && name[3] == 5)
-      n = udpstat (b, snmp);
-    else if (name[2] == 0 && name[3] == 33)
-      n = ipstat (b, snmp);
-    free (ns);
-    free (snmp);
-    if (!n)
+    fill_stats ();
+    if (name[2] == 6 && name[3] == 4) {
+      v = tcp_v; n = sizeof tcp_v;
+    } else if (name[2] == 17 && name[3] == 2) {
+      v = udp_v; n = sizeof udp_v;
+    } else if (name[2] == 0 && name[3] == 13) {
+      v = ip_v; n = sizeof ip_v;
+    }
+    if (!v)
       return -L_EOPNOTSUPP;
-    r = give (b, n, oldp, oldlenp);
-    return r;
+    return give (v, n, oldp, oldlenp);
   }
   return -L_EOPNOTSUPP;
 }

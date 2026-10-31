@@ -5,4 +5,6 @@
 #include <stddef.h>
 int rol_sysctl (const int *name, unsigned namelen, void *oldp, size_t *oldlenp,
                 const void *newp, size_t newlen);
+int rol_lookup (void *list);
+void rol_stats_refresh (void);
 #endif
