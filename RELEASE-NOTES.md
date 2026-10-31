@@ -95,7 +95,7 @@ These come through Configure → Updates; the next images will have them.
 | Package | What changed |
 |---|---|
 | RISC OS `5.31-2` | The RAM Linux can give RISC OS (up to 4GB) instead of a fixed figure, and the Task Manager's free memory from it; network statistics for programs that read them the old way (Internet 5's Socket_Sysctl, Socket_InternalLookup, and InetStat's connections and `-s`), so NetStats works; the version reads "RISC OS 5.31-2 (29 Oct 2026)" |
-| RISC OS `5.31-3` (to be built) | Proper RISC OS errors from HardDisc4 ("The disc has no more available space", "This item is locked...", "This file is already open"...) instead of Linux's names, the Locked attribute obeyed, and delete failures no longer lost; physical memory pool areas (for GCCSDK's ARMEABISupport 1.08) done by the kernel itself |
+| RISC OS `5.31-3` | Proper RISC OS errors from HardDisc4 ("The disc has no more available space", "This item is locked...", "This file is already open"...) instead of Linux's names, the Locked attribute obeyed, and delete failures no longer lost; physical memory pool areas (for GCCSDK's ARMEABISupport 1.08) done by the kernel itself. Known gaps, for the next build: a locked file can still be renamed, and OPENOUT on a locked file empties it (RISC OS's FileSwitch asks the filing system to open it for update, so it can't tell) |
 | `riscos-support 1.0.0008-1` | `/dev/pts` mounted (apt could not write its log) |
 | `riscos-support 1.0.0009-1` | Restart (Ctrl+Break, the Shutdown box's Restart, `*Reset`) restarts the machine instead of switching it off |
 | `riscos-support 1.0.0011-1` | The screen: only what changed is redrawn, and moving the pointer doesn't redraw the screen |
