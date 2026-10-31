@@ -66,10 +66,18 @@ cp -a "$boot/RO520Hook/Boot" "$boot/Choices/Boot"
 printf 'X AddTinyDir IXFS:$\nX Filer_Run <IXFS$HardDisc4>.!Boot.Resources.!DiscIcon\n' > "$boot/Choices/Boot/Tasks/Pinboard,feb"
 extras=$HERE/extras
 cp -a "$extras/!DiscIcon" "$boot/Resources/"
+# !NetWatch: Inet$Resolvers follows Linux's network (a late link or
+# Wi-Fi); !DiscIcon's !Run starts it
+cp -a "$extras/!NetWatch" "$boot/Resources/"
 cp -a "$extras/!ROLUpdate" "$boot/Resources/Configure/"
 # root certificates for https (PackMan), and PackMan's sources with ours
 cp -a "$extras/!CaCertificates" "$boot/Resources/"
 mkdir -p "$boot/Choices/PackMan" && cp "$extras/Choices/PackMan/Sources,fff" "$boot/Choices/PackMan/"
+# ARMEABISupport: GCCSDK's 1.08 in !System.310.Modules, where PackMan's
+# package puts it (an older copy in !System.500 would hide a newer one)
+rm -f "$boot/Resources/!System/500/Modules/ARMEABISupport,ffa"
+mkdir -p "$boot/Resources/!System/310/Modules"
+cp "$hd/TestBed/Modules/ARMEABISupport,ffa" "$boot/Resources/!System/310/Modules/"
 # the licences of what the image contains, and where the source is
 # (riscos-linux's licences/; "." becomes "_" in RISC OS names)
 lic=${LICENCES:-$HERE/../licences}

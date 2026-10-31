@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0003 for 64-bit ARM machines (31 October 2026)
+RISC OS on Linux 1.0.0004 for 64-bit ARM machines (31 October 2026)
 ===================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
@@ -12,7 +12,7 @@ One image for:
   - Pine64's Pinebook (Allwinner A64) and Pinebook Pro (Rockchip RK3399),
     with U-Boot (below) starting EFI/BOOT/BOOTAA64.EFI.
 
-Version 1.0, build 0003: RISC OS 5.31 (RISC OS Open's
+Version 1.0, build 0004: RISC OS 5.31 (RISC OS Open's
 sources of 29 October 2026 merged into Timothy Baldwin's Linux port) with
 RISC OS Open's HardDisc4 5.30, on Debian 13 (the slim base
 Debian's own container images use, about 100 MB: no Linux desktop, no
@@ -178,6 +178,13 @@ The disc: at each start, if the card or disc (or a VM's disc) is bigger
 than the image, the Linux partition and its file system are enlarged to
 fill it, so HardDisc4 gets all the space. An empty file called NOGROW on
 the FAT partition stops that.
+
+The time: Linux sets the clock from the internet (NTP, pool.ntp.org) as
+soon as the network is up, however late that is, and every hour after;
+RISC OS reads Linux's clock. A Pi has no clock battery, so the time is
+also kept on the card and put back at the next start. RISC OS's name
+servers follow Linux's network too (NetWatch), so a network that comes
+up after the desktop still works for PackMan, NetSurf and the rest.
 
 A dark screen? The start-up logs are copied to the FAT partition, which
 any computer can read: start the machine, wait two minutes, switch off,

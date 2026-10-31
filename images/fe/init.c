@@ -29,7 +29,7 @@
 #include <sys/time.h>
 #include <stdint.h>
 #include <limits.h>
-static void net_time (const char *dns);
+static int net_time (const char *dns, int quiet);
 static int nogrow;
 static char fat_dev[96];
 
@@ -137,7 +137,7 @@ network_up (void)
     }
   say ("\n", "");
   if (dns[0] && addr[0])
-    net_time (dns);
+    net_time (dns, 0);
 }
 
 /* --- the time from the network (SNTP), before RISC OS starts: a machine
@@ -214,8 +214,79 @@ dns_a (unsigned server, const char *name)
   return 0;
 }
 
+/* The time kept across starts, for a machine without a clock battery (a
+   Pi): saved to /riscos/time whenever it's set from the network and as
+   RISC OS ends, and put back at the start if the clock is behind it, so
+   that the clock never starts in 1970. */
 static void
-net_time (const char *dns)
+save_time (void)
+{
+  char b[32];
+  int n = snprintf (b, sizeof b, "%lld\n", (long long) time (NULL));
+  int fd = open ("/riscos/time.new", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0)
+    return;
+  if (write (fd, b, n) == n)
+    {
+      fsync (fd);
+      close (fd);
+      rename ("/riscos/time.new", "/riscos/time");
+    }
+  else
+    close (fd);
+}
+
+static void
+restore_time (void)
+{
+  char b[32];
+  int fd = open ("/riscos/time", O_RDONLY | O_CLOEXEC);
+  ssize_t n = fd >= 0 ? read (fd, b, sizeof b - 1) : -1;
+  if (fd >= 0)
+    close (fd);
+  if (n <= 0)
+    return;
+  b[n] = 0;
+  long long t = strtoll (b, NULL, 10);
+  if (t > 1735689600LL && time (NULL) < t)
+    {
+      struct timeval tv = { (time_t) t, 0 };
+      settimeofday (&tv, NULL);
+    }
+}
+
+/* NTP (SNTP), all the time: once the network has an address and a name
+   server (Ethernet or Wi-Fi may come up long after RISC OS starts), the
+   time is set from pool.ntp.org, then again every hour. RISC OS reads
+   Linux's clock directly, so its clock follows. */
+static void
+time_daemon (void)
+{
+  if (fork () != 0)
+    return;
+  for (;;)
+    {
+      char buf[2048] = "", state[32] = "", dns[100] = "", addr[32] = "";
+      int fd = open ("/riscos/net/status", O_RDONLY | O_CLOEXEC);
+      ssize_t n = fd >= 0 ? read (fd, buf, sizeof buf - 1) : -1;
+      if (fd >= 0)
+	close (fd);
+      buf[n > 0 ? n : 0] = 0;
+      for (char *l = strtok (buf, "\n"); l; l = strtok (NULL, "\n"))
+	{
+	  if (!strncmp (l, "state=", 6)) snprintf (state, sizeof state, "%s", l + 6);
+	  if (!strncmp (l, "dns=", 4)) snprintf (dns, sizeof dns, "%s", l + 4);
+	  if (!strncmp (l, "address=", 8)) snprintf (addr, sizeof addr, "%s", l + 8);
+	}
+      if (dns[0] && addr[0] && net_time (dns, 1) == 0)
+	sleep (3600);
+      else
+	sleep (10);
+    }
+}
+
+static int
+net_time (const char *dns, int quiet)
 {
   char first[32];
   int i = 0;
@@ -227,7 +298,7 @@ net_time (const char *dns)
   first[i] = 0;
   struct in_addr srv;
   if (!inet_aton (first, &srv))
-    return;
+    return -1;
   for (int tries = 0; tries < 2; tries++)
     {
       unsigned ip = dns_a (srv.s_addr, "pool.ntp.org");
@@ -244,11 +315,15 @@ net_time (const char *dns)
       struct timeval tv = { (time_t) ut, (long) (((unsigned long long) frac * 1000000) >> 32) };
       if (settimeofday (&tv, NULL) == 0)
 	{
-	  say ("Time: set from the network\n", "");
-	  return;
+	  if (!quiet)
+	    say ("Time: set from the network\n", "");
+	  save_time ();
+	  return 0;
 	}
     }
-  say ("Time: not set from the network (no answer)\n", "");
+  if (!quiet)
+    say ("Time: not set from the network (no answer)\n", "");
+  return -1;
 }
 
 /* --- sound: rol-snd plays what RISC OS's LinuxAudio module sends to
@@ -1109,6 +1184,37 @@ out:
   close (fd);
 }
 
+/* RISC OS's RAM: what Linux has free for it (MemAvailable, less some for
+   Linux itself to go on working: its screen, sound and network programs,
+   files it caches, and QEMU's code buffer when RISC OS isn't native), up
+   to 4095MB, as ROL_RAMSIZE_MB for the HAL. *Fx 0 and the Task Manager
+   show it; without it the kernel says 3GB whatever the machine has. */
+static void
+set_ram_size (int native)
+{
+  char buf[4096];
+  int fd = open ("/proc/meminfo", O_RDONLY | O_CLOEXEC);
+  ssize_t n = fd >= 0 ? read (fd, buf, sizeof buf - 1) : -1;
+  if (fd >= 0)
+    close (fd);
+  if (n <= 0)
+    return;
+  buf[n] = 0;
+  char *m = strstr (buf, "MemAvailable:");
+  if (!m)
+    return;
+  long long kb = strtoll (m + 13, NULL, 10);
+  long long mb = kb / 1024 - (native ? 160 : 400);
+  if (mb > 4095)
+    mb = 4095;
+  if (mb < 64)
+    mb = 64;
+  char v[16];
+  snprintf (v, sizeof v, "%lld", mb);
+  setenv ("ROL_RAMSIZE_MB", v, 1);
+  say ("RISC OS's memory: %s MB\n", v);
+}
+
 int
 main (void)
 {
@@ -1165,7 +1271,9 @@ main (void)
   int pi = strstr (model, "Raspberry Pi") != NULL || wdk;
   if (wdk)
     wdk_firmware ();
+  restore_time ();
   network_up ();
+  time_daemon ();
   cmd_up ();
   sound_up ();
   /* ROBench's processor tests as a native Linux program, for comparing
@@ -1260,6 +1368,7 @@ main (void)
 	close (fd);
       }
   }
+  set_ram_size (native);
   if (protect_on ())
     protect_setup ();
   time_t t0 = time (NULL);
@@ -1334,6 +1443,7 @@ main (void)
     }
   if (log >= 0)
     close (log);
+  save_time ();
   sync ();
   fat_logs_once ();
   if (time (NULL) - t0 < 20)

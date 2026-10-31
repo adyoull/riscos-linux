@@ -1,3 +1,5 @@
 | DiscIcon: HardDisc4 as a hard disc icon on the icon bar
+| (and NetWatch: RISC OS's name servers follow Linux's network)
+IfThere <Obey$Dir>.^.!NetWatch Then Filer_Run <Obey$Dir>.^.!NetWatch
 WimpSlot -min 64k -max 64k
 BASIC -quit <Obey$Dir>.!RunImage

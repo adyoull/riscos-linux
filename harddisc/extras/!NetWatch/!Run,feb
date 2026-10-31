@@ -1,0 +1,3 @@
+| NetWatch: RISC OS's name servers follow Linux's network
+WimpSlot -min 32k -max 32k
+BASIC -quit <Obey$Dir>.!RunImage

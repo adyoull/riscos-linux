@@ -1,0 +1,38 @@
+REM >!RunImage
+REM NetWatch: Linux brings the network up (rol-netd), and a wired link or
+REM Wi-Fi can come up long after RISC OS has started, so RISC OS's
+REM Resolver would have no name servers. This background task reads
+REM Linux's network status (IXFS:$.riscos.net.status) every 5 seconds and,
+REM when the name servers change, sets Inet$Resolvers and runs
+REM *ResolverConfig so that the Resolver uses them.
+REM Copyright (c) 2026 Andrew Youll. MIT licence.
+ON ERROR SYS "XWimp_CloseDown" : END
+DIM blk% 256, msgs% 4 : msgs%!0=0
+SYS "Wimp_Initialise",310,&4B534154,"NetWatch",msgs% TO ,task%
+SYS "XOS_ReadVarVal","Inet$Resolvers",blk%,255,0,3 TO ,,len%;f%
+IF f% AND 1 THEN cur$="" ELSE blk%?len%=13 : cur$=$blk%
+REPEAT
+  SYS "OS_ReadMonotonicTime" TO now%
+  SYS "Wimp_PollIdle",&3831,blk%,now%+500 TO reason%
+  CASE reason% OF
+    WHEN 0 : PROCcheck
+    WHEN 17,18 : IF blk%!16=0 THEN SYS "Wimp_CloseDown" : END
+  ENDCASE
+UNTIL FALSE
+
+DEF PROCcheck
+LOCAL f%,l$,dns$
+f%=OPENIN("IXFS:$.riscos.net.status")
+IF f%=0 THEN ENDPROC
+dns$=""
+WHILE NOT EOF#f%
+  l$=GET$#f%
+  IF LEFT$(l$,4)="dns=" THEN dns$=MID$(l$,5)
+ENDWHILE
+CLOSE#f%
+IF dns$<>"" AND dns$<>cur$ THEN
+  cur$=dns$
+  OSCLI "Set Inet$Resolvers "+dns$
+  SYS "XOS_CLI","ResolverConfig"
+ENDIF
+ENDPROC

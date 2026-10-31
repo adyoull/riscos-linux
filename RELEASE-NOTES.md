@@ -1,6 +1,6 @@
-# RISC OS on Linux 1.0.0003 (31 October 2026)
+# RISC OS on Linux 1.0.0004 (31 October 2026)
 
-The first release: version 1.0, build 0003.
+The first release: version 1.0, build 0004.
 
 RISC OS 5.31 (RISC OS Open's nightly of 29 October 2026, in Timothy
 Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
@@ -10,7 +10,7 @@ Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
 | Image | For | File |
 |---|---|---|
 | Generic | Raspberry Pi 3/3B+/CM3, Zero 2 W, 4/400/CM4, 5/500/CM5; UEFI machines (UTM, QEMU, ARM boards and servers); Pinebook and Pinebook Pro | `riscos-generic.img.xz` |
-| UTM | Apple Silicon Macs | `RISC OS 1.0.0003.utm` |
+| UTM | Apple Silicon Macs | `RISC OS 1.0.0004.utm` |
 | Windows Dev Kit 2023 | Snapdragon 8cx Gen 3 ("Project Volterra") | `riscos-wdk2023.img.xz` |
 
 Write the .img.xz to a card or USB disc with Raspberry Pi Imager ("Use
@@ -49,6 +49,12 @@ machine off.
   "RISC OS 5.31 (29 Oct 2026) nightly".
 - **Wi-Fi:** Raspberry Pi 4/5/500/CM4/CM5, Pinebook and Pinebook Pro
   (Configure → Linux network).
+- **The right time:** Linux sets the clock by NTP as soon as the network
+  is up, and every hour; RISC OS reads Linux's clock. A Pi keeps the time
+  on its card between starts, so it never starts in 1970 (which made
+  secure downloads fail).
+- **Name servers that follow the network:** a link or Wi-Fi that comes up
+  after the desktop still works in RISC OS (NetWatch).
 - **The whole disc:** the Linux partition grows to fill a bigger card or
   disc at the next start (an empty `NOGROW` file on the FAT partition
   stops it).
@@ -83,7 +89,7 @@ report what works.
 
 Each release is 1.0.<build>, and each package in
 [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg) carries the
-build it came from (`1.0.0003-1`). RISC OS itself is 5.31; the modules
+build it came from (`1.0.0004-1`). RISC OS itself is 5.31; the modules
 keep their own versions.
 
 ## Source and licences
