@@ -11,9 +11,11 @@ DIM blk% 256, msgs% 4 : msgs%!0=0
 SYS "Wimp_Initialise",310,&4B534154,"NetWatch",msgs% TO ,task%
 SYS "XOS_ReadVarVal","Inet$Resolvers",blk%,255,0,3 TO ,,len%;f%
 IF f% AND 1 THEN cur$="" ELSE blk%?len%=13 : cur$=$blk%
+PROCcheck
 REPEAT
   SYS "OS_ReadMonotonicTime" TO now%
-  SYS "Wimp_PollIdle",&3831,blk%,now%+500 TO reason%
+  REM (null events wanted: bit 0 of the mask clear)
+  SYS "Wimp_PollIdle",&3830,blk%,now%+500 TO reason%
   CASE reason% OF
     WHEN 0 : PROCcheck
     WHEN 17,18 : IF blk%!16=0 THEN SYS "Wimp_CloseDown" : END

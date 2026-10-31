@@ -779,6 +779,10 @@ protect_setup (void)
       mkdir (own[i], 0755);
       if (lchown (own[i], RO_UID, RO_GID)) { }
     }
+  /* Configure's Linux network writes /riscos/net/config (rol-netd made the
+     first one, as root): RISC OS's, so that it can (status stays root's,
+     for RISC OS to read) */
+  if (lchown ("/riscos/net/config", RO_UID, RO_GID)) { }
   DIR *d = opendir ("/dev");
   struct dirent *e;
   while (d && (e = readdir (d)))
