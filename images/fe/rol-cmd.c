@@ -398,6 +398,12 @@ start (const char *file, const char *name)
       setenv ("APT_LISTCHANGES_FRONTEND", "none", 1);
       if (chdir ("/root") != 0 && chdir ("/") != 0)
 	_exit (126);
+      /* Line-buffered output (stdbuf, inherited by everything the command
+	 runs: apt, dpkg, the maintainer scripts), so that the output file,
+	 which Updates shows as it grows, fills a line at a time rather than
+	 in 4KB blocks long after the work was done */
+      if (access ("/usr/bin/stdbuf", X_OK) == 0)
+	execl ("/usr/bin/stdbuf", "stdbuf", "-oL", "-eL", "/bin/sh", "-c", run, (char *) NULL);
       execl ("/bin/sh", "sh", "-c", run, (char *) NULL);
       _exit (127);
     }
