@@ -573,19 +573,18 @@ IF b%!32 AND &10000 THEN
 ENDIF
 ENDPROC
 
-REM The details' line height: the desktop font's height (it's bigger than
-REM 40 OS units on some screens), with a gap; its descent sets the baseline
+REM The details' line height: from the desktop font's size (its point
+REM size times 1.4, in OS units: 72 points = 180 OS units), so that a big
+REM desktop font's lines don't overlap; the baseline a quarter of it up
 DEF PROClineheight
-LOCAL f%,x0%,y0%,x1%,y1%,e%,ye%
+LOCAL f%,xs%,ys%,e%,h%,nm%
 SYS "XWimp_ReadSysInfo",8 TO f%;e%
 IF (e% AND 1) OR f%=0 THEN ENDPROC
-SYS "XFont_ReadInfo",f% TO ,x0%,y0%,x1%,y1%;e%
-IF e% AND 1 THEN ENDPROC
-REM (Font_ReadInfo's box is in pixels: to OS units)
-SYS "OS_ReadModeVariable",-1,5 TO ,,ye%
-y0%=y0%<<ye% : y1%=y1%<<ye%
-IF y1%-y0%+12>LH% THEN LH%=y1%-y0%+12
-IF -y0%+4>BL% THEN BL%=-y0%+4
+DIM nm% LOCAL 255
+SYS "XFont_ReadDefn",f%,nm% TO ,,xs%,ys%;e%
+IF (e% AND 1) OR ys%<=0 THEN ENDPROC
+h%=(ys%*180*14) DIV (16*72*10)
+IF h%>LH% THEN LH%=h% : BL%=h% DIV 4
 ENDPROC
 
 DEF PROCredraw(w%)
