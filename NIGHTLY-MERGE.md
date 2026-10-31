@@ -73,6 +73,7 @@ directories, so other machines' builds are unchanged.
 | IXFS errors and the L attribute | `mixed/Linux/IXSupport/c/fs` (`fs_error`, `lock_error`, `is_locked_*`) | Linux errors become FileCore's (low byte as programs test it) in IXFS's range &1C5xx. Errors not in `fs_error` still get IXSupport's `convert_error` names. |
 | Physical memory pool areas | Kernel `c.LinuxC` (`do_PMP_*`), `s.Linux` (veneers), `s.ChangeDyn` (creation, `DAR_delink`) | A memory file per area; c.LinuxC's records hang off one extra word at the end of the kernel's pool array (`phys[PMPMaxSize]`), so anything that resizes that array must keep the extra word. Tested on Linux with the C compiled for ARM (see the commit). |
 | `fallocate`, `mprotect` | `mixed/Linux/Syscalls/GenSyscall` | LARGE/SMALL arguments are now stripped from every argument of the prototype. |
+| Socket_Select's timeout | `mixed/Linux/Internet/c/main` (`do_select`, `sigio_handler`) | The wait loop ends when `select_timeout` (s.asm, a ticker event) sets the pollword's timeout byte: a pollword that is non-zero makes `pollword_sleep` return at once, so any change to that loop must keep the check or it spins. Timeouts round up to whole centiseconds. Test: `t_select` in riscos-linux-testbed. |
 
 Not in this tree (they're in riscos-linux-testbed / riscos-linux): the image's
 init, rol-fb, LinuxCodec, NetWatch, the packages.
