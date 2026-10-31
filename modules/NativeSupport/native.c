@@ -18,7 +18,9 @@
      are done the same way when they trap.
    - The ROM's DynArea_PMP_PhysOp, _LogOp, _Resize and _GetPages are stubs
      (GCCSDK's ARMEABISupport 1.08 needs them): they jump to kpmp_* here,
-     which keep each physical memory pool in a memfd.
+     which keep each physical memory pool in a memfd. (From RISC OS 5.31-3
+     the kernel does these itself, in c.LinuxC; its ROM has no stubs, so
+     find_kpmp_stubs finds none and this is left to the kernel.)
    - The SWI vector (OS_ClaimProcessorVector): OS_Memory 0 for application
      space and RISC OS's workspace (the port refuses; SoundDMA and
      ARMEABISupport 1.08 ask), and SWI &C0002/&C0003 and OS_DynamicArea 22

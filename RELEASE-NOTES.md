@@ -88,6 +88,19 @@ on an Apple Silicon Mac.
 Wi-Fi and PDFS with a real phone are untried on all of them. Please
 report what works.
 
+## Since 1.0.0006 (through Updates)
+
+These come through Configure → Updates; the next images will have them.
+
+| Package | What changed |
+|---|---|
+| RISC OS `5.31-2` | The RAM Linux can give RISC OS (up to 4GB) instead of a fixed figure, and the Task Manager's free memory from it; network statistics for programs that read them the old way (Internet 5's Socket_Sysctl, Socket_InternalLookup, and InetStat's connections and `-s`), so NetStats works; the version reads "RISC OS 5.31-2 (29 Oct 2026)" |
+| RISC OS `5.31-3` (to be built) | Proper RISC OS errors from HardDisc4 ("The disc has no more available space", "This item is locked...", "This file is already open"...) instead of Linux's names, the Locked attribute obeyed, and delete failures no longer lost; physical memory pool areas (for GCCSDK's ARMEABISupport 1.08) done by the kernel itself |
+| `riscos-support 1.0.0008-1` | `/dev/pts` mounted (apt could not write its log) |
+| `riscos-support 1.0.0009-1` | Restart (Ctrl+Break, the Shutdown box's Restart, `*Reset`) restarts the machine instead of switching it off |
+| `riscos-support 1.0.0011-1` | The screen: only what changed is redrawn, and moving the pointer doesn't redraw the screen |
+| `riscos-harddisc 1.0.0007-1` to `1.0.0010-1` | LinuxCodec 0.03 (the Raspberry Pi's H.264 decoder, multi-planar; whole pictures to the decoder, which had turned split pictures green), loaded at start-up |
+
 ## Version numbers
 
 Each release is 1.0.<build>. In
