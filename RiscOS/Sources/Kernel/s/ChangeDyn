@@ -4829,8 +4829,12 @@ DynArea_AddrLookup_loop
         BL      ValidatePMPs
       ]
   | ; PagedMemory
+        ; Linux: the free pool is a count of the pages not in use (c.LinuxC's
+        ; free_take/free_give), starting at RISC OS's RAM size (RAMLIMIT,
+        ; from Linux through the HAL) instead of a fixed 1GB
         LDR     r6, =ZeroPage+FreePoolDANode
-        MOV     r0, #0x40000
+        LDR     r0, =ZeroPage
+        LDR     r0, [r0, #RAMLIMIT]
         STR     r0, [r6, #DANode_PMPSize]
         STR     r0, [r6, #DANode_PMPMaxSize]
   ] ; PagedMemory

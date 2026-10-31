@@ -57,6 +57,25 @@ extern void VariformInternal(void);
 #define MY_MAP (ix_MAP_PRIVATE | ix_MAP_ANONYMOUS | ix_MAP_FIXED)
 #define PID_LENGTH 12
 
+// The free pool: memory comes from Linux as it's used, so there is no real
+// pool of pages. It starts as RISC OS's RAM size (RAMLIMIT, which the HAL
+// has from Linux) and is a count, in pages, of what isn't in use: growing
+// application space, a dynamic area or a Wimp slot takes from it (as much
+// as it has), shrinking or freeing gives back. The Task Manager's "Free"
+// shows it.
+static uint32_t free_take(uint32_t pages) {
+  uint32_t have = FreePoolDANode.PMPSize;
+  if (pages > have) pages = have;
+  FreePoolDANode.PMPSize = have - pages;
+  return pages;
+}
+
+static void free_give(uint32_t pages) {
+  FreePoolDANode.PMPSize += pages;
+  if (FreePoolDANode.PMPSize > FreePoolDANode.PMPMaxSize)
+    FreePoolDANode.PMPSize = FreePoolDANode.PMPMaxSize;
+}
+
 static inline uint32_t get_file_size(int fd) {
   struct ix_stat s;
   ix_fstat(fd, &s);
@@ -143,6 +162,10 @@ __value_in_regs struct MMresult do_MoveMemory(uint32_t number, int amount, struc
     // Clamp amount to maxinum area size.
     if (amount > da->MaxSize - da->Size) amount = da->MaxSize - da->Size;
 
+    // and to the memory there is (the free pool)
+    if ((uint32_t) amount / PageSize > FreePoolDANode.PMPSize) amount = FreePoolDANode.PMPSize * PageSize;
+    if (amount <= 0) goto error;
+
     // Call the handler
     int pages = amount / PageSize;
     if (da->Handler) {
@@ -178,6 +201,7 @@ __value_in_regs struct MMresult do_MoveMemory(uint32_t number, int amount, struc
 
     // Store new size
     da->Size = newSize;
+    free_take(amount / PageSize);
 
     // Reentry permitted.
     CDASemaphore = 0;
@@ -244,6 +268,7 @@ __value_in_regs struct MMresult do_MoveMemory(uint32_t number, int amount, struc
 
     // Store new size
     da->Size = newSize;
+    free_give(amount / PageSize);
 
     // Reentry permitted.
     CDASemaphore = 0;
@@ -340,6 +365,8 @@ __value_in_regs struct result do_AMBControlSWI(int reason, int r1, int handle, i
         size = max;
         r1 = max / PageSize;
       }
+      r1 = free_take(r1);
+      size = r1 * PageSize;
       AMBControl_ws[handle] = r1;
       ix_ftruncate(handle, size);
       mmap(0x8000, max, MY_PROT, ix_MAP_SHARED | ix_MAP_FIXED, handle, 0);
@@ -348,6 +375,7 @@ __value_in_regs struct result do_AMBControlSWI(int reason, int r1, int handle, i
       break;
     }
     case 1:
+      free_give(AMBControl_ws[handle]);
       ix_ftruncate(handle, 0);
       ix_close(handle);
       AMBControl_ws[handle] = 0;
@@ -364,6 +392,11 @@ __value_in_regs struct result do_AMBControlSWI(int reason, int r1, int handle, i
         size = max;
         r1 = max / PageSize;
       }
+      if ((uint32_t) r1 > (uint32_t) r3)
+        r1 = r3 + free_take(r1 - r3);
+      else
+        free_give(r3 - r1);
+      size = r1 * PageSize;
       AMBControl_ws[handle] = r1;
       ix_ftruncate(handle, size);
       if (AppSpaceDANode.File == handle) {
