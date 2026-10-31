@@ -670,7 +670,29 @@ static bool use_seccomp = true;
 
 unsigned __HAL_hwcap;
 unsigned __HAL_hwcap2;
+// RISC OS's RAM size in pages, from ROL_RAMSIZE_MB in the environment (the
+// memory Linux has free for RISC OS, which its start-up program works out):
+// 0 if not given, when the kernel uses its own default.
+unsigned __HAL_rampages;
 char **__HAL_get_env(void) { return environ; }
+
+static void read_ramsize(void) {
+  for (char **e = environ; *e; ++e) {
+    static const char name[] = "ROL_RAMSIZE_MB=";
+    int i = 0;
+    while (name[i] && (*e)[i] == name[i]) ++i;
+    if (!name[i]) {
+      unsigned mb = 0;
+      for (const char *c = *e + 15; *c >= '0' && *c <= '9'; ++c) {
+        mb = mb * 10 + (*c - '0');
+        if (mb > 4095) break;
+      }
+      if (mb > 4095) mb = 4095;   // below 4GB: the kernel's sums are 32-bit
+      if (mb >= 64) __HAL_rampages = mb << 8;
+      return;
+    }
+  }
+}
 
 int main(int argc, char **argv) {
   environ = argv + argc + 1;
@@ -697,6 +719,8 @@ int main(int argc, char **argv) {
     }
     auxv += 2;
   }
+
+  read_ramsize();
 
   bool highmem = false;
   bool cswi = false;

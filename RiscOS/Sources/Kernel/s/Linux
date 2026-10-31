@@ -20,6 +20,7 @@
         IMPORT  do_DynArea_AplSpaceLimit
         IMPORT  do_DynArea_AlterFile
         IMPORT  __HAL_hwcap
+        IMPORT  __HAL_rampages
 
         EXPORT  __rt_udiv
         EXPORT  CheckAppSpace
@@ -185,11 +186,15 @@ ARM_Analyse
         MOV     a1, #0x1000
         STR     a1, [a2, #Page_Size]
 
-        ; RAM size in pages: 3GB (was 1GB, 0x40000). Memory comes from Linux
-        ; as it's used, so this is what RISC OS reports (*Fx 0, Task
-        ; Manager) and the most one dynamic area may be; it must stay below
-        ; 4GB (the kernel's sums are 32-bit).
-        MOV     a1, #0xC0000
+        ; RAM size in pages. Memory comes from Linux as it's used, so this
+        ; is what RISC OS reports (*Fx 0, Task Manager) and the most one
+        ; dynamic area may be. The HAL has it from ROL_RAMSIZE_MB (the
+        ; memory Linux has free for RISC OS, up to 4095MB: it must stay
+        ; below 4GB, the kernel's sums are 32-bit); without that, 3GB.
+        LDR     a1, =__HAL_rampages
+        LDR     a1, [a1]
+        TEQ     a1, #0
+        MOVEQ   a1, #0xC0000
         STR     a1, [a2, #RAMLIMIT]
 
         MOV     a1, #0x1000000
