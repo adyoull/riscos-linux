@@ -1093,7 +1093,7 @@ clampi (int v, int lo, int hi)
    RISC OS can always be left. What each of its threads was doing goes to
    the log first. */
 static pid_t riscos_pid;
-static int ctrl_l, ctrl_r, alt_l, alt_r, hard_quit;
+static int ctrl_l, ctrl_r, alt_l, alt_r, shift_l, shift_r, hard_quit;
 
 /* A running thread: where it is. Stopped (ptrace, no signal), its
    registers read, let go, a few times over: a hung RISC OS shows the loop
@@ -1207,12 +1207,39 @@ read_input (int i)
 		case KEY_RIGHTCTRL: ctrl_r = down; break;
 		case KEY_LEFTALT: alt_l = down; break;
 		case KEY_RIGHTALT: alt_r = down; break;
+		case KEY_LEFTSHIFT: shift_l = down; break;
+		case KEY_RIGHTSHIFT: shift_r = down; break;
 		}
 	      if (down && (ctrl_l || ctrl_r)
 		  && (((e->code == KEY_PAUSE || e->code == KEY_BREAK) && !(alt_l || alt_r))
 		      || (e->code == KEY_BACKSPACE && (alt_l || alt_r))))
 		{
 		  stop_riscos ();
+		  continue;
+		}
+	      /* Alt+Break is RISC OS's own (the Wimp offers to stop the task
+		 that isn't letting go): Break is passed on as key 15. For
+		 keyboards without Break (a Mac's), Alt+Shift+Backspace is
+		 Break too. */
+	      if (e->code == KEY_BACKSPACE && (alt_l || alt_r) && (shift_l || shift_r)
+		  && !(ctrl_l || ctrl_r))
+		{
+		  if (down)
+		    {
+		      /* RISC OS mustn't see Shift with it (Shift+Break
+			 restarts RISC OS): let go of Shift round it */
+		      int ls = linux2ro[KEY_LEFTSHIFT], rs = linux2ro[KEY_RIGHTSHIFT];
+		      if (shift_l && ls >= 0)
+			send_report (R_KEYUP, ls, 0, 0);
+		      if (shift_r && rs >= 0)
+			send_report (R_KEYUP, rs, 0, 0);
+		      send_report (R_KEYDOWN, 15, 0, 0);
+		      send_report (R_KEYUP, 15, 0, 0);
+		      if (shift_l && ls >= 0)
+			send_report (R_KEYDOWN, ls, 0, 0);
+		      if (shift_r && rs >= 0)
+			send_report (R_KEYDOWN, rs, 0, 0);
+		    }
 		  continue;
 		}
 	      switch (e->code)
