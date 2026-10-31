@@ -1,6 +1,6 @@
-RISC OS on Linux 1.0.0001 for the Windows Dev Kit 2023 ("Project Volterra")
+RISC OS on Linux 1.0.0002 for the Windows Dev Kit 2023 ("Project Volterra")
 ===========================================================================
-Version 1.0, build 0001 (30 October 2026): Timothy
+Version 1.0, build 0002 (31 October 2026): Timothy
 Baldwin's Linux port of RISC OS 5 (RISC OS 5.31) with RISC OS Open's
 HardDisc4 5.30, on Debian 13 (minimal) with the mainline 7.2 kernel. The same system as the generic
 image (Raspberry Pi, UEFI machines, Pinebooks). The Dev Kit's processor (Snapdragon 8cx Gen 3) runs 32-bit ARM
@@ -82,6 +82,12 @@ start-riscos.sh gives you Linux's desktop back. What RISC OS was doing
 goes into the log first. Alt+Break works as on RISC OS (the Task
 manager offers to stop the current application) while RISC OS still
 responds.
+The disc: at each start, if the USB disc is bigger than the image, the
+Linux partition and its file system are enlarged to fill it (HardDisc4
+gets all the space). An empty file called NOGROW on this (EFI) partition
+stops that. The start-up logs are also copied to LOGS on this partition
+for the first three minutes, for reading on another computer.
+
 Start-up log: IXFS:$.riscos.log/txt in RISC OS (/riscos/log.txt on the
 Linux partition).
 

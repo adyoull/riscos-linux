@@ -171,6 +171,10 @@ drm_pick (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id)
 	    break;
 	  }
       *mode = modes[best];
+      fprintf (stderr, "rol-fb: connector %u (type %u-%u): %u modes, using %ux%u %u Hz%s\n",
+	       conns[i], c.connector_type, c.connector_type_id, c.count_modes,
+	       modes[best].hdisplay, modes[best].vdisplay, modes[best].vrefresh,
+	       modes[best].type & DRM_MODE_TYPE_PREFERRED ? " (preferred)" : "");
       *conn_id = conns[i];
       *crtc_id = crtcs[0];
       if (c.encoder_id)
@@ -179,6 +183,7 @@ drm_pick (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id)
 	  if (!ioctl (drm_fd, DRM_IOCTL_MODE_GETENCODER, &e) && e.crtc_id)
 	    *crtc_id = e.crtc_id;
 	}
+      fprintf (stderr, "rol-fb: encoder %u, CRTC %u\n", c.encoder_id, *crtc_id);
       return 0;
     }
   return -1;
@@ -306,6 +311,8 @@ drm_open (void)
       if (drm_fd >= 0)
 	close (drm_fd);
       drm_fd = open (path, O_RDWR | O_CLOEXEC);
+      if (drm_fd >= 0)
+	fprintf (stderr, "rol-fb: trying %s\n", path);
       if (drm_fd >= 0 && drm_pick (&mode, &drm_conn, &drm_crtc) == 0)
 	{
 	  host_w = mode.hdisplay;

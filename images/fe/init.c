@@ -27,7 +27,11 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <stdint.h>
+#include <limits.h>
 static void net_time (const char *dns);
+static int nogrow;
+static char fat_dev[96];
 
 /* "Raspberry Pi 5 Model B Rev 1.0" etc., or "" (a VM) */
 static char model[128];
@@ -792,6 +796,7 @@ reset_root_password (void)
     closedir (dir);
   if (!dev[0])
     return;
+  snprintf (fat_dev, sizeof fat_dev, "%s", dev);
   mkdir ("/run/fat", 0700);
   if (mount (dev, "/run/fat", "vfat", MS_NOSUID | MS_NODEV | MS_NOEXEC, "shortname=mixed"))
     return;
@@ -805,6 +810,7 @@ reset_root_password (void)
   if (unlink ("/run/fat/ROLLBACK.TXT") == 0)
     rollback = 1;
   sync ();
+  nogrow = access ("/run/fat/NOGROW", F_OK) == 0 || access ("/run/fat/NOGROW.TXT", F_OK) == 0;
   umount ("/run/fat");
   rmdir ("/run/fat");
   /* ROLLBACK: the RISC OS ROM an update replaced (kept by riscos-rom's
@@ -854,6 +860,255 @@ reset_root_password (void)
   memset (buf, 0, sizeof buf);
 }
 
+/* The logs on the FAT partition too (LOGS/riscos-log.txt and
+   LOGS/kernel-log.txt), which any computer can read: when the screen
+   stays dark, start, wait a minute or two, switch off and look there.
+   Copied every 15 seconds for the first 3 minutes, and as RISC OS ends. */
+static void
+fat_logs_once (void)
+{
+  if (!fat_dev[0])
+    return;
+  mkdir ("/run/fatlog", 0700);
+  if (mount (fat_dev, "/run/fatlog", "vfat", MS_NOSUID | MS_NODEV | MS_NOEXEC, "shortname=mixed"))
+    return;
+  mkdir ("/run/fatlog/LOGS", 0755);
+  copy_file ("/riscos/log.txt", "/run/fatlog/LOGS/riscos-log.txt");
+  copy_file ("/riscos/kernel-log.txt", "/run/fatlog/LOGS/kernel-log.txt");
+  sync ();
+  umount ("/run/fatlog");
+}
+
+static void
+fat_logs (void)
+{
+  if (!fat_dev[0] || fork () != 0)
+    return;
+  for (int i = 0; i < 12; i++)
+    {
+      sleep (15);
+      fat_logs_once ();
+    }
+  _exit (0);
+}
+
+/* The root file system fills the disc: an image written to a bigger card
+   or disc (or a VM's disc made bigger) has room after the last partition.
+   At each start, if the root partition is the disc's last and at least
+   64 MB follows it, the partition table (MBR, or GPT with its backup moved
+   to the new end) is changed to end at the disc's end, the kernel told
+   (BLKPG), and ext4 grown while mounted (EXT4_IOC_RESIZE_FS, as resize2fs
+   does). A file NOGROW on the FAT partition (or /riscos/nogrow) stops it. */
+#include <linux/blkpg.h>
+#include <sys/statfs.h>
+#define EXT4_IOC_RESIZE_FS _IOW('f', 16, unsigned long long)
+
+static unsigned long long
+sysfs_num (const char *path)
+{
+  char b[64];
+  int fd = open (path, O_RDONLY | O_CLOEXEC);
+  ssize_t n = fd >= 0 ? read (fd, b, sizeof b - 1) : -1;
+  if (fd >= 0)
+    close (fd);
+  if (n <= 0)
+    return 0;
+  b[n] = 0;
+  return strtoull (b, NULL, 10);
+}
+
+static uint32_t
+crc32_gpt (const unsigned char *p, size_t n)
+{
+  uint32_t c = 0xFFFFFFFFu;
+  while (n--)
+    {
+      c ^= *p++;
+      for (int k = 0; k < 8; k++)
+	c = (c >> 1) ^ (0xEDB88320u & -(c & 1));
+    }
+  return ~c;
+}
+
+static int
+rw_at (int fd, void *buf, size_t n, unsigned long long off, int wr)
+{
+  ssize_t r = wr ? pwrite (fd, buf, n, off) : pread (fd, buf, n, off);
+  return r == (ssize_t) n ? 0 : -1;
+}
+
+static uint64_t le64 (const unsigned char *p) { uint64_t v = 0; for (int i = 7; i >= 0; i--) v = v << 8 | p[i]; return v; }
+static uint32_t le32 (const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t) p[3] << 24; }
+static void put64 (unsigned char *p, uint64_t v) { for (int i = 0; i < 8; i++, v >>= 8) p[i] = v; }
+static void put32 (unsigned char *p, uint32_t v) { for (int i = 0; i < 4; i++, v >>= 8) p[i] = v; }
+
+static void
+grow_root (void)
+{
+  if (nogrow || access ("/riscos/nogrow", F_OK) == 0)
+    return;
+  struct stat st;
+  if (stat ("/", &st) != 0)
+    return;
+  char part[128], path[256], disk[64] = "";
+  snprintf (part, sizeof part, "/sys/dev/block/%u:%u", major (st.st_dev), minor (st.st_dev));
+  snprintf (path, sizeof path, "%s/partition", part);
+  unsigned pno = sysfs_num (path);
+  if (!pno)
+    return;			/* not a partition */
+  /* the disc: the partition's parent directory in sysfs */
+  char real[PATH_MAX];
+  if (!realpath (part, real))
+    return;
+  char *slash = strrchr (real, '/');
+  if (!slash)
+    return;
+  *slash = 0;
+  char *dn = strrchr (real, '/');
+  if (!dn)
+    return;
+  snprintf (disk, sizeof disk, "%s", dn + 1);
+  snprintf (path, sizeof path, "%s/start", part);
+  unsigned long long start = sysfs_num (path);	/* 512-byte units */
+  snprintf (path, sizeof path, "%s/size", part);
+  unsigned long long size = sysfs_num (path);
+  snprintf (path, sizeof path, "/sys/block/%s/size", disk);
+  unsigned long long dsize = sysfs_num (path);
+  snprintf (path, sizeof path, "/sys/block/%s/queue/logical_block_size", disk);
+  unsigned lbs = sysfs_num (path);
+  if (!start || !size || !dsize || (lbs != 512 && lbs != 4096))
+    return;
+  /* the last partition? (no other starts after this one) */
+  DIR *d = opendir (real);
+  if (!d)
+    return;
+  struct dirent *e;
+  int last = 1;
+  while ((e = readdir (d)))
+    if (!strncmp (e->d_name, disk, strlen (disk)) && strcmp (e->d_name, disk))
+      {
+	snprintf (path, sizeof path, "%s/%s/start", real, e->d_name);
+	if (sysfs_num (path) > start)
+	  last = 0;
+      }
+  closedir (d);
+  /* room after it: the GPT's backup takes 33 sectors (6 of 4096) */
+  unsigned long long spl = lbs / 512;	/* 512-byte units per sector */
+  unsigned long long dsec = dsize / spl;
+  unsigned long long reserve = lbs == 512 ? 34 : 6;
+  if (!last || dsize < start + size + 131072 + reserve * spl)
+    return;
+  snprintf (path, sizeof path, "/dev/%s", disk);
+  int fd = open (path, O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  unsigned char s0[4096], hdr[4096];
+  if (rw_at (fd, s0, lbs, 0, 0))
+    goto out;
+  if (s0[510] != 0x55 || s0[511] != 0xAA)
+    goto out;
+  unsigned long long pstart = start / spl, newsec;	/* in sectors */
+  int gpt = 0;
+  for (int i = 0; i < 4; i++)
+    if (s0[446 + 16 * i + 4] == 0xEE)
+      gpt = 1;
+  if (!gpt)
+    {
+      if (pno > 4)
+	goto out;		/* a logical partition: leave it */
+      unsigned char *ent = s0 + 446 + 16 * (pno - 1);
+      if (le32 (ent + 8) != pstart)
+	goto out;
+      unsigned long long end = dsec > 0xFFFFFFFFull ? 0xFFFFFFFFull : dsec;
+      newsec = (end - pstart) & ~2047ull;	/* whole MiBs */
+      if (newsec <= size / spl)
+	goto out;
+      put32 (ent + 12, newsec);
+      if (rw_at (fd, s0, lbs, 0, 1))
+	goto out;
+    }
+  else
+    {
+      if (rw_at (fd, hdr, lbs, lbs, 0) || memcmp (hdr, "EFI PART", 8))
+	goto out;
+      uint32_t hsz = le32 (hdr + 12);
+      uint64_t elba = le64 (hdr + 72);
+      uint32_t nent = le32 (hdr + 80), esz = le32 (hdr + 84);
+      if (hsz < 92 || hsz > lbs || esz < 128 || nent > 1024 || (uint64_t) nent * esz > 1024 * 1024)
+	goto out;
+      size_t tb = (size_t) nent * esz;
+      size_t tsec = (tb + lbs - 1) / lbs;
+      unsigned char *tab = calloc (tsec, lbs);
+      if (!tab || rw_at (fd, tab, tsec * lbs, elba * lbs, 0))
+	{ free (tab); goto out; }
+      unsigned char *ent = tab + (size_t) (pno - 1) * esz;
+      if (pno > nent || le64 (ent + 32) != pstart)
+	{ free (tab); goto out; }
+      uint64_t lastusable = dsec - 1 - tsec - 1;
+      uint64_t newend = ((lastusable + 1) & ~(2048ull / spl - 1)) - 1;	/* whole MiBs */
+      if (newend <= le64 (ent + 40))
+	{ free (tab); goto out; }
+      put64 (ent + 40, newend);
+      newsec = newend - pstart + 1;
+      uint32_t tcrc = crc32_gpt (tab, tb);
+      /* primary: header (alternate at the new end) and its table */
+      put64 (hdr + 32, dsec - 1);
+      put64 (hdr + 48, lastusable);
+      put32 (hdr + 88, tcrc);
+      put32 (hdr + 16, 0);
+      put32 (hdr + 16, crc32_gpt (hdr, hsz));
+      /* backup: the table just before the last sector, then its header */
+      unsigned char bh[4096];
+      memcpy (bh, hdr, lbs);
+      put64 (bh + 24, dsec - 1);
+      put64 (bh + 32, 1);
+      put64 (bh + 72, dsec - 1 - tsec);
+      put32 (bh + 16, 0);
+      put32 (bh + 16, crc32_gpt (bh, hsz));
+      int bad = rw_at (fd, tab, tsec * lbs, (elba) * lbs, 1)
+	|| rw_at (fd, tab, tsec * lbs, (dsec - 1 - tsec) * lbs, 1)
+	|| rw_at (fd, bh, lbs, (dsec - 1) * lbs, 1)
+	|| rw_at (fd, hdr, lbs, lbs, 1);
+      free (tab);
+      if (bad)
+	goto out;
+      /* the protective MBR covers the whole disc */
+      for (int i = 0; i < 4; i++)
+	if (s0[446 + 16 * i + 4] == 0xEE)
+	  put32 (s0 + 446 + 16 * i + 12, dsec - 1 > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t) (dsec - 1));
+      rw_at (fd, s0, lbs, 0, 1);
+    }
+  fsync (fd);
+  /* the kernel's idea of the partition, while it's mounted */
+  struct blkpg_partition bp = { 0 };
+  bp.pno = pno;
+  bp.start = (long long) pstart * lbs;
+  bp.length = (long long) newsec * lbs;
+  struct blkpg_ioctl_arg ba = { .op = BLKPG_RESIZE_PARTITION, .datalen = sizeof bp, .data = &bp };
+  if (ioctl (fd, BLKPG, &ba) != 0)
+    {
+      say ("Root partition enlarged: the file system grows at the next start\n", "");
+      goto out;
+    }
+  struct statfs sf;
+  int rfd = open ("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (rfd >= 0 && fstatfs (rfd, &sf) == 0 && sf.f_bsize)
+    {
+      unsigned long long blocks = (unsigned long long) newsec * lbs / sf.f_bsize;
+      char m[64];
+      snprintf (m, sizeof m, "%llu MB", (unsigned long long) newsec * lbs >> 20);
+      say ("Growing the file system to fill the disc (%s)...\n", m);
+      if (ioctl (rfd, EXT4_IOC_RESIZE_FS, &blocks) == 0)
+	say ("The file system now fills the disc (%s)\n", m);
+      else
+	say ("Couldn't grow the file system: %s\n", strerror (errno));
+    }
+  if (rfd >= 0)
+    close (rfd);
+out:
+  close (fd);
+}
+
 int
 main (void)
 {
@@ -869,6 +1124,8 @@ main (void)
   mount (NULL, "/", NULL, MS_REMOUNT, NULL);
   kernel_log ();
   reset_root_password ();
+  grow_root ();
+  fat_logs ();
   if (sethostname ("riscos", 6)) { }
   /* overcommit: the port reserves big address ranges */
   int fd = open ("/proc/sys/vm/overcommit_memory", O_WRONLY);
@@ -1078,6 +1335,7 @@ main (void)
   if (log >= 0)
     close (log);
   sync ();
+  fat_logs_once ();
   if (time (NULL) - t0 < 20)
     {
       char s[16];

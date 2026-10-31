@@ -1,6 +1,6 @@
-# RISC OS on Linux 1.0.0001 (30 October 2026)
+# RISC OS on Linux 1.0.0002 (31 October 2026)
 
-The first release: version 1.0, build 0001.
+The first release: version 1.0, build 0002.
 
 RISC OS 5.31 (RISC OS Open's nightly of 29 October 2026, in Timothy
 Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
@@ -10,7 +10,7 @@ Baldwin's Linux port) on Debian 13, for 64-bit ARM machines.
 | Image | For | File |
 |---|---|---|
 | Generic | Raspberry Pi 3/3B+/CM3, Zero 2 W, 4/400/CM4, 5/500/CM5; UEFI machines (UTM, QEMU, ARM boards and servers); Pinebook and Pinebook Pro | `riscos-generic.img.xz` |
-| UTM | Apple Silicon Macs | `RISC OS 1.0.0001.utm` |
+| UTM | Apple Silicon Macs | `RISC OS 1.0.0002.utm` |
 | Windows Dev Kit 2023 | Snapdragon 8cx Gen 3 ("Project Volterra") | `riscos-wdk2023.img.xz` |
 
 Write the .img.xz to a card or USB disc with Raspberry Pi Imager ("Use
@@ -49,8 +49,13 @@ machine off.
   "RISC OS 5.31 (29 Oct 2026) nightly".
 - **Wi-Fi:** Raspberry Pi 4/5/500/CM4/CM5, Pinebook and Pinebook Pro
   (Configure → Linux network).
+- **The whole disc:** the Linux partition grows to fill a bigger card or
+  disc at the next start (an empty `NOGROW` file on the FAT partition
+  stops it).
+- **Logs you can read anywhere:** the start-up logs are copied to `LOGS`
+  on the FAT partition, for a machine whose screen stays dark.
 - **In UTM**, only RISC OS's pointer shows (UTM's own arrow is hidden).
-- **Included:** ROBench, PDFS 0.15 beta, the VideoCore stand-ins, PackMan,
+- **Included:** ROBench, PDFS 0.16 beta, the VideoCore stand-ins, PackMan,
   and GCCSDK's UnixLib modules. Iris isn't included: get it from
   riscosdev.com or PackMan.
 
@@ -77,7 +82,7 @@ report what works.
 
 Each release is 1.0.<build>, and each package in
 [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg) carries the
-build it came from (`1.0.0001-1`). RISC OS itself is 5.31; the modules
+build it came from (`1.0.0002-1`). RISC OS itself is 5.31; the modules
 keep their own versions.
 
 ## Source and licences
