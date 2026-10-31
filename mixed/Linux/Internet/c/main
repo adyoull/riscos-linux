@@ -549,18 +549,19 @@ extern void raise_event(void);
 // Socket_InternalLookup's counters: a ticker once a second, which only
 // asks for a callback (the work, reading Linux's files, is done there)
 
-int stats_tick_handler(_kernel_swi_regs *r, void *pw) {
+// (cmhg's generic veneers: the handlers return an error or NULL)
+_kernel_oserror *stats_tick_handler(_kernel_swi_regs *r, void *pw) {
   (void)r;
   if (!stats_pending && !_swix(OS_AddCallBack, _INR(0, 1), stats_callback, pw))
     stats_pending = true;
-  return 1;
+  return NULL;
 }
 
-int stats_callback_handler(_kernel_swi_regs *r, void *pw) {
+_kernel_oserror *stats_callback_handler(_kernel_swi_regs *r, void *pw) {
   (void)r; (void)pw;
   stats_pending = false;
   rol_stats_refresh();
-  return 1;
+  return NULL;
 }
 
 _kernel_oserror *final(int fatal, int podule, void *pw) {

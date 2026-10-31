@@ -314,7 +314,8 @@ PMP_Node
         BEQ     %FT90
         CLRV
         Pull    "pc"
-90      SETV
+90
+        SETV
         Pull    "pc"
 
 ; void *pmp_heap_claim(uint32_t bytes): a block from the system heap, or 0
