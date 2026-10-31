@@ -58,10 +58,21 @@ for Linux/PVOps lines that went missing.
 - RiscOS/Sources/SystemRes/InetRes/Sources/md5/md5.1 has conflict markers in
   upstream's own copy; left alone.
 
-## This branch
+## RISC OS on Linux changes since the merge
 
-A snapshot of the merge (port commit 8c7c47521 on top of Timothy Baldwin's
-RISC_OS_Linux_Source, 30 October 2026), as built into the RISC OS on Linux
-images' riscos-rom 5.31.0.1. Its history is in Timothy Baldwin's repository
-(https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source) and RISC OS Open's
-(https://gitlab.riscosopen.org). Unix/RISC_OS is a submodule there.
+Each is one commit on this branch; the commit message has the detail. All
+are inside `[ Linux` / `MEMM_Type = "Linux"` conditions or Linux-only
+directories, so other machines' builds are unchanged.
+
+| Change | Where | Notes for whoever maintains it |
+|---|---|---|
+| Version string `RISC OS 5.31-N (date)` | `NightlyDate`, `BuildNumber`, `Unix/LinuxSupport/build.mk` (writes `Kernel/hdr/AutoVersion`) | Bump `BuildNumber` for each ROM published; `NightlyDate` when merging a newer nightly. The native DDE build (BuildROM) uses the `AutoVersion` in the source zip, so regenerate it when making the zip. |
+| RAM size from Linux | HAL `c.Main` (`read_ramsize`, `__HAL_rampages`), `HALSyms`, Kernel `s.Linux` (RAMLIMIT) | `ROL_RAMSIZE_MB` comes from the image's init (MemAvailable less what Linux needs). Kept below 4GB: the kernel's sums are 32-bit. |
+| Free pool as a count | Kernel `c.LinuxC` (`free_take`, `free_give`), `s.ChangeDyn` | Memory comes from Linux as it's used; the free pool is only bookkeeping, so the Task Manager's Free is right. Anything that takes or gives memory must go through these two. |
+| Network statistics (Internet 5's interface) | `mixed/Linux/Internet/c/sysctl`, `c/main`, `cmhg/InternetLHdr` | Socket_Sysctl (iflist, routes, tcp/udp/ip stats, tcp/udp pcblist, name2oid), Socket_InternalLookup (_tcpstat...), Socket_Version 573. The struct layouts are RISC OS's TCPIPLibs ones (u_quad_t is 32 bits): if TCPIPLibs changes, re-check them (the offsets are listed in the file). Host test: compile `c/sysctl` with `-DROL_HOSTTEST`. |
+| IXFS errors and the L attribute | `mixed/Linux/IXSupport/c/fs` (`fs_error`, `lock_error`, `is_locked_*`) | Linux errors become FileCore's (low byte as programs test it) in IXFS's range &1C5xx. Errors not in `fs_error` still get IXSupport's `convert_error` names. |
+| Physical memory pool areas | Kernel `c.LinuxC` (`do_PMP_*`), `s.Linux` (veneers), `s.ChangeDyn` (creation, `DAR_delink`) | A memory file per area; c.LinuxC's records hang off one extra word at the end of the kernel's pool array (`phys[PMPMaxSize]`), so anything that resizes that array must keep the extra word. Tested on Linux with the C compiled for ARM (see the commit). |
+| `fallocate`, `mprotect` | `mixed/Linux/Syscalls/GenSyscall` | LARGE/SMALL arguments are now stripped from every argument of the prototype. |
+
+Not in this tree (they're in riscos-linux-testbed / riscos-linux): the image's
+init, rol-fb, LinuxCodec, NetWatch, the packages.
