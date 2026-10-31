@@ -93,9 +93,10 @@ report what works.
 Each release is 1.0.<build>. In
 [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg), RISC OS, its
 Linux side and the desktop parts carry the build they came from
-(`1.0.0004-1`); the kernels keep their own versions with a build count
-after the hyphen (the Pi's `6.6.78-2`, the others' `7.2.0-1`). RISC OS
-itself is 5.31; the modules keep their own versions.
+(`1.0.0004-1`); RISC OS itself and the kernels keep their own versions
+with a build count after the hyphen (RISC OS `5.31-2`, shown as "RISC OS
+5.31-2 (29 Oct 2026)" from its next build; the Pi's kernel `6.6.78-2`, the
+others' `7.2.0-1`). The modules keep their own versions.
 
 ## Source and licences
 
