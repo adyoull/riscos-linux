@@ -1578,6 +1578,18 @@ main (void)
     }
   if (log >= 0)
     close (log);
+  if (status == 100)
+    {
+      /* HAL_Reset with a restart (Ctrl+Break, the Shutdown box's
+	 Restart, *Reset): restart the machine, as on real hardware. */
+      splash ("RISC OS is restarting: saving the clock and the logs");
+      save_time ();
+      sync ();
+      fat_logs_once ();
+      say ("RISC OS is restarting the machine.\n", "");
+      sync ();
+      reboot (RB_AUTOBOOT);
+    }
   int quick = time (NULL) - t0 < 20;
   if (!quick)
     splash ("RISC OS has ended: saving the clock and the logs, then switching off");
