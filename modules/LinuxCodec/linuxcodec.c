@@ -160,6 +160,8 @@ typedef struct decoder
   unsigned ncap;
   unsigned coded_w, coded_h, bpl, sizeimage, vis_w, vis_h;
   unsigned decoded, queued_bytes;
+  unsigned char *acc;		/* the stream not yet given to Linux */
+  unsigned acc_n, acc_ts;
   unsigned block[12];		/* the picture block GetFrame returns */
   unsigned cap_gen;		/* counts capture set-ups */
   int ovfd;			/* the connection to rol-fb's overlay, or -1 */
@@ -345,6 +347,9 @@ release_decoder (decoder *d)
   unmap_all (d->cap, d->ncap);
   unmap_all (d->out, OUT_BUFS);
   lsys (NR_close, (unsigned) d->fd, 0, 0, 0, 0, 0);
+  if (d->acc)
+    rma_free (d->acc);
+  d->acc = 0;
   d->magic = 0;
 }
 
@@ -397,6 +402,13 @@ codec_open (regs *r)
   d->mp = kind == 2;
   d->out_t = d->mp ? BUF_OUTPUT_MPLANE : BUF_OUTPUT;
   d->cap_t = d->mp ? BUF_CAPTURE_MPLANE : BUF_CAPTURE;
+  d->acc = rma_claim (OUT_SIZE);
+  if (!d->acc)
+    {
+      release_decoder (d);
+      rma_free (d);
+      return ERR (no_memory);
+    }
   /* the compressed side (width, height and pixelformat are in the same
      places in both forms of the format) */
   struct format f;
@@ -557,6 +569,74 @@ reap_output (decoder *d)
     }
 }
 
+/* Where the next access unit (picture) starts in the H.264 stream
+   (Annex B), after the one at the start: a slice (NAL 1 or 5) beginning
+   a new picture (first_mb_in_slice 0, so its first bit is 1), or an SEI,
+   SPS, PPS or access unit delimiter (6 to 9), once a slice has been seen.
+   0 if the stream so far doesn't show where it ends. */
+static unsigned
+next_au (const unsigned char *a, unsigned n)
+{
+  int slice = 0;
+  for (unsigned i = 0; i + 4 < n; i++)
+    {
+      if (a[i] || a[i + 1] || a[i + 2] != 1)
+	continue;
+      unsigned start = i > 0 && a[i - 1] == 0 ? i - 1 : i;
+      unsigned t = a[i + 3] & 31;
+      if (t == 1 || t == 5)
+	{
+	  if (slice && (a[i + 4] & 0x80) && start > 0)
+	    return start;
+	  slice = 1;
+	}
+      else if (t >= 6 && t <= 9)
+	{
+	  if (slice && start > 0)
+	    return start;
+	}
+      i += 2;
+    }
+  return 0;
+}
+
+/* gives Linux's decoder the first n bytes of the stream held back (one
+   picture: the Pi's decoder takes each buffer as a whole picture); 0 if
+   no buffer is free */
+static int
+queue_au (decoder *d, unsigned n)
+{
+  for (unsigned i = 0; i < OUT_BUFS; i++)
+    if (!d->out_busy[i] && d->out[i].addr)
+      {
+	if (n > d->out[i].length)
+	  n = d->out[i].length;
+	memcpy (d->out[i].addr, d->acc, n);
+	struct buffer b;
+	struct plane pl;
+	buf_init (d, &b, &pl, d->out_t, i);
+	b.bytesused = n;
+	pl.bytesused = n;
+	b.ts_sec = (int) d->acc_ts;
+	if (xioctl (d->fd, VIDIOC_QBUF, &b) < 0)
+	  return -1;
+	d->out_busy[i] = 1;
+	d->queued_bytes += n;
+	memmove (d->acc, d->acc + n, d->acc_n - n);
+	d->acc_n -= n;
+	return 1;
+      }
+  return 0;
+}
+
+static unsigned
+monotonic (void)
+{
+  regs r;
+  swix_regs (OS_ReadMonotonicTime, &r);
+  return r.r[0];
+}
+
 static oserror *
 codec_decode (regs *r)
 {
@@ -568,6 +648,20 @@ codec_decode (regs *r)
     return ERR (linux_failed);
   if (r->r[4] & 1)
     {
+      /* the end of the stream: what's held back is the last picture */
+      unsigned t0 = monotonic ();
+      while (d->acc_n)
+	{
+	  int q = queue_au (d, d->acc_n);
+	  if (q < 0)
+	    return ERR (linux_failed);
+	  if (q == 0)
+	    {
+	      if (monotonic () - t0 > 200)
+		break;
+	      reap_output (d);
+	    }
+	}
       struct decoder_cmd c;
       memset (&c, 0, sizeof c);
       c.cmd = DEC_CMD_STOP;
@@ -575,27 +669,36 @@ codec_decode (regs *r)
       r->r[2] = 0;
       return 0;
     }
-  unsigned taken = 0;
-  for (unsigned i = 0; i < OUT_BUFS; i++)
-    if (!d->out_busy[i] && d->out[i].addr)
-      {
-	unsigned n = r->r[2];
-	if (n > d->out[i].length)
-	  n = d->out[i].length;
-	memcpy (d->out[i].addr, (const void *) r->r[1], n);
-	struct buffer b;
-	struct plane pl;
-	buf_init (d, &b, &pl, d->out_t, i);
-	b.bytesused = n;
-	pl.bytesused = n;
-	b.ts_sec = (int) r->r[3];
-	if (xioctl (d->fd, VIDIOC_QBUF, &b) < 0)
-	  return ERR (linux_failed);
-	d->out_busy[i] = 1;
-	d->queued_bytes += n;
-	taken = n;
+  const unsigned char *src = (const unsigned char *) r->r[1];
+  unsigned left = r->r[2], taken = 0;
+  for (;;)
+    {
+      unsigned e = next_au (d->acc, d->acc_n);
+      if (!e && d->acc_n == OUT_SIZE)
+	e = OUT_SIZE;		/* a picture bigger than a buffer: as it is */
+      if (e)
+	{
+	  int q = queue_au (d, e);
+	  if (q < 0)
+	    return ERR (linux_failed);
+	  if (q == 0)
+	    break;		/* no buffer: take pictures, then call again */
+	  d->acc_ts = r->r[3];
+	  continue;
+	}
+      if (!left)
 	break;
-      }
+      unsigned m = OUT_SIZE - d->acc_n;
+      if (m > left)
+	m = left;
+      if (d->acc_n == 0)
+	d->acc_ts = r->r[3];
+      memcpy (d->acc + d->acc_n, src, m);
+      d->acc_n += m;
+      src += m;
+      left -= m;
+      taken += m;
+    }
   r->r[2] = taken;
   return 0;
 }

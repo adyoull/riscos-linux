@@ -1,4 +1,4 @@
-LinuxCodec 0.01 (30 October 2026)
+LinuxCodec 0.03 (31 October 2026)
 =================================
 Linux's video decoders for RISC OS programs, on RISC OS for Linux running
 natively. On a Raspberry Pi 3 or 4 that's VideoCore's H.264 decoder
@@ -36,6 +36,10 @@ LinuxCodec_Decode (&5A442)
   the decoder then gives out the pictures it still holds)
   -> r2 = bytes taken. 0 means no buffer was free: take pictures with
   GetFrame, then call again with the rest.
+  The data can be cut anywhere: LinuxCodec holds it back and gives
+  Linux's decoder one whole picture at a time (the Pi's decoder takes
+  each buffer as a complete picture; a picture cut in two came out with
+  its lower part green).
 LinuxCodec_GetFrame (&5A443)
   r0 = handle  ->  r0 -> picture block, or 0 if none is ready yet
   The block (valid until the picture is released):
