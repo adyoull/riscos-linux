@@ -267,7 +267,8 @@ static int do_select(int *restrict r) {
   struct timeval *timeout1 = (void*)r[4];
   long timeout = -1;
   if (timeout1) {
-    timeout = timeout1->tv_sec * 100 + timeout1->tv_usec / 10000;
+    // In centiseconds, rounded up, so that a timeout under 1cs still waits
+    timeout = timeout1->tv_sec * 100 + (timeout1->tv_usec + 9999) / 10000;
     if (timeout) _swix(OS_CallAfter, _INR(0, 2), timeout, select_timeout, &select_pollwords[pwi].s.timeout);
   }
 
@@ -287,6 +288,11 @@ static int do_select(int *restrict r) {
     }
 
     if (ready) break;
+    // The timeout's ticker event (select_timeout) has set .s.timeout: return
+    // 0. Without this the loop never ended: the pollword stays non-zero, so
+    // pollword_sleep returns at once and the loop spun at full speed until
+    // some socket became ready (TubeSearch/!REEL hung the machine).
+    if (timeout > 0 && select_pollwords[pwi].s.timeout) break;
     pollword_sleep(sleeptw, &select_pollwords[pwi]);
   }
   if (timeout > 0) _swix(OS_RemoveTickerEvent, _INR(0, 1) , select_timeout, &select_pollwords[pwi].s.timeout);
@@ -573,7 +579,9 @@ _kernel_oserror *final(int fatal, int podule, void *pw) {
 
 int sigio_handler(_kernel_swi_regs *regs, void *pw) {
   int s = regs->r[0];
-  eprintf("sigio %i\n", s);
+  // No "sigio N" line here: this runs for every socket signal, and writing
+  // it to stderr cost a system call each time (thousands a minute while
+  // streaming video) and filled riscos-log.txt.
   ix_siginfo_t *info = (void *)regs->r[1];
   int band = info->u.sigpoll.band;
 
