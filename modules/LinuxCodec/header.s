@@ -23,7 +23,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"LinuxCodec"
-help:	.asciz	"LinuxCodec\t0.01 (30 Oct 2026) Linux's video decoders for RISC OS"
+help:	.asciz	"LinuxCodec\t0.02 (31 Oct 2026) Linux's video decoders for RISC OS"
 swi_names:
 	.asciz	"LinuxCodec\0Open\0Close\0Decode\0GetFrame\0ReleaseFrame\0Info\0OverlayOpen\0OverlayShow\0OverlayHide\0"
 	.align	2

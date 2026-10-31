@@ -89,6 +89,14 @@ struct control { unsigned id; int value; };
 struct selection { unsigned type, target, flags; int left, top; unsigned width, height, reserved[9]; };
 struct decoder_cmd { unsigned cmd, flags; unsigned raw[16]; };
 struct exportbuffer { unsigned type, index, plane, flags; int fd; unsigned reserved[11]; };
+/* The multi-planar API (the Pi's bcm2835-codec offers only that): a
+   buffer's m.planes (struct buffer's offset) points to its planes, and its
+   length is how many; the format is pix_format_mplane. Pictures here are
+   I420 in one plane. */
+struct plane { unsigned bytesused, length, mem_offset, data_offset, reserved[11]; };
+#define MP_SIZEIMAGE(f)		(((unsigned *) (f)->fmt.raw)[5])
+#define MP_BYTESPERLINE(f)	(((unsigned *) (f)->fmt.raw)[6])
+#define MP_NUM_PLANES(f)	((f)->fmt.raw[180])
 
 #define VIDIOC_QUERYCAP		IOR (0, sizeof (struct capability))
 #define VIDIOC_ENUM_FMT		IOWR (2, sizeof (struct fmtdesc))
@@ -109,6 +117,9 @@ struct exportbuffer { unsigned type, index, plane, flags; int fd; unsigned reser
 
 #define BUF_CAPTURE		1
 #define BUF_OUTPUT		2
+#define BUF_CAPTURE_MPLANE	9
+#define BUF_OUTPUT_MPLANE	10
+#define CAP_M2M_MPLANE		0x00004000u
 #define MEMORY_MMAP		1
 #define CAP_M2M			0x00008000u
 #define CAP_DEVICE_CAPS		0x80000000u
@@ -127,6 +138,7 @@ typedef char check_buffer[sizeof (struct buffer) == 68 ? 1 : -1];
 typedef char check_format[sizeof (struct format) == 204 ? 1 : -1];
 typedef char check_event[sizeof (struct event) == 128 ? 1 : -1];
 typedef char check_capability[sizeof (struct capability) == 104 ? 1 : -1];
+typedef char check_plane[sizeof (struct plane) == 60 ? 1 : -1];
 
 #define OUT_BUFS	4
 #define OUT_SIZE	(512 * 1024)
@@ -139,6 +151,8 @@ typedef struct decoder
   struct decoder *next;
   unsigned magic;
   int fd, dev;
+  int mp;			/* the multi-planar API */
+  unsigned out_t, cap_t;	/* the buffer types: OUTPUT, CAPTURE (or _MPLANE) */
   int state;			/* 0 waiting for the size, 1 decoding, 2 drained */
   struct mapping out[OUT_BUFS];
   unsigned char out_busy[OUT_BUFS];
@@ -243,8 +257,14 @@ is_decoder (int fd, unsigned fourcc)
   if (xioctl (fd, VIDIOC_QUERYCAP, &c) < 0)
     return 0;
   unsigned caps = (c.caps & CAP_DEVICE_CAPS) ? c.device_caps : c.caps;
-  return (caps & CAP_M2M) && has_fmt (fd, BUF_OUTPUT, fourcc)
-	 && has_fmt (fd, BUF_CAPTURE, FMT_I420);
+  /* 1: single-planar, 2: multi-planar (the Pi's bcm2835-codec) */
+  if ((caps & CAP_M2M) && has_fmt (fd, BUF_OUTPUT, fourcc)
+      && has_fmt (fd, BUF_CAPTURE, FMT_I420))
+    return 1;
+  if ((caps & CAP_M2M_MPLANE) && has_fmt (fd, BUF_OUTPUT_MPLANE, fourcc)
+      && has_fmt (fd, BUF_CAPTURE_MPLANE, FMT_I420))
+    return 2;
+  return 0;
 }
 
 static void
@@ -256,6 +276,28 @@ unmap_all (struct mapping *m, unsigned n)
 	lsys (NR_munmap, (unsigned) m[i].addr, m[i].length, 0, 0, 0, 0);
 	m[i].addr = 0;
       }
+}
+
+/* a buffer (and its one plane, multi-planar) set up for an ioctl */
+static void
+buf_init (decoder *d, struct buffer *b, struct plane *p, unsigned type, unsigned index)
+{
+  memset (b, 0, sizeof *b);
+  b->index = index;
+  b->type = type;
+  b->memory = MEMORY_MMAP;
+  if (d->mp)
+    {
+      memset (p, 0, sizeof *p);
+      b->offset = (unsigned) p;
+      b->length = 1;
+    }
+}
+
+static unsigned
+buf_used (decoder *d, const struct buffer *b, const struct plane *p)
+{
+  return d->mp ? p->bytesused : b->bytesused;
 }
 
 /* REQBUFS and map them (the mapping offsets V4L2 gives are page aligned:
@@ -275,17 +317,16 @@ map_buffers (decoder *d, unsigned type, struct mapping *m, unsigned want, unsign
   for (unsigned i = 0; i < rb.count; i++)
     {
       struct buffer b;
-      memset (&b, 0, sizeof b);
-      b.index = i;
-      b.type = type;
-      b.memory = MEMORY_MMAP;
+      struct plane pl;
+      buf_init (d, &b, &pl, type, i);
       if (xioctl (d->fd, VIDIOC_QUERYBUF, &b) < 0)
 	return -1;
-      int a = lsys (NR_mmap2, 0, b.length, PROT_RW, MAP_SHARED, (unsigned) d->fd, b.offset >> 12);
+      unsigned len = d->mp ? pl.length : b.length, off = d->mp ? pl.mem_offset : b.offset;
+      int a = lsys (NR_mmap2, 0, len, PROT_RW, MAP_SHARED, (unsigned) d->fd, off >> 12);
       if (a < 0 && a > -4096)
 	return -1;
       m[i].addr = (void *) a;
-      m[i].length = b.length;
+      m[i].length = len;
     }
   *got = rb.count;
   return 0;
@@ -297,9 +338,9 @@ release_decoder (decoder *d)
   if (d->ovfd >= 0)
     lsys (NR_close, (unsigned) d->ovfd, 0, 0, 0, 0, 0);	/* rol-fb hides it */
   d->ovfd = -1;
-  int t = BUF_CAPTURE;
+  int t = (int) d->cap_t;
   xioctl (d->fd, VIDIOC_STREAMOFF, &t);
-  t = BUF_OUTPUT;
+  t = (int) d->out_t;
   xioctl (d->fd, VIDIOC_STREAMOFF, &t);
   unmap_all (d->cap, d->ncap);
   unmap_all (d->out, OUT_BUFS);
@@ -324,7 +365,7 @@ codec_open (regs *r)
   if (r->r[1] != 0)
     return ERR (bad_codec);
   unsigned fourcc = FMT_H264;
-  int fd = -1, dev = -1;
+  int fd = -1, dev = -1, kind = 0;
   for (int n = 0; n < 32 && fd < 0; n++)
     {
       int f = dev_open (n);
@@ -334,7 +375,7 @@ codec_open (regs *r)
 	    return ERR (no_ixsupport);
 	  continue;
 	}
-      if (is_decoder (f, fourcc))
+      if ((kind = is_decoder (f, fourcc)) != 0)
 	fd = f, dev = n;
       else
 	lsys (NR_close, (unsigned) f, 0, 0, 0, 0, 0);
@@ -353,20 +394,30 @@ codec_open (regs *r)
   d->magic = MAGIC;
   d->ovfd = -1;
   d->ov_shown = -1;
-  /* the compressed side */
+  d->mp = kind == 2;
+  d->out_t = d->mp ? BUF_OUTPUT_MPLANE : BUF_OUTPUT;
+  d->cap_t = d->mp ? BUF_CAPTURE_MPLANE : BUF_CAPTURE;
+  /* the compressed side (width, height and pixelformat are in the same
+     places in both forms of the format) */
   struct format f;
   memset (&f, 0, sizeof f);
-  f.type = BUF_OUTPUT;
+  f.type = d->out_t;
   f.fmt.pix.pixelformat = fourcc;
   f.fmt.pix.width = 1920;
   f.fmt.pix.height = 1080;
-  f.fmt.pix.sizeimage = OUT_SIZE;
+  if (d->mp)
+    {
+      MP_SIZEIMAGE (&f) = OUT_SIZE;
+      MP_NUM_PLANES (&f) = 1;
+    }
+  else
+    f.fmt.pix.sizeimage = OUT_SIZE;
   unsigned got = 0;
   struct event_subscription s;
   memset (&s, 0, sizeof s);
   s.type = EVENT_SOURCE_CHANGE;
   if (xioctl (fd, VIDIOC_S_FMT, &f) < 0
-      || map_buffers (d, BUF_OUTPUT, d->out, OUT_BUFS, &got) < 0
+      || map_buffers (d, d->out_t, d->out, OUT_BUFS, &got) < 0
       || xioctl (fd, VIDIOC_SUBSCRIBE_EVENT, &s) < 0)
     {
       release_decoder (d);
@@ -377,7 +428,7 @@ codec_open (regs *r)
     d->out_busy[i] = 1;		/* fewer than asked for: never used */
   s.type = EVENT_EOS;
   xioctl (fd, VIDIOC_SUBSCRIBE_EVENT, &s);
-  int t = BUF_OUTPUT;
+  int t = (int) d->out_t;
   if (xioctl (fd, VIDIOC_STREAMON, &t) < 0)
     {
       release_decoder (d);
@@ -413,19 +464,22 @@ setup_capture (decoder *d)
 {
   struct format f;
   memset (&f, 0, sizeof f);
-  f.type = BUF_CAPTURE;
+  f.type = d->cap_t;
   if (xioctl (d->fd, VIDIOC_G_FMT, &f) < 0)
     return -1;
-  if (f.fmt.pix.pixelformat != FMT_I420)
+  if (f.fmt.pix.pixelformat != FMT_I420 || (d->mp && MP_NUM_PLANES (&f) != 1))
     {
       f.fmt.pix.pixelformat = FMT_I420;
+      if (d->mp)
+	MP_NUM_PLANES (&f) = 1;
       if (xioctl (d->fd, VIDIOC_S_FMT, &f) < 0)
 	return -1;
     }
+  unsigned bpl = d->mp ? MP_BYTESPERLINE (&f) : f.fmt.pix.bytesperline;
   d->coded_w = f.fmt.pix.width;
   d->coded_h = f.fmt.pix.height;
-  d->bpl = f.fmt.pix.bytesperline ? f.fmt.pix.bytesperline : f.fmt.pix.width;
-  d->sizeimage = f.fmt.pix.sizeimage;
+  d->bpl = bpl ? bpl : f.fmt.pix.width;
+  d->sizeimage = d->mp ? MP_SIZEIMAGE (&f) : f.fmt.pix.sizeimage;
   d->vis_w = d->coded_w;
   d->vis_h = d->coded_h;
   struct selection sel;
@@ -446,19 +500,17 @@ setup_capture (decoder *d)
     want = CAP_MAX;
   unmap_all (d->cap, d->ncap);
   d->ncap = 0;
-  if (map_buffers (d, BUF_CAPTURE, d->cap, want, &d->ncap) < 0)
+  if (map_buffers (d, d->cap_t, d->cap, want, &d->ncap) < 0)
     return -1;
   for (unsigned i = 0; i < d->ncap; i++)
     {
       struct buffer b;
-      memset (&b, 0, sizeof b);
-      b.index = i;
-      b.type = BUF_CAPTURE;
-      b.memory = MEMORY_MMAP;
+      struct plane pl;
+      buf_init (d, &b, &pl, d->cap_t, i);
       if (xioctl (d->fd, VIDIOC_QBUF, &b) < 0)
 	return -1;
     }
-  int t = BUF_CAPTURE;
+  int t = (int) d->cap_t;
   if (xioctl (d->fd, VIDIOC_STREAMON, &t) < 0)
     return -1;
   d->state = 1;
@@ -480,7 +532,7 @@ poll_events (decoder *d)
 	{
 	  if (d->state == 1)
 	    {
-	      int t = BUF_CAPTURE;
+	      int t = (int) d->cap_t;
 	      xioctl (d->fd, VIDIOC_STREAMOFF, &t);
 	    }
 	  if (setup_capture (d) < 0)
@@ -496,9 +548,8 @@ reap_output (decoder *d)
   for (;;)
     {
       struct buffer b;
-      memset (&b, 0, sizeof b);
-      b.type = BUF_OUTPUT;
-      b.memory = MEMORY_MMAP;
+      struct plane pl;
+      buf_init (d, &b, &pl, d->out_t, 0);
       if (xioctl (d->fd, VIDIOC_DQBUF, &b) < 0)
 	return;
       if (b.index < OUT_BUFS)
@@ -533,11 +584,10 @@ codec_decode (regs *r)
 	  n = d->out[i].length;
 	memcpy (d->out[i].addr, (const void *) r->r[1], n);
 	struct buffer b;
-	memset (&b, 0, sizeof b);
-	b.index = i;
-	b.type = BUF_OUTPUT;
-	b.memory = MEMORY_MMAP;
+	struct plane pl;
+	buf_init (d, &b, &pl, d->out_t, i);
 	b.bytesused = n;
+	pl.bytesused = n;
 	b.ts_sec = (int) r->r[3];
 	if (xioctl (d->fd, VIDIOC_QBUF, &b) < 0)
 	  return ERR (linux_failed);
@@ -563,16 +613,15 @@ codec_getframe (regs *r)
   if (d->state != 1)
     return 0;
   struct buffer b;
-  memset (&b, 0, sizeof b);
-  b.type = BUF_CAPTURE;
-  b.memory = MEMORY_MMAP;
+  struct plane pl;
+  buf_init (d, &b, &pl, d->cap_t, 0);
   if (xioctl (d->fd, VIDIOC_DQBUF, &b) < 0)
     return 0;
   if (b.index >= d->ncap)
     return 0;
   if (b.flags & BUF_FLAG_LAST)
     d->state = 2;
-  if (b.bytesused == 0)
+  if (buf_used (d, &b, &pl) == 0)
     {
       /* an empty LAST buffer: nothing to show, give it straight back */
       xioctl (d->fd, VIDIOC_QBUF, &b);
@@ -609,10 +658,8 @@ codec_release (regs *r)
   if (r->r[1] >= d->ncap)
     return ERR (bad_handle);
   struct buffer b;
-  memset (&b, 0, sizeof b);
-  b.index = r->r[1];
-  b.type = BUF_CAPTURE;
-  b.memory = MEMORY_MMAP;
+  struct plane pl;
+  buf_init (d, &b, &pl, d->cap_t, r->r[1]);
   if (xioctl (d->fd, VIDIOC_QBUF, &b) < 0)
     return ERR (linux_failed);
   return 0;
@@ -671,7 +718,7 @@ ov_register (decoder *d)
     {
       struct exportbuffer e;
       memset (&e, 0, sizeof e);
-      e.type = BUF_CAPTURE;
+      e.type = d->cap_t;
       e.index = i;
       e.flags = O_CLOEXEC;
       if (xioctl (d->fd, VIDIOC_EXPBUF, &e) < 0)
@@ -770,10 +817,8 @@ codec_overlay_show (regs *r)
   if (rep[1] >= 0 && (unsigned) rep[1] < d->ncap && rep[1] != (int) r->r[1])
     {
       struct buffer b;
-      memset (&b, 0, sizeof b);
-      b.index = (unsigned) rep[1];
-      b.type = BUF_CAPTURE;
-      b.memory = MEMORY_MMAP;
+      struct plane pl;
+      buf_init (d, &b, &pl, d->cap_t, (unsigned) rep[1]);
       xioctl (d->fd, VIDIOC_QBUF, &b);
     }
   d->ov_shown = (int) r->r[1];
@@ -794,10 +839,8 @@ codec_overlay_hide (regs *r)
   if (ov_call (d, m, -1, rep) >= 0 && rep[1] >= 0 && (unsigned) rep[1] < d->ncap)
     {
       struct buffer b;
-      memset (&b, 0, sizeof b);
-      b.index = (unsigned) rep[1];
-      b.type = BUF_CAPTURE;
-      b.memory = MEMORY_MMAP;
+      struct plane pl;
+      buf_init (d, &b, &pl, d->cap_t, (unsigned) rep[1]);
       xioctl (d->fd, VIDIOC_QBUF, &b);
     }
   d->ov_shown = -1;
@@ -884,7 +927,7 @@ mod_command (int index, const char *tail, int argc)
 	  write_n (c.driver, 16);
 	  write0 (", ");
 	  write_n (c.card, 32);
-	  if (caps & CAP_M2M)
+	  if (caps & (CAP_M2M | CAP_M2M_MPLANE))
 	    write0 (is_decoder (fd, FMT_H264) ? " - H.264 decoder" : " - memory to memory");
 	  newline ();
 	  any = 1;
