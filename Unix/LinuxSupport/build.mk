@@ -106,10 +106,12 @@ endif
 	    echo '#define VERSION "GIT commit: '$$COMMIT'\n"' > version
 	    cmp --quiet version mixed/Linux/HAL/h/version || cp version mixed/Linux/HAL/h/version
 	  fi
-	  # the version: the date of RISC OS Open's nightly the sources are from
-	  # (NightlyDate), or else the kernel's own date and the commit
+	  # the version: RISC OS's own version with this project's build count
+	  # (BuildNumber) after a hyphen, and the date of RISC OS Open's nightly
+	  # the sources are from (NightlyDate); or else the kernel's own date and
+	  # the commit
 	  if test -f NightlyDate; then
-	    echo -e 'VersionNo SETS "$$VString ('"$$(cat NightlyDate)"') nightly"\nUseNewFX0Error SETL {FALSE}\n END' > version
+	    echo -e 'VersionNo SETS "$$VString-'"$$(cat BuildNumber 2>/dev/null || echo 1)"' ('"$$(cat NightlyDate)"')"\nUseNewFX0Error SETL {FALSE}\n END' > version
 	  else
 	    echo -e 'VersionNo SETS "$$VString ($$Date) Git: '$$COMMIT'"\nUseNewFX0Error SETL {FALSE}\n END' > version
 	  fi
