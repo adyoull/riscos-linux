@@ -74,6 +74,7 @@ directories, so other machines' builds are unchanged.
 | Physical memory pool areas | Kernel `c.LinuxC` (`do_PMP_*`), `s.Linux` (veneers), `s.ChangeDyn` (creation, `DAR_delink`) | A memory file per area; c.LinuxC's records hang off one extra word at the end of the kernel's pool array (`phys[PMPMaxSize]`), so anything that resizes that array must keep the extra word. Tested on Linux with the C compiled for ARM (see the commit). |
 | `fallocate`, `mprotect` | `mixed/Linux/Syscalls/GenSyscall` | LARGE/SMALL arguments are now stripped from every argument of the prototype. |
 | Socket_Select's timeout | `mixed/Linux/Internet/c/main` (`do_select`, `sigio_handler`) | The wait loop ends when `select_timeout` (s.asm, a ticker event) sets the pollword's timeout byte: a pollword that is non-zero makes `pollword_sleep` return at once, so any change to that loop must keep the check or it spins. Timeouts round up to whole centiseconds. Test: `t_select` in riscos-linux-testbed. |
+| Internet module version | `mixed/Linux/Internet/cmhg/InternetLHdr` (`help-string`) | Reports 5.73, matching `Socket_Version`. Programs check it with `RMEnsure Internet 5.xx` (!Omni 5.02, !Internet 5.40); without a number cmhg made it 0.00. Keep it in step if `Socket_Version` changes. |
 
 Not in this tree (they're in riscos-linux-testbed / riscos-linux): the image's
 init, rol-fb, LinuxCodec, NetWatch, the packages.
