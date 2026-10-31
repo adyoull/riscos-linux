@@ -26,8 +26,12 @@ nl%=0 : cur$="" : indp%=0 : task%=0 : quit%=FALSE
 job$="" : pos%=0 : mode%=0 : sect$="" : ndeb%=0 : neterr%=FALSE
 rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
 tok$="" : pendcmd$="" : pendm%=0 : sentpw%=FALSE : pwmode%=0 : chain%=0
+closing%=FALSE
 dir$="IXFS:$.riscos.cmd."
 LH%=40 : LW%=1600 : BL%=10
+REM one Updates at a time: if one is already running (it may be finishing
+REM an install after Configure was closed), leave it to show itself
+IF FNalready THEN END
 SYS "Wimp_Initialise",380,&4B534154,"Updates",0 TO ,task%
 PROClineheight
 PROCwindows
@@ -44,15 +48,61 @@ REPEAT
     WHEN 0 : PROCpoll_job
     WHEN 1 : PROCredraw(blk%!0)
     WHEN 2 : SYS "Wimp_OpenWindow",,blk%
-    WHEN 3 : IF blk%!0=win% THEN quit%=TRUE ELSE IF blk%!0=pww% THEN PROCpwcancel ELSE SYS "Wimp_CloseWindow",,blk%
+    WHEN 3 : IF blk%!0=win% THEN PROCwantquit ELSE IF blk%!0=pww% THEN PROCpwcancel ELSE SYS "Wimp_CloseWindow",,blk%
     WHEN 6 : PROCclick(blk%!12,blk%!16,blk%!8)
     WHEN 8 : PROCkey(blk%!0,blk%!4,blk%!24)
-    WHEN 17,18 : IF blk%!16=0 THEN quit%=TRUE
+    WHEN 17,18 : PROCmessage(reason%)
   ENDCASE
 UNTIL quit%
 IF job$<>"" AND mode%=4 THEN PROCstop
 SYS "Wimp_CloseDown",task%,&4B534154
 END
+
+REM Updates mustn't go while apt is installing (or putting RISC OS back):
+REM the install would carry on in Linux unwatched, and a new Updates would
+REM find dpkg locked. So closing the window, Configure closing, or a quit
+REM while installing leaves it open, saying it will close when the install
+REM is done (PROCfinish then quits); the desktop shutting down is refused
+REM (Message_PreQuit acknowledged) until then.
+DEF FNbusy=job$<>"" AND (mode%=2 OR mode%=3)
+
+DEF PROCwantquit
+IF NOT FNbusy THEN quit%=TRUE : ENDPROC
+closing%=TRUE
+PROCset(ic%(2),"Still installing: Updates will close when the install is done")
+PROCopen_main
+ENDPROC
+
+DEF PROCmessage(r%)
+CASE blk%!16 OF
+  WHEN 0 : PROCwantquit
+  WHEN 8
+    IF FNbusy AND r%=17 THEN
+      blk%!12=blk%!8 : SYS "Wimp_SendMessage",19,blk%,blk%!4
+      PROCset(ic%(2),"Still installing: shut down when the install is done")
+      PROCopen_main
+    ENDIF
+ENDCASE
+ENDPROC
+
+REM Is another Updates running? (TaskManager_EnumerateTasks)
+DEF FNalready
+LOCAL b%,n%,e%,i%,f%
+DIM b% LOCAL 256
+n%=0
+REPEAT
+  SYS "XTaskManager_EnumerateTasks",n%,b%,256 TO n%,e%;f%
+  IF f% AND 1 THEN =FALSE
+  FOR i%=b% TO e%-16 STEP 16
+    IF FNstr0(i%!4)="Updates" THEN =TRUE
+  NEXT
+UNTIL n%<0
+=FALSE
+
+DEF FNstr0(a%)
+LOCAL s$
+WHILE ?a%>=32 AND LEN(s$)<40 : s$+=CHR$?a% : a%+=1 : ENDWHILE
+=s$
 
 DEF PROCerror
 LOCAL e%,r%
@@ -480,6 +530,7 @@ CASE TRUE OF
 ENDCASE
 IF m%<>4 THEN PROCaddtext(CHR$10)
 PROCbuttons
+IF closing% AND (m%=2 OR m%=3) THEN quit%=TRUE
 ENDPROC
 
 DEF FNago(s%)
