@@ -1,0 +1,43 @@
+| riscos-linux-testbed: VFPSupport, ARMEABISupport, BASIC VFP and the
+| UnixLib modules, from <IXFS$HardDisc4>.TestBed.Modules
+RMEnsure SharedUnixLibrary 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.SharedULib
+RMEnsure PThreadTicker 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.PThrTicker
+RMEnsure VFPSupport 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.VFPSupport
+| ARMEABISupport: !System's if it has one, else the image's (GCCSDK's 1.08)
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.ARMEABISupport
+RMEnsure BASICVFP 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.BASICVFP
+| character set conversion: RISC OS Open's Iconv is in !System (from its
+| Raspberry Pi distribution); as on a RISC OS install it's loaded when a
+| program first needs it (UnixLib does RMEnsure Iconv ... RMLoad
+| System:Modules.Iconv), by when !Unicode, which it needs, is set up.
+| the scroll wheel: rol-fb sends it as key numbers &1F0-&1F3
+RMEnsure KVMWheel 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.KVMWheel
+| which way it scrolls: Configure, Scroll wheel (*KVMWheel Reverse|Normal)
+IfThere Choices:KVMWheel Then /Choices:KVMWheel
+| and RISC OS Open's WindowScroll scrolls windows with it (its task starts
+| with the desktop; *WimpScroll configures it)
+RMEnsure WindowScroll 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.WindowScroll
+| sound: LinuxAudio is an audio device for RISC OS Open's SoundDMA (in the
+| ROM, which has no other) and sends the sound to Linux (rol-snd plays it);
+| SoundControl (the mixer: *MixVolume, Configure's volume) and SharedSound
+| are RISC OS Open's too. SoundDMA is started again to find the device,
+| then the ROM's other sound modules, to register with it.
+RMEnsure LinuxAudio 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.LinuxAudio
+RMEnsure SoundControl 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.SoundControl
+RMReInit SoundDMA
+RMReInit SoundChannels
+RMReInit SoundScheduler
+RMReInit WaveSynth
+RMReInit StringLib
+RMReInit Percussion
+RMEnsure SharedSound 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.SharedSound
+| *Linux: runs Linux commands (the image's rol-cmd runs them; Updates uses it)
+RMEnsure LinuxShell 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.LinuxShell
+| USBDriver: RISC OS's USB device interface on Linux's usbfs, for the USB devices
+| Linux has no driver for (phones, cameras: PDFS)
+RMEnsure USBDriver 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.USBDriver
+| LinuxCodec: Linux's video decoders (VideoCore's H.264 on a Pi 3 or 4) for
+| RISC OS programs; on machines without one, LinuxCodec_Open says so and
+| programs decode in software
+RMEnsure LinuxCodec 0 RMLoad <IXFS$HardDisc4>.TestBed.Codec.LinuxCodec
