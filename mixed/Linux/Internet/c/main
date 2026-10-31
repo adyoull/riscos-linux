@@ -41,6 +41,7 @@
 
 #define ix_SYSCALL_branch 1
 #include "ix/syscalls.h"
+#include "sysctl.h"
 
 static int socket_server = -1;
 
@@ -487,6 +488,12 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
       }
       break;
     }
+    case Socket_Sysctl - Socket_00:
+      // The network status calls (interfaces, routes, ARP, TCP/UDP/IP
+      // counters) from Linux, in the ROD stack's layout: c.sysctl
+      result = rol_sysctl((const int *)r->r[0], r->r[1], (void *)r->r[2],
+                          (size_t *)r->r[3], (const void *)r->r[4], r->r[5]);
+      break;
     case Socket_Ioctl - Socket_00:
       switch ((uint32_t)r->r[1]) {
         case FIOASYNC:

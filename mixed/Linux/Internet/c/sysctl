@@ -1,0 +1,914 @@
+/*
+ * Socket_Sysctl for RISC OS on Linux: the network status calls that
+ * programs use to show interfaces, traffic, routes, the ARP table and the
+ * TCP/UDP/IP counters, answered from Linux (/proc/net and the interface
+ * ioctls) in the layout of the RISC OS Developments TCP/IP stack (OpenBSD
+ * 6.8 headers, 64-bit fields 4-byte aligned, as Norcroft lays them out):
+ *
+ *   net.route.0.<af>.iflist   (B_CTL_NET, B_PF_ROUTE, 0, af, B_NET_RT_IFLIST, 0)
+ *       B_RTM_IFINFO (if_msghdr + if_data + sockaddr_dl) for each interface,
+ *       B_RTM_NEWADDR (ifa_msghdr + netmask, sockaddr_dl, address) for each
+ *       IPv4 and IPv6 address
+ *   net.route.0.<af>.dump     (..., B_NET_RT_DUMP, 0): routes (rt_msghdr +
+ *       destination, gateway, netmask) and the ARP table (B_RTF_LLINFO)
+ *   net.route.0.<af>.flags.F  (..., B_NET_RT_FLAGS, F): those with flags F
+ *   net.inet.tcp.stats        (B_CTL_NET, B_PF_INET, IPPROTO_TCP, 21): tcpstat
+ *   net.inet.udp.stats        (B_CTL_NET, B_PF_INET, IPPROTO_UDP, 5): udpstat
+ *   net.inet.ip.stats         (B_CTL_NET, B_PF_INET, 0, 33): ipstat
+ *
+ * Linux keeps different counters from BSD's: those with a Linux equivalent
+ * are filled in (see the tables below), the rest are 0. TCP's byte counts
+ * aren't kept by Linux, so they are 0.
+ *
+ * rol_sysctl() returns 0 or a negative Linux errno, as the ix_ calls do.
+ *
+ * Copyright (c) 2026 Andrew Youll. Apache License 2.0, as the rest of the
+ * Linux port.
+ */
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef ROL_HOSTTEST
+/* built on Linux, for testing: the ordinary calls */
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#define SC_open(p) open (p, O_RDONLY | O_CLOEXEC)
+#define SC_read(f, b, n) read (f, b, n)
+#define SC_close(f) close (f)
+#define SC_socket() socket (2, 2 | 0x80000, 0)
+#define SC_ioctl(f, r, a) ioctl (f, r, a)
+#else
+#include "ix/syscalls.h"
+#define SC_open(p) ix_open (p, ix_O_RDONLY | ix_O_CLOEXEC, 0)
+#define SC_read(f, b, n) ix_read (f, b, n)
+#define SC_close(f) ix_close (f)
+#define SC_socket() ix_socket (2, 2 | ix_SOCK_CLOEXEC, 0)
+#define SC_ioctl(f, r, a) ix_ioctl (f, r, a)
+#endif
+
+#include "sysctl.h"
+
+/* Linux errno values (the ix_ calls' negative returns) */
+#define L_ENOENT 2
+#define L_ENOMEM 12
+#define L_EINVAL 22
+#define L_EOPNOTSUPP 95
+
+/* BSD names (OpenBSD) */
+#define B_CTL_NET 4
+#define B_PF_INET 2
+#define B_PF_ROUTE 17
+#define B_AF_INET6 24
+#define B_AF_LINK 18
+#define B_NET_RT_DUMP 1
+#define B_NET_RT_FLAGS 2
+#define B_NET_RT_IFLIST 3
+#define B_RTM_VERSION 5
+#define B_RTM_GET 4
+#define B_RTM_NEWADDR 0xC
+#define B_RTM_IFINFO 0xE
+#define B_RTA_DST 1
+#define B_RTA_GATEWAY 2
+#define B_RTA_NETMASK 4
+#define B_RTA_IFP 0x10
+#define B_RTA_IFA 0x20
+#define B_RTF_UP 1
+#define B_RTF_GATEWAY 2
+#define B_RTF_HOST 4
+#define B_RTF_LLINFO 0x400
+#define B_IFT_OTHER 1
+#define B_IFT_ETHER 6
+#define B_IFT_LOOP 24
+#define B_IFT_IEEE80211 71
+
+/* Linux interface ioctls */
+#define L_SIOCGIFFLAGS 0x8913
+#define L_SIOCGIFADDR 0x8915
+#define L_SIOCGIFNETMASK 0x891b
+#define L_SIOCGIFMTU 0x8921
+#define L_SIOCGIFHWADDR 0x8927
+#define L_SIOCGIFINDEX 0x8933
+#define L_SIOCETHTOOL 0x8946
+
+#define MAXIF 16
+#define MAXSTAT 160
+
+/* ------------------------------------------------------------ output */
+
+struct out {
+  unsigned char *b;
+  size_t n, cap;
+  int full;
+};
+
+static void put (struct out *o, const void *p, size_t n)
+{
+  if (o->full || o->n + n > o->cap) {
+    o->full = 1;
+    return;
+  }
+  memcpy (o->b + o->n, p, n);
+  o->n += n;
+}
+
+static void le16 (unsigned char *p, unsigned v) { p[0] = v; p[1] = v >> 8; }
+static void le32 (unsigned char *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+static void le64 (unsigned char *p, uint64_t v) { le32 (p, (uint32_t) v); le32 (p + 4, (uint32_t) (v >> 32)); }
+
+static size_t roundup4 (size_t n) { return n == 0 ? 4 : ((n - 1) | 3) + 1; }
+
+/* ------------------------------------------------------------ reading Linux */
+
+/* the whole of a /proc file into a buffer (malloc'd; free it), 0 if none */
+static char *slurp (const char *path, size_t *len)
+{
+  size_t cap = 16384, n = 0;
+  char *b = malloc (cap + 1);
+  int fd;
+  if (!b)
+    return 0;
+  fd = SC_open (path);
+  if (fd < 0) {
+    free (b);
+    return 0;
+  }
+  for (;;) {
+    int r;
+    if (n == cap) {
+      char *nb = realloc (b, cap * 2 + 1);
+      if (!nb)
+        break;
+      b = nb;
+      cap *= 2;
+    }
+    r = SC_read (fd, b + n, cap - n);
+    if (r <= 0)
+      break;
+    n += r;
+  }
+  SC_close (fd);
+  b[n] = 0;
+  if (len)
+    *len = n;
+  return b;
+}
+
+static uint64_t num (const char **p)
+{
+  uint64_t v = 0;
+  while (**p == ' ' || **p == '\t')
+    (*p)++;
+  while (**p >= '0' && **p <= '9')
+    v = v * 10 + (*(*p)++ - '0');
+  return v;
+}
+
+static int hexval (int c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static uint32_t hex32 (const char **p)
+{
+  uint32_t v = 0;
+  int h;
+  while (**p == ' ' || **p == '\t')
+    (*p)++;
+  while ((h = hexval (**p)) >= 0) {
+    v = v * 16 + h;
+    (*p)++;
+  }
+  return v;
+}
+
+static void word (const char **p, char *w, size_t n)
+{
+  size_t i = 0;
+  while (**p == ' ' || **p == '\t')
+    (*p)++;
+  while (**p && **p != ' ' && **p != '\t' && **p != '\n') {
+    if (i + 1 < n)
+      w[i++] = **p;
+    (*p)++;
+  }
+  w[i] = 0;
+}
+
+static const char *next_line (const char *p)
+{
+  while (*p && *p != '\n')
+    p++;
+  return *p ? p + 1 : p;
+}
+
+/* ------------------------------------------------------------ interfaces */
+
+struct iface {
+  char name[16];
+  unsigned index;
+  unsigned flags;              /* BSD IFF_ values */
+  unsigned type, alen;
+  unsigned char mac[8];
+  unsigned mtu;
+  int link;                    /* LINK_STATE_ */
+  uint64_t baud;
+  uint64_t ib, ipk, ierr, idrop, imc, ob, opk, oerr, odrop, coll;
+  int has4;
+  unsigned char a4[4], m4[4];
+};
+
+struct ifreq_l {               /* Linux's struct ifreq, 32-bit */
+  char name[16];
+  union {
+    unsigned char sa[16];
+    int i;
+    short s;
+    void *p;
+  } u;
+};
+
+static unsigned bsd_flags (unsigned f)
+{
+  /* the same bits up to ALLMULTI; Linux's MULTICAST is &1000, BSD's &8000 */
+  return (f & 0x3FF) | ((f & 0x1000) ? 0x8000 : 0);
+}
+
+static int wireless (const char *name, const char *wl)
+{
+  size_t n = strlen (name);
+  const char *p = wl;
+  if (!wl)
+    return 0;
+  while (*p) {
+    const char *q = p;
+    while (*q == ' ')
+      q++;
+    if (!strncmp (q, name, n) && q[n] == ':')
+      return 1;
+    p = next_line (p);
+  }
+  return 0;
+}
+
+static int read_ifaces (struct iface *ifs)
+{
+  char *dev = slurp ("/proc/net/dev", 0), *wl = slurp ("/proc/net/wireless", 0);
+  const char *p;
+  int n = 0, s;
+  if (!dev) {
+    free (wl);
+    return -L_ENOENT;
+  }
+  s = SC_socket ();
+  p = next_line (next_line (dev));           /* two lines of headings */
+  while (*p && n < MAXIF) {
+    struct iface *f = &ifs[n];
+    struct ifreq_l r;
+    const char *c = strchr (p, ':'), *q = p;
+    size_t l;
+    if (!c)
+      break;
+    while (*q == ' ')
+      q++;
+    memset (f, 0, sizeof *f);
+    l = c - q;
+    if (l >= sizeof f->name)
+      l = sizeof f->name - 1;
+    memcpy (f->name, q, l);
+    q = c + 1;
+    f->ib = num (&q); f->ipk = num (&q); f->ierr = num (&q); f->idrop = num (&q);
+    num (&q); num (&q); num (&q); f->imc = num (&q);
+    f->ob = num (&q); f->opk = num (&q); f->oerr = num (&q); f->odrop = num (&q);
+    num (&q); f->coll = num (&q);
+    f->index = n + 1;
+    f->type = B_IFT_OTHER;
+    if (s >= 0) {
+      unsigned lf = 0;
+      memset (&r, 0, sizeof r); strcpy (r.name, f->name);
+      if (SC_ioctl (s, L_SIOCGIFINDEX, &r) == 0)
+        f->index = r.u.i;
+      memset (&r, 0, sizeof r); strcpy (r.name, f->name);
+      if (SC_ioctl (s, L_SIOCGIFFLAGS, &r) == 0)
+        lf = (unsigned short) r.u.s;
+      f->flags = bsd_flags (lf);
+      memset (&r, 0, sizeof r); strcpy (r.name, f->name);
+      if (SC_ioctl (s, L_SIOCGIFMTU, &r) == 0)
+        f->mtu = r.u.i;
+      memset (&r, 0, sizeof r); strcpy (r.name, f->name);
+      if (SC_ioctl (s, L_SIOCGIFHWADDR, &r) == 0) {
+        unsigned fam = r.u.sa[0] | r.u.sa[1] << 8;
+        if (fam == 1) {                            /* ARPHRD_ETHER */
+          f->type = wireless (f->name, wl) ? B_IFT_IEEE80211 : B_IFT_ETHER;
+          f->alen = 6;
+          memcpy (f->mac, r.u.sa + 2, 6);
+        } else if (fam == 772)                     /* ARPHRD_LOOPBACK */
+          f->type = B_IFT_LOOP;
+      }
+      memset (&r, 0, sizeof r); strcpy (r.name, f->name);
+      if (SC_ioctl (s, L_SIOCGIFADDR, &r) == 0 && r.u.sa[0] == 2) {
+        f->has4 = 1;
+        memcpy (f->a4, r.u.sa + 4, 4);
+        memset (&r, 0, sizeof r); strcpy (r.name, f->name);
+        if (SC_ioctl (s, L_SIOCGIFNETMASK, &r) == 0)
+          memcpy (f->m4, r.u.sa + 4, 4);
+      }
+      /* link state: down, or up with the duplex ethtool reports */
+      if (f->type == B_IFT_LOOP)
+        f->link = 0;
+      else if (!(lf & 0x40))
+        f->link = 2;                               /* LINK_STATE_DOWN */
+      else {
+        unsigned char ec[44];
+        f->link = 4;                               /* LINK_STATE_UP */
+        memset (ec, 0, sizeof ec);
+        le32 (ec, 1);                              /* ETHTOOL_GSET */
+        memset (&r, 0, sizeof r); strcpy (r.name, f->name);
+        r.u.p = ec;
+        if (SC_ioctl (s, L_SIOCETHTOOL, &r) == 0) {
+          unsigned speed = ec[12] | ec[13] << 8 | (ec[28] | ec[29] << 8) << 16;
+          if (speed && speed != 0xFFFF && speed != 0xFFFFFFFFu)
+            f->baud = (uint64_t) speed * 1000000;
+          if (ec[14] == 1)
+            f->link = 6;                           /* full duplex */
+          else if (ec[14] == 0)
+            f->link = 5;                           /* half duplex */
+        }
+      }
+    }
+    n++;
+    p = next_line (p);
+  }
+  if (s >= 0)
+    SC_close (s);
+  free (dev);
+  free (wl);
+  return n;
+}
+
+static struct iface *find_if (struct iface *ifs, int n, const char *name)
+{
+  int i;
+  for (i = 0; i < n; i++)
+    if (!strcmp (ifs[i].name, name))
+      return &ifs[i];
+  return 0;
+}
+
+/* ------------------------------------------------------------ sockaddrs */
+
+static void sa_dl (struct out *o, const struct iface *f)
+{
+  unsigned char b[64];
+  size_t nl = f ? strlen (f->name) : 0, al = f ? f->alen : 0, len;
+  memset (b, 0, sizeof b);
+  b[1] = B_AF_LINK;
+  if (f) {
+    le16 (b + 2, f->index);
+    b[4] = f->type;
+    b[5] = nl;
+    b[6] = al;
+    memcpy (b + 8, f->name, nl);
+    memcpy (b + 8 + nl, f->mac, al);
+  }
+  len = 8 + nl + al;
+  if (len < 32)
+    len = 32;                                       /* sdl_data[24] */
+  b[0] = len;
+  put (o, b, roundup4 (len));
+}
+
+/* sockaddr_dl with a MAC from the ARP table (none for an incomplete entry) */
+static void sa_dl_mac (struct out *o, const struct iface *f, const unsigned char *mac, int alen)
+{
+  struct iface t;
+  memset (&t, 0, sizeof t);
+  if (f)
+    t = *f;
+  t.alen = alen;
+  if (alen)
+    memcpy (t.mac, mac, alen);
+  sa_dl (o, &t);
+}
+
+static void sa_in (struct out *o, const unsigned char *a)
+{
+  unsigned char b[16];
+  memset (b, 0, sizeof b);
+  b[0] = 16;
+  b[1] = B_PF_INET;
+  memcpy (b + 4, a, 4);
+  put (o, b, 16);
+}
+
+static void sa_in6 (struct out *o, const unsigned char *a, unsigned scope)
+{
+  unsigned char b[28];
+  memset (b, 0, sizeof b);
+  b[0] = 28;
+  b[1] = B_AF_INET6;
+  memcpy (b + 8, a, 16);
+  le32 (b + 24, scope);
+  put (o, b, 28);
+}
+
+/* netmasks as the kernel gives them: trailing zero bytes trimmed */
+static void sa_mask4 (struct out *o, const unsigned char *m)
+{
+  unsigned char b[8];
+  int n = 4;
+  memset (b, 0, sizeof b);
+  while (n > 0 && m[n - 1] == 0)
+    n--;
+  b[0] = 4 + n;
+  memcpy (b + 4, m, n);
+  put (o, b, roundup4 (4 + n));
+}
+
+static void sa_mask6 (struct out *o, unsigned prefix)
+{
+  unsigned char b[24];
+  unsigned i;
+  int n = 16;
+  memset (b, 0, sizeof b);
+  for (i = 0; i < prefix && i < 128; i++)
+    b[8 + i / 8] |= 0x80 >> (i % 8);
+  while (n > 0 && b[8 + n - 1] == 0)
+    n--;
+  b[0] = 8 + n;
+  put (o, b, roundup4 (8 + n));
+}
+
+/* ------------------------------------------------------------ messages */
+
+/* if_msghdr (24) + if_data (136) + sockaddr_dl */
+static void msg_ifinfo (struct out *o, const struct iface *f)
+{
+  unsigned char h[160];
+  size_t start = o->n;
+  memset (h, 0, sizeof h);
+  le16 (h + 2, 0);
+  h[2] = B_RTM_VERSION;
+  h[3] = B_RTM_IFINFO;
+  le16 (h + 4, 160);                     /* ifm_hdrlen */
+  le16 (h + 6, f->index);
+  le32 (h + 12, B_RTA_IFP);                /* ifm_addrs */
+  le32 (h + 16, f->flags);
+  /* if_data */
+  h[24] = f->type;
+  h[25] = f->alen;
+  h[26] = f->type == B_IFT_LOOP ? 0 : 14;
+  h[27] = f->link;
+  le32 (h + 28, f->mtu);
+  le64 (h + 40, f->baud);
+  le64 (h + 48, f->ipk);
+  le64 (h + 56, f->ierr);
+  le64 (h + 64, f->opk);
+  le64 (h + 72, f->oerr);
+  le64 (h + 80, f->coll);
+  le64 (h + 88, f->ib);
+  le64 (h + 96, f->ob);
+  le64 (h + 104, f->imc);
+  le64 (h + 112, 0);
+  le64 (h + 120, f->idrop);
+  le64 (h + 128, f->odrop);
+  put (o, h, 160);
+  sa_dl (o, f);
+  if (!o->full)
+    le16 (o->b + start, o->n - start);   /* ifm_msglen */
+}
+
+/* ifa_msghdr (24): netmask, interface, address */
+static void msg_newaddr_start (struct out *o, const struct iface *f, size_t *start)
+{
+  unsigned char h[24];
+  *start = o->n;
+  memset (h, 0, sizeof h);
+  h[2] = B_RTM_VERSION;
+  h[3] = B_RTM_NEWADDR;
+  le16 (h + 4, 24);
+  le16 (h + 6, f->index);
+  le32 (h + 12, B_RTA_NETMASK | B_RTA_IFP | B_RTA_IFA);
+  put (o, h, 24);
+}
+
+static void msg_end (struct out *o, size_t start)
+{
+  if (!o->full)
+    le16 (o->b + start, o->n - start);
+}
+
+/* rt_msghdr (96) */
+static void msg_route_start (struct out *o, unsigned index, unsigned flags, unsigned addrs, size_t *start)
+{
+  unsigned char h[96];
+  *start = o->n;
+  memset (h, 0, sizeof h);
+  h[2] = B_RTM_VERSION;
+  h[3] = B_RTM_GET;
+  le16 (h + 4, 96);
+  le16 (h + 6, index);
+  le32 (h + 12, addrs);
+  le32 (h + 16, flags);
+  put (o, h, 96);
+}
+
+/* ------------------------------------------------------------ the lists */
+
+static void iflist (struct out *o, struct iface *ifs, int n, int af)
+{
+  char *v6 = (af == 0 || af == B_AF_INET6) ? slurp ("/proc/net/if_inet6", 0) : 0;
+  int i;
+  for (i = 0; i < n; i++) {
+    struct iface *f = &ifs[i];
+    size_t st;
+    msg_ifinfo (o, f);
+    if (f->has4 && (af == 0 || af == B_PF_INET)) {
+      msg_newaddr_start (o, f, &st);
+      sa_mask4 (o, f->m4);
+      sa_dl (o, f);
+      sa_in (o, f->a4);
+      msg_end (o, st);
+    }
+    if (v6) {
+      /* address (32 hex), index, prefix length, scope, flags, name */
+      const char *p = v6;
+      while (*p) {
+        unsigned char a[16];
+        char name[20];
+        unsigned plen, scope;
+        int k;
+        const char *q = p;
+        for (k = 0; k < 16; k++) {
+          int hi = hexval (q[0]), lo = hexval (q[1]);
+          if (hi < 0 || lo < 0)
+            break;
+          a[k] = hi * 16 + lo;
+          q += 2;
+        }
+        if (k == 16) {
+          hex32 (&q);
+          plen = hex32 (&q);
+          scope = hex32 (&q);
+          hex32 (&q);
+          word (&q, name, sizeof name);
+          if (!strcmp (name, f->name)) {
+            msg_newaddr_start (o, f, &st);
+            sa_mask6 (o, plen);
+            sa_dl (o, f);
+            sa_in6 (o, a, scope == 0x20 ? f->index : 0);
+            msg_end (o, st);
+          }
+        }
+        p = next_line (p);
+      }
+    }
+  }
+  free (v6);
+}
+
+static void routes (struct out *o, struct iface *ifs, int n, int af, unsigned want)
+{
+  char *rt = 0, *arp = 0, *rt6 = 0;
+  const char *p;
+  if (af == 0 || af == B_PF_INET) {
+    rt = want & B_RTF_LLINFO ? 0 : slurp ("/proc/net/route", 0);
+    arp = slurp ("/proc/net/arp", 0);
+  }
+  if ((af == 0 || af == B_AF_INET6) && !(want & B_RTF_LLINFO))
+    rt6 = slurp ("/proc/net/ipv6_route", 0);
+  if (rt) {
+    /* Iface Destination Gateway Flags RefCnt Use Metric Mask ... (hex, network order in memory) */
+    p = next_line (rt);
+    while (*p) {
+      char name[20];
+      const char *q = p;
+      uint32_t dst, gw, mask;
+      unsigned fl, addrs = B_RTA_DST | B_RTA_GATEWAY | B_RTA_NETMASK;
+      unsigned char d[4], g[4], m[4];
+      struct iface *f;
+      size_t st;
+      word (&q, name, sizeof name);
+      dst = hex32 (&q); gw = hex32 (&q); fl = hex32 (&q);
+      hex32 (&q); hex32 (&q); hex32 (&q);
+      mask = hex32 (&q);
+      /* the file prints the address's bytes as a little-endian word */
+      le32 (d, dst); le32 (g, gw); le32 (m, mask);
+      f = find_if (ifs, n, name);
+      if (fl & B_RTF_HOST)
+        addrs = B_RTA_DST | B_RTA_GATEWAY;
+      if ((fl & B_RTF_UP) && (!want || (fl & want) == want)) {
+        msg_route_start (o, f ? f->index : 0, fl & 7, addrs, &st);
+        sa_in (o, d);
+        if (fl & B_RTF_GATEWAY)
+          sa_in (o, g);
+        else
+          sa_dl (o, f);
+        if (addrs & B_RTA_NETMASK)
+          sa_mask4 (o, m);
+        msg_end (o, st);
+      }
+      p = next_line (p);
+    }
+  }
+  if (rt6) {
+    /* dest plen src splen nexthop metric refcnt use flags dev (hex) */
+    p = rt6;
+    while (*p) {
+      unsigned char d[16], g[16];
+      char name[20];
+      const char *q = p;
+      unsigned plen, fl, i, zero = 1;
+      struct iface *f;
+      size_t st;
+      for (i = 0; i < 16; i++) {
+        d[i] = hexval (q[0]) * 16 + hexval (q[1]);
+        q += 2;
+      }
+      plen = hex32 (&q);
+      while (*q == ' ') q++;
+      q += 32;
+      hex32 (&q);
+      while (*q == ' ') q++;
+      for (i = 0; i < 16; i++) {
+        g[i] = hexval (q[0]) * 16 + hexval (q[1]);
+        if (g[i])
+          zero = 0;
+        q += 2;
+      }
+      hex32 (&q); hex32 (&q); hex32 (&q);
+      fl = hex32 (&q);
+      word (&q, name, sizeof name);
+      f = find_if (ifs, n, name);
+      /* Linux's own local, multicast and loopback entries are left out */
+      if ((fl & B_RTF_UP) && strcmp (name, "lo") && d[0] != 0xFF && !(fl & 0x80000000u)) {
+        unsigned addrs = B_RTA_DST | B_RTA_GATEWAY | (plen < 128 ? B_RTA_NETMASK : 0);
+        msg_route_start (o, f ? f->index : 0, (fl & 3) | (plen == 128 ? B_RTF_HOST : 0) | (zero ? 0 : B_RTF_GATEWAY), addrs, &st);
+        sa_in6 (o, d, 0);
+        if (!zero)
+          sa_in6 (o, g, 0);
+        else
+          sa_dl (o, f);
+        if (plen < 128)
+          sa_mask6 (o, plen);
+        msg_end (o, st);
+      }
+      p = next_line (p);
+    }
+  }
+  if (arp) {
+    /* IP address  HW type  Flags  HW address  Mask  Device */
+    p = next_line (arp);
+    while (*p) {
+      char ip[20], hw[24], name[20];
+      const char *q = p;
+      unsigned char a[4], mac[6];
+      unsigned fl;
+      int k, ok = 1, alen = 0;
+      struct iface *f;
+      size_t st;
+      word (&q, ip, sizeof ip);
+      hex32 (&q);                       /* "0x1": hex32 reads the 0 */
+      if (*q == 'x') { q++; hex32 (&q); }
+      while (*q == ' ') q++;
+      if (q[0] == '0' && q[1] == 'x')
+        q += 2;
+      fl = hex32 (&q);
+      word (&q, hw, sizeof hw);
+      word (&q, name, sizeof name);     /* mask "*" */
+      word (&q, name, sizeof name);
+      {
+        const char *s = ip;
+        for (k = 0; k < 4; k++) {
+          a[k] = (unsigned char) num (&s);
+          if (k < 3) {
+            if (*s != '.') { ok = 0; break; }
+            s++;
+          }
+        }
+      }
+      if ((fl & 2) && strlen (hw) == 17) {      /* ATF_COM: a complete entry */
+        for (k = 0; k < 6; k++)
+          mac[k] = hexval (hw[k * 3]) * 16 + hexval (hw[k * 3 + 1]);
+        alen = 6;
+      }
+      f = find_if (ifs, n, name);
+      if (ok && (!want || (want & ~(B_RTF_UP | B_RTF_HOST | B_RTF_LLINFO)) == 0)) {
+        msg_route_start (o, f ? f->index : 0, B_RTF_UP | B_RTF_HOST | B_RTF_LLINFO, B_RTA_DST | B_RTA_GATEWAY, &st);
+        sa_in (o, a);
+        sa_dl_mac (o, f, mac, alen);
+        msg_end (o, st);
+      }
+      p = next_line (p);
+    }
+  }
+  free (rt);
+  free (rt6);
+  free (arp);
+}
+
+/* ------------------------------------------------------------ counters */
+
+/* a value from /proc/net/snmp or /proc/net/netstat: "Group: names" then
+   "Group: values" */
+static int64_t stat_get (const char *t, const char *group, const char *name)
+{
+  size_t gl = strlen (group), nl = strlen (name);
+  const char *p = t;
+  while (t && *p) {
+    if (!strncmp (p, group, gl) && p[gl] == ':') {
+      const char *names = p + gl + 1, *vals = next_line (p);
+      int idx = 0;
+      if (strncmp (vals, group, gl) || vals[gl] != ':')
+        return -1;
+      vals += gl + 1;
+      while (*names && *names != '\n') {
+        char w[48];
+        word (&names, w, sizeof w);
+        if (!w[0])
+          break;
+        if (strlen (w) == nl && !strcmp (w, name)) {
+          int i;
+          char v[32];
+          const char *q = vals;
+          for (i = 0; i <= idx; i++)
+            word (&q, v, sizeof v);
+          {
+            const char *s = v;
+            int neg = *s == '-';
+            int64_t r;
+            if (neg)
+              s++;
+            r = (int64_t) num (&s);
+            return neg ? -r : r;
+          }
+        }
+        idx++;
+      }
+      return -1;
+    }
+    p = next_line (p);
+  }
+  return -1;
+}
+
+static uint32_t st (const char *t, const char *g, const char *n)
+{
+  int64_t v = stat_get (t, g, n);
+  return v < 0 ? 0 : (uint32_t) v;
+}
+
+/* tcpstat (OpenBSD 6.8, 536 bytes with 64-bit fields 4-byte aligned) */
+static size_t tcpstat (unsigned char *b, const char *snmp, const char *ns)
+{
+  uint32_t act = st (snmp, "Tcp", "ActiveOpens"), pas = st (snmp, "Tcp", "PassiveOpens");
+  uint32_t fails = st (snmp, "Tcp", "AttemptFails"), outs = st (snmp, "Tcp", "OutSegs");
+  uint32_t rexmit = st (snmp, "Tcp", "RetransSegs"), ins = st (snmp, "Tcp", "InSegs");
+  uint32_t inerr = st (snmp, "Tcp", "InErrs");
+  memset (b, 0, 536);
+  le32 (b + 0, act);                                  /* tcps_connattempt */
+  le32 (b + 4, pas);                                  /* tcps_accepts */
+  le32 (b + 8, act + pas > fails ? act + pas - fails : 0); /* tcps_connects */
+  le32 (b + 12, st (snmp, "Tcp", "EstabResets"));    /* tcps_drops */
+  le32 (b + 16, fails);                               /* tcps_conndrops */
+  le32 (b + 36, st (ns, "TcpExt", "TCPAbortOnTimeout")); /* tcps_timeoutdrop */
+  le32 (b + 40, st (ns, "TcpExt", "TCPTimeouts"));   /* tcps_rexmttimeo */
+  le32 (b + 64, outs);                                /* tcps_sndtotal */
+  le32 (b + 68, outs > rexmit ? outs - rexmit : 0);  /* tcps_sndpack */
+  le32 (b + 80, rexmit);                              /* tcps_sndrexmitpack */
+  le32 (b + 120, ins);                                /* tcps_rcvtotal */
+  le32 (b + 124, ins > inerr ? ins - inerr : 0);     /* tcps_rcvpack */
+  le32 (b + 136, st (snmp, "Tcp", "InCsumErrors"));  /* tcps_rcvbadsum */
+  le32 (b + 180, st (ns, "TcpExt", "TCPOFOQueue"));  /* tcps_rcvoopack */
+  le32 (b + 256, st (snmp, "Tcp", "OutRsts"));       /* tcps_noport (resets sent) */
+  return 536;
+}
+
+/* udpstat (52 bytes) */
+static size_t udpstat (unsigned char *b, const char *snmp)
+{
+  uint32_t in = st (snmp, "Udp", "InDatagrams"), noport = st (snmp, "Udp", "NoPorts");
+  uint32_t err = st (snmp, "Udp", "InErrors");
+  memset (b, 0, 52);
+  le32 (b + 0, in + noport + err);                    /* udps_ipackets */
+  le32 (b + 8, st (snmp, "Udp", "InCsumErrors"));    /* udps_badsum */
+  le32 (b + 20, noport);                              /* udps_noport */
+  le32 (b + 32, st (snmp, "Udp", "RcvbufErrors"));   /* udps_fullsock */
+  le32 (b + 44, st (snmp, "Udp", "OutDatagrams"));   /* udps_opackets */
+  return 52;
+}
+
+/* ipstat (132 bytes) */
+static size_t ipstat (unsigned char *b, const char *snmp)
+{
+  memset (b, 0, 132);
+  le32 (b + 0, st (snmp, "Ip", "InReceives"));       /* ips_total */
+  le32 (b + 4, st (snmp, "Ip", "InHdrErrors"));      /* ips_badsum (header errors) */
+  le32 (b + 28, st (snmp, "Ip", "ReasmReqds"));      /* ips_fragments */
+  le32 (b + 32, st (snmp, "Ip", "ReasmFails"));      /* ips_fragdropped */
+  le32 (b + 40, st (snmp, "Ip", "InUnknownProtos")); /* ips_noproto */
+  le32 (b + 44, st (snmp, "Ip", "ForwDatagrams"));   /* ips_forward */
+  le32 (b + 52, st (snmp, "Ip", "InDelivers"));      /* ips_delivered */
+  le32 (b + 56, st (snmp, "Ip", "OutRequests"));     /* ips_localout */
+  le32 (b + 60, st (snmp, "Ip", "OutDiscards") + st (snmp, "Ip", "OutNoRoutes")); /* ips_odropped */
+  le32 (b + 64, st (snmp, "Ip", "ReasmOKs"));        /* ips_reassembled */
+  le32 (b + 68, st (snmp, "Ip", "FragCreates"));     /* ips_fragmented */
+  le32 (b + 76, st (snmp, "Ip", "FragFails"));       /* ips_cantfrag */
+  le32 (b + 84, st (snmp, "Ip", "OutNoRoutes"));     /* ips_noroute */
+  return 132;
+}
+
+/* ------------------------------------------------------------ entry */
+
+static int give (const unsigned char *b, size_t n, void *oldp, size_t *oldlenp)
+{
+  if (!oldlenp)
+    return -L_EINVAL;
+  if (!oldp) {
+    *oldlenp = n;
+    return 0;
+  }
+  if (*oldlenp < n) {
+    memcpy (oldp, b, *oldlenp);
+    *oldlenp = n;
+    return -L_ENOMEM;
+  }
+  memcpy (oldp, b, n);
+  *oldlenp = n;
+  return 0;
+}
+
+int rol_sysctl (const int *name, unsigned namelen, void *oldp, size_t *oldlenp,
+                const void *newp, size_t newlen)
+{
+  if (newp || newlen)
+    return -L_EOPNOTSUPP;                 /* nothing can be set */
+  if (namelen < 4 || name[0] != B_CTL_NET)
+    return -L_EOPNOTSUPP;
+
+  if (name[1] == B_PF_ROUTE && namelen >= 6 && name[2] == 0) {
+    struct iface *ifs = malloc (sizeof (struct iface) * MAXIF);
+    struct out o;
+    int n, r;
+    if (!ifs)
+      return -L_ENOMEM;
+    n = read_ifaces (ifs);
+    if (n < 0) {
+      free (ifs);
+      return n;
+    }
+    o.cap = 256 * 1024;
+    o.n = 0;
+    o.full = 0;
+    o.b = malloc (o.cap);
+    if (!o.b) {
+      free (ifs);
+      return -L_ENOMEM;
+    }
+    if (name[4] == B_NET_RT_IFLIST)
+      iflist (&o, ifs, n, name[3]);
+    else if (name[4] == B_NET_RT_DUMP)
+      routes (&o, ifs, n, name[3], 0);
+    else if (name[4] == B_NET_RT_FLAGS)
+      routes (&o, ifs, n, name[3], (unsigned) name[5]);
+    else {
+      free (o.b);
+      free (ifs);
+      return -L_EOPNOTSUPP;
+    }
+    r = give (o.b, o.n, oldp, oldlenp);
+    free (o.b);
+    free (ifs);
+    return r;
+  }
+
+  if (name[1] == B_PF_INET && namelen == 4) {
+    unsigned char b[MAXSTAT * 4];
+    char *snmp = slurp ("/proc/net/snmp", 0), *ns = 0;
+    size_t n = 0;
+    int r;
+    if (!snmp)
+      return -L_ENOENT;
+    if (name[2] == 6 && name[3] == 21) {
+      ns = slurp ("/proc/net/netstat", 0);
+      n = tcpstat (b, snmp, ns);
+    } else if (name[2] == 17 && name[3] == 5)
+      n = udpstat (b, snmp);
+    else if (name[2] == 0 && name[3] == 33)
+      n = ipstat (b, snmp);
+    free (ns);
+    free (snmp);
+    if (!n)
+      return -L_EOPNOTSUPP;
+    r = give (b, n, oldp, oldlenp);
+    return r;
+  }
+  return -L_EOPNOTSUPP;
+}

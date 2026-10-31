@@ -1,0 +1,8 @@
+/* Socket_Sysctl for RISC OS on Linux (c.sysctl). Copyright (c) 2026 Andrew
+   Youll. Apache License 2.0. */
+#ifndef ROL_SYSCTL_H
+#define ROL_SYSCTL_H
+#include <stddef.h>
+int rol_sysctl (const int *name, unsigned namelen, void *oldp, size_t *oldlenp,
+                const void *newp, size_t newlen);
+#endif
