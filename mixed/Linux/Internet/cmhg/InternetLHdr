@@ -17,7 +17,11 @@
 #include "Global/Services.h"
 
 title-string: Internet
-help-string: Internet
+// The version programs check for (RMEnsure Internet 5.02 in !Omni, 5.40 in
+// !Internet): this module provides Internet 5's interface (Socket_Version
+// says 573), so it reports 5.73. Without a number cmhg made it 0.00, and
+// OmniClient said "LanManager requires Internet 5 or later".
+help-string: Internet 5.73
 initialisation-code: init
 finalisation-code: final
 
