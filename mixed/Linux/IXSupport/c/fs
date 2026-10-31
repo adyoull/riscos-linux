@@ -167,11 +167,13 @@ static int is_locked_fd(int fd) {
   return ix_fgetxattr(fd, "user.RISC_OS.LoadExec", &a, sizeof(a)) >= 9 && (a.attributes & 8);
 }
 
+// (an O_PATH descriptor: through /proc/self/fd, following that link to the
+// object itself, as lgetxattr wouldn't)
 static int is_locked_path(int fd) {
   struct { unsigned load, exec, attributes; } a;
   char name[28];
   sprintf(name, "/proc/self/fd/%i", fd);
-  return ix_lgetxattr(name, "user.RISC_OS.LoadExec", &a, sizeof(a)) >= 9 && (a.attributes & 8);
+  return ix_getxattr(name, "user.RISC_OS.LoadExec", &a, sizeof(a)) >= 9 && (a.attributes & 8);
 }
 
 static inline int pd_get(struct path_data *pd) {
