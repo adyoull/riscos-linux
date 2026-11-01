@@ -137,7 +137,7 @@ ColourPicker
 DrawFile
 BootCommands
 # AUNMsgs
-# MManager
+MManager
 LinuxInternet
 # Internet            -type HDR
 Resolver
