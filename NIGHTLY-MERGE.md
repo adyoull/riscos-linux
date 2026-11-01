@@ -75,6 +75,7 @@ directories, so other machines' builds are unchanged.
 | `fallocate`, `mprotect` | `mixed/Linux/Syscalls/GenSyscall` | LARGE/SMALL arguments are now stripped from every argument of the prototype. |
 | Socket_Select's timeout | `mixed/Linux/Internet/c/main` (`do_select`, `sigio_handler`) | The wait loop ends when `select_timeout` (s.asm, a ticker event) sets the pollword's timeout byte: a pollword that is non-zero makes `pollword_sleep` return at once, so any change to that loop must keep the check or it spins. Timeouts round up to whole centiseconds. Test: `t_select` in riscos-linux-testbed. |
 | Internet module version | `mixed/Linux/Internet/cmhg/InternetLHdr` (`help-string`) | Reports 5.73, matching `Socket_Version`. Programs check it with `RMEnsure Internet 5.xx` (!Omni 5.02, !Internet 5.40); without a number cmhg made it 0.00. Keep it in step if `Socket_Version` changes. |
+| Socket options and Socket_Sendmsg | `mixed/Linux/Internet/c/main` (`convert_sockopt`, the SWI switch) | SO_TYPE is answered (GLib's `g_socket_new_from_fd()` needs it; the SOCK_ types are the same numbers on Linux). An IPPROTO_TCP option not listed is refused instead of falling into the SOL_SOCKET list. Socket_Sendmsg_1 (UnixLib's and TCPIPLibs' `sendmsg()`) shares Socket_Sendmsg's case, and both take their flags from R2. Found by the web browser project. Test: `t_sockopt` in riscos-linux-testbed. |
 
 Not in this tree (they're in riscos-linux-testbed / riscos-linux): the image's
 init, rol-fb, LinuxCodec, NetWatch, the packages.

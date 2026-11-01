@@ -104,11 +104,12 @@ static int convert_sockopt(int level, int optname) {
         case TCP_MAXSEG:  return ix_TCP_MAXSEG;
         case TCP_NOPUSH:  return ix_TCP_CORK;
       }
+      break;  // an option not listed is unhandled, not the SOL_SOCKET one with its number
     case SOL_SOCKET:
       switch(optname) {
     //  case SO_DEBUG:       return ix_SO_DEBUG;
         case SO_REUSEADDR:   return ix_SO_REUSEADDR;
-    //  case SO_TYPE:        return ix_SO_TYPE;
+        case SO_TYPE:        return ix_SO_TYPE;   // SOCK_STREAM etc. are the same numbers on Linux (GLib needs this)
         case SO_ERROR:       return ix_SO_ERROR;
         case SO_DONTROUTE:   return ix_SO_DONTROUTE;
         case SO_BROADCAST:   return ix_SO_BROADCAST;
@@ -372,8 +373,12 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
     case Socket_Sendto - Socket_00:
       result = do_sendto(r->r[0], (void*)r->r[1], r->r[2], convert_msg_flags(r->r[3]), (void *)r->r[4]);
       break;
+    // Socket_Sendmsg (4.3BSD message and address) and Socket_Sendmsg_1
+    // (4.4BSD, UnixLib's and TCPIPLibs' sendmsg()): the first four words
+    // of the message are the same, and do_sendmsg takes both address forms
     case Socket_Sendmsg - Socket_00:
-      result = do_sendmsg(r->r[0], (void*)r->r[1], convert_msg_flags(r->r[3]));
+    case Socket_Sendmsg_1 - Socket_00:
+      result = do_sendmsg(r->r[0], (void*)r->r[1], convert_msg_flags(r->r[2]));
       break;
     case Socket_Recvfrom - Socket_00: {
       struct ix_iovec iov = {(void*)r->r[1], r->r[2]};
