@@ -49,14 +49,15 @@ for Linux/PVOps lines that went missing.
   upstream's 3 + 3 spare), MaxInterrupts 768, PVSys SWIDespatch room, as the
   port had.
 
-## Not done / to check when it builds
+## Building
 
-- It has not been assembled or compiled: the DDE must only be run on a real
-  Raspberry Pi, so the first build is on Andrew's Pi (see nightly/README.md).
-  Expect a few assembler errors from upstream code that references
-  symbols the Linux layout doesn't define.
-- RiscOS/Sources/SystemRes/InetRes/Sources/md5/md5.1 has conflict markers in
-  upstream's own copy; left alone.
+It builds natively with the DDE on a Raspberry Pi (see nightly/README.md):
+every ROL ROM from 5.31-2 has been built that way, and is tested with
+the riscos-linux-testbed suite under QEMU and natively. The fixes the first
+builds needed are commits on this branch ("Fixes from the ... build").
+
+RiscOS/Sources/SystemRes/InetRes/Sources/md5/md5.1 has conflict markers in
+upstream's own copy; left alone.
 
 ## RISC OS on Linux changes since the merge
 

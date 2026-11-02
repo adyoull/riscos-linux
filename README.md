@@ -1,4 +1,70 @@
-# Linux port of RISC OS
+# ROL-ROM: the ROM of RISC OS on Linux
+
+This is the source of the RISC OS 5 "ROM" that RISC OS on Linux (ROL) runs:
+a Linux program that is RISC OS, running natively on 32-bit capable ARM
+machines such as the Raspberry Pi 3, 4 and 5, or under QEMU elsewhere.
+
+It is [Timothy Baldwin's Linux port of RISC OS](https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source)
+brought up to date with RISC OS Open's 5.31 development sources (the nightly
+of 29 October 2026), with the fixes and additions that ROL needs. Baldwin's
+original README is kept below, unchanged.
+
+The ROM reports itself as **RISC OS 5.31-N (date)**: RISC OS Open's version,
+the date of the nightly it was merged from (`NightlyDate`), and ROL's build
+number (`BuildNumber`). ROL installs it from its package site as the
+`riscos-rom` package (`/opt/riscos/RISCOS.IMG`).
+
+## Branches
+
+| Branch | What |
+|---|---|
+| `nightly-merge` | The main line: Baldwin's port with RISC OS Open's 5.31 nightly merged in, and ROL's changes. ROL's ROMs are built from here. |
+| `swi-fastpath` | A test branch: `nightly-merge` plus a fast path for the ROM's own SWIs (`*ROLSWIPatch`). Its builds say `5.31-N-swi`. On the Raspberry Pi the same speed-up now comes from ROL's kernel and NativeSupport instead, with any ROM. |
+
+## What has changed
+
+`NIGHTLY-MERGE.md` explains how the nightly was merged, and has a table of
+every RISC OS on Linux change with where it is and what to watch when
+maintaining it. Each change is one commit, whose message has the detail.
+Every change is inside `[ Linux` / `MEMM_Type = "Linux"` conditions or in
+Linux-only directories, so other machines' builds are unchanged.
+
+| Build | Changes |
+|---|---|
+| 5.31-2 (29 Oct 2026) | RISC OS Open's 5.31 nightly merged into the port; native builds with the DDE on a Raspberry Pi (`nightly/BuildROM`); fixes from the first native builds (aborts, the undefined instruction handler, abortable dynamic areas); RAM size from Linux (up to 4095MB) and a free pool that counts memory not yet used; network statistics (Socket_Sysctl and Socket_InternalLookup in Internet 5's layouts, for NetStats and InetStat); the version string. |
+| 5.31-3 | IXFS gives RISC OS's filing system errors (Disc full, Locked, Already open, ...) and enforces the L (locked) attribute; physical memory pool dynamic areas (OS_DynamicArea 21-23, 25); build fixes. |
+| 5.31-4 | Socket_Select returns when its timeout runs out (it spun forever, hanging TubeSearch and Reel); a locked item can't be renamed. |
+| 5.31-5 | The Internet module reports version 5.73, so `RMEnsure Internet 5.xx` checks pass (!Omni, !Internet). |
+| 5.31-6 | Socket options: SO_TYPE (GLib), unknown TCP options refused; Socket_Sendmsg_1, and Socket_Sendmsg's flags. |
+| 5.31-7 | MbufManager in the ROM, as in every RISC OS 5 ROM (!Omni's LanManFS, Access); Socket_Select sees data that arrived before Socket_Accept, so servers such as RDPServer answer their clients. |
+
+## Building
+
+RISC OS Open's DDE is needed, and builds run natively on a Raspberry Pi:
+see `nightly/README.md`. `nightly/BuildROM` builds from RISC OS itself;
+`nightly/build-on-pi.sh` uses the port's Makefiles from Linux.
+
+## Related
+
+- ROL's packages (the ROM, the Linux side, HardDisc4, kernels) are at
+  [adyoull/riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg).
+- riscos-linux-testbed holds ROL's test suite (each fix here has a test
+  there) and the image's Linux programs (init, the display, sound, USB,
+  network).
+
+## Licences and credits
+
+The RISC OS sources are RISC OS Open's, under the licences in each file
+(mostly Apache 2.0). The Linux port is Timothy Baldwin's (Apache 2.0).
+RISC OS on Linux's changes are Andrew Youll's, under the same licence as
+the file they're in.
+
+Written with Claude (Anthropic's AI) as a coding assistant. Andrew Youll
+directs the work, makes the decisions, and tests on a Raspberry Pi 4.
+
+---
+
+# Timothy Baldwin's original README
 
 It is currently being discussed on the [RISC OS Open website](https://www.riscosopen.org/forum/forums/3/topics/9068). There is no sound support at present, and is incomplete in other ways. You should not reguard any new APIs to be stable.
 
@@ -16,11 +82,11 @@ RISC_OS__INSECURE=YES ./run_RISC_OS
 
 RISC OS Open Limited’s DDE is required to build RISC OS, this is proprietary software that may be brought from [RISC OS Open Limited](https://www.riscosopen.org/content/sales/dde)
 
-## Compiling on RISC OS
+### Compiling on RISC OS
 
 This Linux port of RISC OS can be built in similar fashion to the traditional method as documented on the RISC OS website, it is not necessary to run InstallTools as the relevant files will be accessed from the DDE without copying. However this will not build the SDL front-end which connects RISC OS to the Linux graphics system, without it RISC OS is limited to a text only interface.
 
-## Compiling on Linux
+### Compiling on Linux
 
 It can also be built on Linux using the Makefiles, which runs the majority of the build on RISC OS, by default using a binary of the Linux port that is automatically downloaded from [github](https://github.com/TimothyEBaldwin/RO_Linux) and RISC OS Open Limited’s DDE in ../DDE. Bash, Bubblewrap, GCC, GNU Make, Libattr, Libseccomp and SDL 2 are also required by Makefiles and support code. Either Bubblewrap must be setuid root, or unprivileged user namespaces must be enabled, or insecure mode enabled.
 
@@ -56,7 +122,7 @@ This following items will be download to ~/Downloads if needed:
 * RPCEmu 0.8.15
 * QEMU 5.0.0
 
-## IXFS
+### IXFS
 
 ### File type handling
 
@@ -74,7 +140,7 @@ Unlike other software IXFS by default stores RISC OS file types in POSIX extende
 
 As is standard for RISC OS filing systems IXFS is case insensitive by default, if 2 filenames only differ by case it is unpredictable which file is acted upon unless the exact filename is provided to IXFS. Case sensitivity may be enabled by adding "C" to the special field.
 
-## Linux RISC OS command line options
+### Linux RISC OS command line options
 
 | Option           | Action                                          |
 | ---              | ---                                             |
@@ -87,7 +153,7 @@ As is standard for RISC OS filing systems IXFS is case insensitive by default, i
 | --noseccomp      | Disable seccomp support                         |
 | --notimers       | Disable HAL timers                              |
 
-## Linux RISC OS error codes
+### Linux RISC OS error codes
 
 | Return Code | Error |
 | ---         | ---   |
@@ -112,7 +178,7 @@ As is standard for RISC OS filing systems IXFS is case insensitive by default, i
 |     119     | Problem starting fork server thread. |
 
 
-## To do List
+### To do List
 
 - [x] Complete the key map.
 - [x] Fix the realtime clock.
