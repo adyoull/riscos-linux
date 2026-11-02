@@ -69,6 +69,8 @@
 
    NativeSupport$Debug set when it starts: what it does, on Linux's stderr.
    NativeSupport$NoStubs: MRS through SIGILL too (to compare).
+   NativeSupport$NoFastSWI: SWIs through seccomp and SIGSYS, not the fast
+   entry of riscos-linux's kernels (*NativeSupport FastSWI On|Off too).
 
    Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include "cmodule.h"
@@ -99,6 +101,7 @@ typedef unsigned char uint8_t;
 #define SYS_ftruncate		93
 #define SYS_mprotect		125
 #define SYS_munmap		91
+#define SYS_prctl		172
 #define SYS_rt_sigaction	174
 #define SYS_rt_sigprocmask	175
 #define SYS_mmap2		192
@@ -128,6 +131,8 @@ static struct
 {
   int active;			/* natively, and started */
   unsigned sys_entry;		/* __PVirt_LinuxSyscall */
+  unsigned swi_handler;		/* the ROM's SIGSYS handler */
+  int fastswi;			/* 1: on; 0: off; -1: not in this kernel */
   int psr_ok, lur_ok, abtdump_ok, daaddr_ok;		/* the ROM's routines are where expected */
   struct ksigaction old_ill, old_segv, old_bus;
   unsigned midr;
@@ -3125,6 +3130,24 @@ read_pi_model (void)
       }
 }
 
+/* The fast SWI entry of riscos-linux's kernels (prctl PR_RISCOS_SWI): the
+   ROM's SWIs go to its SIGSYS handler straight from Linux's system call
+   entry, with the registers it reads written on its signal stack, instead
+   of through seccomp and a signal (about 2 microseconds a SWI on a Pi 4).
+   Other kernels refuse it, and SWIs go the usual way. */
+#define PR_RISCOS_SWI	0x524f5301u
+
+static void
+fastswi_set (int on)
+{
+  if (ns.fastswi < 0)
+    return;
+  if (lsys (SYS_prctl, PR_RISCOS_SWI, on ? ns.swi_handler : 0, ns.sys_entry + 4, 0, 0, 0) == 0)
+    ns.fastswi = on;
+  else if (on)
+    ns.fastswi = -1;
+}
+
 oserror *
 mod_init (const char *tail, int instance, void *pw)
 {
@@ -3142,6 +3165,7 @@ mod_init (const char *tail, int instance, void *pw)
       || RD (a.restorer) != 0xe3a070adu || RD (a.restorer + 4) != 0xef000000u)
     return ERR (bad_rom);
   ns.sys_entry = a.restorer + 4;
+  ns.swi_handler = a.handler;
   ns.psr_ok = RD (SETCPSR_FS_UNSTACK) == 0xe12cf001u
 	      && RD (SETCPSR_C_UNSTACK) == 0xe10f3000u
 	      && RD (SETCPSR_C_UNSTACK + 4) == 0xe28ec004u;
@@ -3288,6 +3312,13 @@ mod_init (const char *tail, int instance, void *pw)
   patch_cacheflush (ROMOS_LO, ROMOS_HI);
   patch_imb_full ();
   ns.active = 1;
+  /* (NativeSupport$NoFastSWI set when it starts: SWIs the usual way) */
+  {
+    regs v = {{ (unsigned) "NativeSupport$NoFastSWI", 0, -1, 0, 0 }};
+    swix_regs (OS_ReadVarVal, &v);
+    if (!v.r[2])
+      fastswi_set (1);
+  }
   return NULL;
 }
 
@@ -3462,15 +3493,42 @@ hot_out (void)
 oserror *
 mod_command (int index, const char *tail, int argc)
 {
-  (void) index; (void) tail; (void) argc;
+  (void) index;
   if (!ns.active)
     {
       write0 ("NativeSupport: not needed (RISC OS isn't running natively)");
       newline ();
       return NULL;
     }
+  /* *NativeSupport FastSWI On|Off */
+  if (argc)
+    {
+      while (*tail == ' ')
+	tail++;
+      const char *w = "fastswi ";
+      int i = 0;
+      while (w[i] && (tail[i] | 0x20) == w[i])
+	i++;
+      if (!w[i] || (w[i] == ' ' && !tail[i]))
+	{
+	  const char *o = tail + i;
+	  while (*o == ' ')
+	    o++;
+	  if ((o[0] | 0x20) == 'o' && (o[1] | 0x20) == 'n')
+	    fastswi_set (1);
+	  else if ((o[0] | 0x20) == 'o' && (o[1] | 0x20) == 'f')
+	    fastswi_set (0);
+	}
+      write0 ("Fast SWI entry: ");
+      write0 (ns.fastswi > 0 ? "on" : ns.fastswi ? "not in this Linux kernel" : "off");
+      newline ();
+      return NULL;
+    }
   write0 ("RISC OS for Linux, native. Processor ");
   write_hex8 (ns.midr);
+  newline ();
+  write0 ("Fast SWI entry (*NativeSupport FastSWI On|Off): ");
+  write0 (ns.fastswi > 0 ? "on" : ns.fastswi ? "not in this Linux kernel" : "off");
   newline ();
   {
     unsigned fl, gl, fa;

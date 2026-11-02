@@ -30,7 +30,7 @@ CFLAGS := -O2 -marm -march=armv7-a -mno-unaligned-access -fpie -fvisibility=hidd
 LDFLAGS := -nostdlib -static -Wl,--no-dynamic-linker -Wl,-T,common/module.ld \
            -Wl,--build-id=none -Wl,-z,norelro
 
-all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa
+all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa $(OUT)/MbufRes,ffa
 
 $(OBJ) $(OUT):
 	mkdir -p $@
@@ -87,6 +87,18 @@ $(OBJ)/KVMWheel.o: KVMWheel/KVMWheel.s | $(OBJ)
 	  echo "KVMWheel.o has relocations: it must be position-independent" >&2; exit 1; fi
 
 $(OUT)/KVMWheel,ffa: $(OBJ)/KVMWheel.o | $(OUT)
+	$(OBJCOPY) -O binary $< $@
+
+# --- MbufRes (MbufManager's Messages in ResourceFS, for the softloaded one) -
+$(OBJ)/res-mbuf.inc: MbufRes/Messages MbufRes/mkres.py | $(OBJ)
+	python3 -B MbufRes/mkres.py $< $@
+
+$(OBJ)/MbufRes.o: MbufRes/MbufRes.s $(OBJ)/res-mbuf.inc | $(OBJ)
+	$(AS) -I $(OBJ) -o $@ $<
+	@if $(T)readelf -r $@ | grep R_ARM_ | grep -vq R_ARM_V4BX; then \
+	  echo "MbufRes.o has relocations: it must be position-independent" >&2; exit 1; fi
+
+$(OUT)/MbufRes,ffa: $(OBJ)/MbufRes.o | $(OUT)
 	$(OBJCOPY) -O binary $< $@
 
 # --- LinuxAudio (a HAL audio device for the ROM's SoundDMA) -----------------

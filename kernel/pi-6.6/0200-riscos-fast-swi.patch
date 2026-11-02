@@ -1,0 +1,144 @@
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index e5bc54522..1b27912e6 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -179,6 +179,11 @@ struct thread_struct {
+ 	u64			sctlr_user;
+ 	u64			svcr;
+ 	u64			tpidr2_el0;
++#ifdef CONFIG_COMPAT
++	/* RISC OS on Linux's fast SWI entry (PR_RISCOS_SWI): 0 = off */
++	u32			riscos_swi_handler;
++	u32			riscos_swi_gateway;
++#endif
+ };
+ 
+ static inline unsigned int thread_get_vl(struct thread_struct *thread,
+diff --git a/arch/arm64/kernel/process.c b/arch/arm64/kernel/process.c
+index 37a70d59e..6221e207e 100644
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -271,6 +271,10 @@ static void flush_tagged_addr_state(void)
+ 
+ void flush_thread(void)
+ {
++#ifdef CONFIG_COMPAT
++	current->thread.riscos_swi_handler = 0;
++	current->thread.riscos_swi_gateway = 0;
++#endif
+ 	fpsimd_flush_thread();
+ 	tls_thread_flush();
+ 	flush_ptrace_hw_breakpoint(current);
+diff --git a/arch/arm64/kernel/syscall.c b/arch/arm64/kernel/syscall.c
+index f090e39f6..3f2058666 100644
+--- a/arch/arm64/kernel/syscall.c
++++ b/arch/arm64/kernel/syscall.c
+@@ -7,6 +7,9 @@
+ #include <linux/ptrace.h>
+ #include <linux/randomize_kstack.h>
+ #include <linux/syscalls.h>
++#include <linux/sched/signal.h>
++#include <linux/signal.h>
++#include <asm/compat.h>
+ 
+ #include <asm/debug-monitors.h>
+ #include <asm/exception.h>
+@@ -154,8 +157,71 @@ void do_el0_svc(struct pt_regs *regs)
+ }
+ 
+ #ifdef CONFIG_COMPAT
++/*
++ * RISC OS on Linux's fast SWI entry.
++ *
++ * RISC OS (Timothy Baldwin's Linux port, as a 32-bit program) makes its
++ * own SWIs with SVC; a seccomp filter turns every SVC but its Linux
++ * system call gateway's into SIGSYS, and its SIGSYS handler enters the
++ * RISC OS kernel (never returning through sigreturn). A task can ask
++ * (prctl PR_RISCOS_SWI, handler, gateway) for those SVCs to go to the
++ * handler straight from here instead: with the registers it reads (r1 a
++ * siginfo with si_call_addr at +12, r2 a ucontext with r0-r15 and the
++ * CPSR from +32) written on its signal stack, as a SIGSYS from seccomp
++ * would be, but without seccomp, the signal delivery and the FP state.
++ * The gateway's SVCs (and the vectors page's) stay Linux system calls.
++ * The signal mask isn't touched (the port's handler has SA_NODEFER and an
++ * empty mask). exec forgets it; fork and clone keep it.
++ */
++static bool riscos_swi(struct pt_regs *regs)
++{
++	struct thread_struct *t = &current->thread;
++	u32 pc = regs->pc, f[29];
++	unsigned long sp;
++	int i;
++
++	if (pc == t->riscos_swi_gateway || pc - 0xffff0000u < 0x1000u)
++		return false;
++	sp = regs->compat_sp;
++	if (current->sas_ss_size && !on_sig_stack(sp))
++		sp = current->sas_ss_sp + current->sas_ss_size;
++	sp = (sp - sizeof(f)) & ~7UL;
++	memset(f, 0, sizeof(f));
++	f[0] = SIGSYS;				/* siginfo: si_signo */
++	f[3] = pc;				/* si_call_addr */
++	for (i = 0; i < 15; i++)		/* ucontext (+16): r0-r14 */
++		f[12 + i] = regs->regs[i];
++	f[27] = pc;
++	f[28] = pstate_to_compat_psr(regs->pstate);
++	regs->syscallno = NO_SYSCALL;
++	if (copy_to_user((void __user *)sp, f, sizeof(f))) {
++		force_sig(SIGSEGV);
++		return true;
++	}
++	regs->regs[0] = SIGSYS;
++	regs->regs[1] = sp;
++	regs->regs[2] = sp + 16;
++	regs->compat_sp = sp;
++	regs->pc = t->riscos_swi_handler;
++	regs->pstate &= ~(PSR_AA32_T_BIT | PSR_AA32_IT_MASK);
++	return true;
++}
++
++long riscos_swi_prctl(unsigned long handler, unsigned long gateway);
++
++long riscos_swi_prctl(unsigned long handler, unsigned long gateway)
++{
++	if (!is_compat_task() || handler >> 32 || gateway >> 32 || handler & 3)
++		return -EINVAL;
++	current->thread.riscos_swi_gateway = gateway;
++	current->thread.riscos_swi_handler = handler;
++	return 0;
++}
++
+ void do_el0_svc_compat(struct pt_regs *regs)
+ {
++	if (unlikely(current->thread.riscos_swi_handler) && riscos_swi(regs))
++		return;
+ 	el0_svc_common(regs, regs->regs[7], __NR_compat_syscalls,
+ 		       compat_sys_call_table);
+ }
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 44b575990..d6ba09b2f 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -134,6 +134,10 @@
+ #ifndef PAC_GET_ENABLED_KEYS
+ # define PAC_GET_ENABLED_KEYS(a)	(-EINVAL)
+ #endif
++/* RISC OS on Linux: its SWIs straight to its handler (arch/arm64/kernel/syscall.c) */
++#define PR_RISCOS_SWI	0x524f5301
++long riscos_swi_prctl(unsigned long handler, unsigned long gateway);
++
+ #ifndef SET_TAGGED_ADDR_CTRL
+ # define SET_TAGGED_ADDR_CTRL(a)	(-EINVAL)
+ #endif
+@@ -2665,6 +2669,11 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
+ 			return -EINVAL;
+ 		error = PAC_GET_ENABLED_KEYS(me);
+ 		break;
++#if defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
++	case PR_RISCOS_SWI:
++		error = riscos_swi_prctl(arg2, arg3);
++		break;
++#endif
+ 	case PR_SET_TAGGED_ADDR_CTRL:
+ 		if (arg3 || arg4 || arg5)
+ 			return -EINVAL;
