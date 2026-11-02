@@ -3,7 +3,7 @@
 This is the source of the RISC OS 5 "ROM" that RISC OS on Linux (ROL) runs.
 The ROM image is a Linux executable: RISC OS running as a Linux program,
 natively on machines that can run 32-bit ARM code (Raspberry Pi 3, 4 and 5),
-or under a slightly modified QEMU elsewhere.
+or elsewhere under ROL's `qemu-arm-riscos` (QEMU 8.2.2 with ROL's changes).
 
 It is [Timothy Baldwin's Linux port of RISC OS](https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source)
 brought up to date with RISC OS Open's 5.31 development sources (the nightly
@@ -167,7 +167,7 @@ the build run with `INSECURE=YES`. The result is `Built/RISCOS.IMG`.
 | `METHOD` | How to build: `Linux` (default) or `rpcemu` |
 | `JOBS` | How many CPUs to use (default: all) |
 | `LINUX_ROM` | The RISC OS executable to build with |
-| `QEMU` | The `qemu-arm` to use where ARM code can't run natively |
+| `QEMU` | The QEMU to use where ARM code can't run natively: ROL's `qemu-arm-riscos` (QEMU 8.2.2), as installed at `/opt/riscos/qemu-arm-riscos` |
 | `PHASES` | The build phases to run (default `export_hdrs export_libs resources rom install_rom join`) |
 | `INSECURE` | `YES` to build without the sandbox |
 | `VERBOSE` | `1` for more output |
@@ -179,9 +179,15 @@ the build run with `INSECURE=YES`. The result is `Built/RISCOS.IMG`.
 | `fast` | Only the `install_rom` and `join` phases, then the tests |
 
 These are downloaded to `~/Downloads` when needed: RISC OS Open's
-HardDisc4 5.28 and IOMD ROM 5.28, RPCEmu 0.9.3 (for `METHOD=rpcemu`) and
-QEMU 5.2.0 (built with the port's patch, `Unix/LinuxSupport/qemu_swi.diff`,
-on machines that can't run ARM code).
+HardDisc4 5.28 and IOMD ROM 5.28, and RPCEmu 0.9.3 (for `METHOD=rpcemu`).
+
+On machines that can't run ARM code, build with ROL's QEMU:
+
+    make TARGET=Linux QEMU=/opt/riscos/qemu-arm-riscos check
+
+`qemu-arm-riscos` is QEMU 8.2.2 with ROL's patch, built by
+riscos-linux-testbed's `qemu/build.sh` and installed by ROL's
+`riscos-support` package.
 
 ## Related
 
