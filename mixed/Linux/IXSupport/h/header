@@ -60,6 +60,8 @@ extern "C" {
 extern _kernel_oserror *convert_error(int r);
 extern void *module_pw;
 extern void mime_final(void);
+extern void mime_probe(void);
+extern void mime_restarted(void);
 extern void eprintf(const char *fmt, ...);
 extern char dirname[1024];
 extern _kernel_oserror * const error_table[];

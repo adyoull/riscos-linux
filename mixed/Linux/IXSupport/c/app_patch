@@ -36,6 +36,15 @@ static const uint32_t good[] = {
 
 void sc_handler(int service_number, _kernel_swi_regs *r, void *pw) {
   (void)pw;
+  if (service_number == Service_StartWimp) {
+    mime_probe();                 // the desktop is starting: MimeMap's table
+    return;
+  }
+  if (service_number == Service_ModulePostInit) {
+    const char *t = (const char *)r->r[2];
+    if ((t[0] | 0x20) == 'm' && !strncmp(t + 1, "imeMap", 6) && t[7] < 32) mime_restarted();
+    return;
+  }
   if (service_number == Service_UKCompression) {
     uint32_t *p = (uint32_t *)r->r[2];
     if (p[4] == 0xEF000011)

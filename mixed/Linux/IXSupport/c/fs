@@ -202,8 +202,13 @@ static inline void pd_close(struct path_data *pd) {
    and that file is usually on IXFS: asked from in here, that would reenter
    IXFS in the middle of a call (pd1 and pd2 are shared). So it's asked
    first from a callback, when no filing system call is in progress, and
-   used from here only once that has worked; until then (and if it failed,
-   for 10 seconds before the next try) files have no type from extensions. */
+   used from here only once that has worked. That's done when the desktop
+   starts (Service_StartWimp: by then !Boot has set Inet$MimeMappings, and
+   the Filer hasn't shown anything yet) and whenever MimeMap starts
+   (Service_ModulePostInit: a MimeMap that's restarted has forgotten its
+   table, so it isn't used from here again until it has read it). Until
+   then (and once a second while it fails) files have no type from
+   extensions. */
 
 #define MimeMap_Translate 0x50B00
 #define MMM_TYPE_RISCOS 0
@@ -221,6 +226,18 @@ _kernel_oserror *mime_prime_handler(_kernel_swi_regs *r, void *pw) {
   return 0;
 }
 
+/* Ask MimeMap from a callback, unless that's done or on its way */
+void mime_probe(void) {
+  if (mime_state == MIME_NONE && module_pw &&
+      !_swix(OS_AddCallBack, _INR(0, 1), mime_prime, module_pw)) mime_state = MIME_PENDING;
+}
+
+/* MimeMap has (re)started: not to be asked from IXFS until it has its table */
+void mime_restarted(void) {
+  if (mime_state == MIME_READY) mime_state = MIME_NONE;
+  mime_probe();
+}
+
 void mime_final(void) {
   if (mime_state == MIME_PENDING) _swix(OS_RemoveCallBack, _INR(0, 1), mime_prime, module_pw);
   mime_state = MIME_NONE;
@@ -230,12 +247,12 @@ void mime_final(void) {
    characters), or -1 */
 static int mime_type(const char *name, size_t len) {
   if (mime_state != MIME_READY) {
-    if (mime_state == MIME_NONE && module_pw) {
+    if (mime_state == MIME_NONE) {
       unsigned now = 0;
       _swix(OS_ReadMonotonicTime, _OUT(0), &now);
-      if (!mime_tried || now - mime_tried >= 1000) {
+      if (!mime_tried || now - mime_tried >= 100) {
         mime_tried = now | 1;
-        if (!_swix(OS_AddCallBack, _INR(0, 1), mime_prime, module_pw)) mime_state = MIME_PENDING;
+        mime_probe();
       }
     }
     return -1;
