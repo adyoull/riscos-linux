@@ -159,6 +159,71 @@ on, so the first builds were on Andrew's Raspberry Pi)
 - The version: "RISC OS 5.31 (29 Oct 2026) nightly", the nightly's date
   instead of the kernel module's own (24 Apr 2024).
 
+## Faster SWIs (31 October to 2 November 2026)
+
+SWIs (RISC OS's system calls) were the biggest cost of running RISC OS on
+Linux. This is what was found and done.
+
+**Why they were slow.** RISC OS's SWI instruction is the one Linux uses
+for its own system calls, so each SWI went: Linux's seccomp filter →
+a SIGSYS signal (a full signal frame with all the registers and the
+floating point state, the signal mask) → the HAL's SWI handler → RISC OS.
+Measured with SWICost on the same Raspberry Pi 4: native RISC OS 5.31
+does `XOS_ReadMonotonicTime` in 206 ns and `OS_Byte 135` in 1.9 µs; ROL
+5.31-6 took 2.6 µs and 3.1 µs - about 2.4 µs more for every SWI, roughly
+twelve times native. A Linux system call through the HAL's own gateway
+cost 0.6 µs, so the signal delivery was what cost.
+
+**First try: patching the ROM's SWIs (the `swi-fastpath` branch, builds
+`5.31-N-swi`).** Each ROM SWI that traps is rewritten once to branch to a
+stub that enters RISC OS directly (`*ROLSWIPatch On|Count|Off`). It took
+five rounds to work natively:
+
+- the 128KB of stubs moved to the end of the kernel, and a literal pool
+  before them (they had put other code's ADRLs and literals out of reach);
+- the hook kept out of line, so the HAL's SWI handler and the test bed's
+  QEMU and NativeSupport still find the routines they look for;
+- `*ROLSWIPatch` reads the HAL's counts through functions (a C module
+  can't address the HAL's variables directly);
+- the SWI that has just been patched returns through its stub (the
+  kernel reads the SWI number from the word before the return address,
+  which had just become the branch: the first patched SWI jumped to 0);
+- an interrupt arriving while the HAL's patching code was on the signal
+  stack is left pending (it had been taken as RISC OS's own, which put the
+  signal stack into the SVC registers: random aborts);
+- only SWIs made in a privileged mode are patched, never OS_EnterOS (the
+  stub pushes on the caller's stack, which user-mode code may not have).
+
+It worked (the suites passed natively and under QEMU, and every
+application tried started), but counting with `*ROLSWIPatch` across six
+applications showed 85–95% of SWIs come from outside the ROM - the
+applications, UnixLib, modules from disc - and most of the ROM's own are
+made in user mode, so it sped up a few percent of them.
+
+**Then: a fast SWI entry in Linux itself.** A small patch to the Pi's
+(6.6) and the other machines' (7.2) kernels, `0200-riscos-fast-swi.patch`
+in riscos-linux: RISC OS's process registers its SWI handler and its one
+gateway for real Linux calls once (`prctl PR_RISCOS_SWI`), and from then
+on any other SVC goes straight to the handler with a small frame of just
+the registers - no seccomp, no signal frame, no floating point state, no
+signal mask. Linux calls from the gateway are untouched, and no other
+process is affected. NativeSupport 0.16 turns it on at start-up
+(`*NativeSupport FastSWI On|Off`; on other kernels it says so and SWIs go
+the usual way). It needs no change to the ROM: it works with any ROM.
+
+**Results on the Raspberry Pi 4:**
+
+- a SWI: about 2.4 µs down to 745 ns (SWICost);
+- ROBench: OS_SWI 3.3 times faster, OS_ReadVarVal 2.4, BPUT 4.2,
+  BGET 2.0, Draw strokes 2.8; the CPU, floating point, memory and NEON
+  tests unchanged, as they make no SWIs.
+
+Released as riscos-support 1.0.0017-1 (NativeSupport 0.16) and the
+kernels riscos-kernel-pi 6.6.78-4, riscos-kernel-generic and
+riscos-kernel-wdk2023 7.2.0-3. (riscos-support 1.0.0015-1 and 1.0.0016-1
+had shipped NativeSupport 0.15, which replaced a 0.16 installed by hand:
+a ROBench on 5.31-8 showed SWIs back at the slow speed.)
+
 ## The `swi-fastpath` test branch
 
 Builds `5.31-N-swi` (from 5.31-3): the ROM's own SWIs that trap are
