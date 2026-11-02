@@ -34,6 +34,8 @@
 
 // S - Don't write tinestamps
 
+// M - No file types from extensions (MimeMap)
+
 struct special_field {
   bool case_sensitive, timestamp;
   uint8_t suffix, nomime;
@@ -56,6 +58,8 @@ extern "C" {
 #include "IXSupportHdr.h"
 
 extern _kernel_oserror *convert_error(int r);
+extern void *module_pw;
+extern void mime_final(void);
 extern void eprintf(const char *fmt, ...);
 extern char dirname[1024];
 extern _kernel_oserror * const error_table[];

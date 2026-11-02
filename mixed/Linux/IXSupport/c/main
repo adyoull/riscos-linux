@@ -53,6 +53,7 @@ _kernel_oserror *init(const char *cmd_tail, int podule_base, void *pw) {
     _swix(OS_SetVarVal, _INR(0, 4), pd1.name, s, strlen(s), 0, 4);
   }
 
+  module_pw = pw;
   pd1.fd = -1;
   pd2.fd = -1;
   pd1.dir_fd = -1;
@@ -68,6 +69,7 @@ _kernel_oserror *final(int fatal, int podule, void *pw) {
   (void)pw;
   _kernel_oserror *e = 0;
   e = _swix(OS_FSControl, _INR(0, 1), 16, "IXFS");
+  if (!e) mime_final();
   return e;
 }
 

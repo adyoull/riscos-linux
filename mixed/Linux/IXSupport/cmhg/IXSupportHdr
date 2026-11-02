@@ -29,7 +29,8 @@ generic-veneers:     \
   FSEntry_Close      \
   FSEntry_File       \
   FSEntry_Func       \
-  FSEntry_GBPB
+  FSEntry_GBPB       \
+  mime_prime
 
 
 service-call-handler: sc_handler Service_UKCompression

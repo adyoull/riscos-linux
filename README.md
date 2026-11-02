@@ -36,6 +36,7 @@ or in Linux-only directories, so other machines' builds are unchanged.
 | 5.31-5 | The Internet module reports version 5.73, so `RMEnsure Internet 5.xx` checks pass (!Omni, !Internet). |
 | 5.31-6 | Socket options: SO_TYPE (GLib), unknown TCP options refused; Socket_Sendmsg_1, and Socket_Sendmsg's flags. |
 | 5.31-7 | MbufManager in the ROM, as in every RISC OS 5 ROM (!Omni's LanManFS, Access); Socket_Select sees data that arrived before Socket_Accept, so servers such as RDPServer answer their clients. |
+| 5.31-8 | IXFS gives a file with no RISC OS type the type of its extension (MimeMap), as DOSFS does: files on USB discs and files Linux programs wrote show as JPEG, Text, Archive and so on. |
 
 ## What's in the tree
 
@@ -126,6 +127,17 @@ The special field (`IXFS#X:...`) chooses how file types are handled:
 | (none) | Normal | If needed | Yes | Only if no extension |
 | W | Write | Always | Yes | Only if no extension |
 | X | Exclusive | Always | Yes | Never |
+
+### Types from extensions
+
+A file with no RISC OS type stored (no `,xxx` and no extended attribute,
+as on FAT, exFAT and NTFS discs, or a file a Linux program wrote) that
+isn't executable gets the type MimeMap gives its extension, as DOSFS does:
+`photo.jpg` (`photo/jpg` in RISC OS) is a JPEG. An executable file with no
+type is UNIX Ex. Saving to a disc that can't keep types adds `,xxx` to the
+name only if the name doesn't already say the type, so a JPEG saved as
+`photo/jpg` stays `photo.jpg` for other computers. `M` in the special
+field turns this off.
 
 ### Case
 
