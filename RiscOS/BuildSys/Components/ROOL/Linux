@@ -33,7 +33,7 @@ Econet                -type HDR
 # DDT                 -type HDR
 HostFS                -type HDR
 # SATADriver          -type HDR
-# SCSIDriver          -type HDR
+SCSIDriver            -type EXP   # the SCSI SWIs' headers, for SCSISwitch and SCSIFS
 PCCardFS              -type HDR
 PDriver               -type HDR
 # PDumperDM           -type HDR
@@ -133,6 +133,12 @@ Percussion
 # SharedSnd
 Filer_Action
 DOSFS                 -options PCMCIA=TRUE
+# FileCore discs (USB sticks, SD cards) as on a native Pi: SCSIFS and its
+# filer over SCSISwitch; ROL's SCSILinux (HardDisc4) is the SCSISwitch
+# driver, in place of SCSISoftUSB, passing the commands to Linux
+SCSISwitch
+SCSIFS
+SCSIFiler             -options ASFLAGS="-PD \"SCSI SETL {TRUE}\"" TEMPLATES=yes
 ColourPicker
 DrawFile
 BootCommands
@@ -214,7 +220,6 @@ DebugLib              -type HDR
 # NVRAM               -type EXP
 # PortManager         -type EXP
 PCI                   -type HDR
-SCSIFS                -type HDR # Needed for header export, but depends on filecore headers
 #
 SharedRISC_OSLib_Headers -type HDR
 #ABRelease

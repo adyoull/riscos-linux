@@ -40,6 +40,7 @@ or in Linux-only directories, so other machines' builds are unchanged.
 | 5.31-7 | MbufManager in the ROM, as in every RISC OS 5 ROM (!Omni's LanManFS, Access); Socket_Select sees data that arrived before Socket_Accept, so servers such as RDPServer answer their clients. |
 | 5.31-8 | IXFS gives a file with no RISC OS type the type of its extension (MimeMap), as DOSFS does: files on USB discs and files Linux programs wrote show as JPEG, Text, Archive and so on. |
 | 5.31-9 | The keyboard LEDs (Caps Lock, Num Lock, Scroll Lock) follow RISC OS on a Linux console: SocketKVM sends their state to the front end, and ROL's rol-fb sets them. |
+| 5.31-10 | FileCore discs: SCSISwitch, SCSIFS and SCSIFiler as on a native Pi, with ROL's SCSILinux module passing the discs' commands to Linux. |
 
 ## What's in the tree
 

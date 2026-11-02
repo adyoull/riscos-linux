@@ -6,7 +6,15 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-9 (2 November 2026, not yet built)
+## 5.31-10 (2 November 2026, not yet built)
+
+- **FileCore discs (USB sticks and SD cards formatted on RISC OS).** The
+  ROM has RISC OS Open's SCSI layers as a native Raspberry Pi ROM does:
+  SCSISwitch, SCSIFS and SCSIFiler (`SCSI::` drives with their icon-bar
+  icons). ROL's SCSILinux module, loaded from HardDisc4, takes the place
+  of SCSISoftUSB and passes the discs' commands to Linux.
+
+## 5.31-9 (2 November 2026, not built: its change is in 5.31-10)
 
 - **Keyboard LEDs.** Caps Lock, Num Lock and Scroll Lock light as RISC OS
   has them: SocketKVM passes KeyV_NotifyLEDState to the front end
