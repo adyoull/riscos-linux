@@ -248,6 +248,16 @@ static int do_accept(int fd, void *addr, ix_socklen_t *addrlen, void *pw) {
     memset(&sockets[result], 0, sizeof(sockets[result]));
     _swix(OS_ClaimDeviceVector, _INR(0, 2), result, sigio, pw);
     _swix(OS_Hardware, _IN(0) | _INR(8, 9), result, 0, EntryNo_HAL_IRQEnable);
+    // Linux signals only new events, so data that came before the signal
+    // was set up (an RDP or TLS client's first packet, sent straight after
+    // connecting) would never be seen by select, and "can write" is only
+    // signalled after the send buffer has been full: ask now.
+    struct ix_pollfd pfd = {result, ix_POLLIN | ix_POLLOUT, 0};
+    ix_poll(&pfd, 1, 0);
+    if (pfd.revents & (ix_POLLIN | ix_POLLERR | ix_POLLHUP))
+      sockets[result].pollword[__NR_recvmsg & 1].s.data = 1;
+    if (pfd.revents & ix_POLLOUT)
+      sockets[result].pollword[__NR_sendmsg & 1].s.data = 1;
   }
   return result;
 }
