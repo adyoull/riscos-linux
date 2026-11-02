@@ -190,9 +190,29 @@ _kernel_oserror *final(int fatal, int podule, void *pw) {
   return e;
 }
 
+// The keyboard LEDs (KeyV_NotifyLEDState's R1: bit 0 Caps Lock, 1 Num Lock,
+// 2 Scroll Lock), for front ends that set them (version 2 or later: rol-fb
+// on a Linux console; a desktop front end leaves them to its host)
+static unsigned frontend_version, leds;
+static bool leds_known;
+
+static void send_leds(void) {
+  if (socket != -1 && leds_known && frontend_version >= 2) {
+    struct leds l;
+    l.reason = c_leds;
+    l.leds = leds;
+    ix_write(socket, &l, sizeof(l));
+  }
+}
+
 int Keyv_handler(_kernel_swi_regs *regs, void *pw) {
   (void)regs;
   (void)pw;
+  if (regs->r[0] == KeyV_NotifyLEDState) {
+    leds = regs->r[1] & 7;
+    leds_known = true;
+    send_leds();
+  }
   if (regs->r[0] == 4) {
     if (socket != -1) {
       _swi(OS_ClaimDeviceVector, _INR(0, 2), socket, Socket_Ready, pw);
@@ -243,6 +263,11 @@ int Socket_Ready_handler(_kernel_swi_regs *regs, void *pw) {
 
       case ev_close:
         poll_word |= POLL_CLOSE;
+        break;
+
+      case ev_version:
+        frontend_version = r.version.version;
+        send_leds();
         break;
     }
   }

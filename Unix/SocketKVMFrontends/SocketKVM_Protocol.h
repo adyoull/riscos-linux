@@ -82,6 +82,7 @@ union command {
     c_version     = CONST(6),
     c_activescreen = CONST(7),
     c_startscreen = CONST(8),
+    c_leds        = CONST(9),   /* to front ends that report version 2 or later */
   } reason;
   struct version version;
   struct {
@@ -114,5 +115,9 @@ union command {
     int32_t reason;
     ule32 address;
   } startscreen;
+  struct leds {             /* the keyboard LEDs: bit 0 Caps Lock, 1 Num Lock, 2 Scroll Lock */
+    int32_t reason;
+    ule32 leds;
+  } leds;
   uint8_t pad[33 * 8];
 };
