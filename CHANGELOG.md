@@ -70,17 +70,86 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
 
 ## 5.31-2 (31 October 2026)
 
-- **RISC OS Open's 5.31 nightly (29 October 2026) merged into Timothy
-  Baldwin's port**, built natively with the DDE on a Raspberry Pi
-  (`nightly/BuildROM`).
-- Fixes from the first native builds: aborts (no CP15 reads in user
-  mode), the undefined instruction handler, abortable dynamic areas.
-- RAM from Linux: `ROL_RAMSIZE_MB` (up to 4095MB) sets RISC OS's RAM, and
-  the free pool counts the memory not yet used, so the Task Manager's
-  Free is right.
-- Network statistics in Internet 5's layouts (Socket_Sysctl,
-  Socket_InternalLookup), for NetStats and InetStat.
-- The version string: "RISC OS 5.31-2 (29 Oct 2026)".
+- RAM from Linux: `ROL_RAMSIZE_MB` (up to 4095MB) sets RISC OS's RAM
+  (3GB if not given), and the free pool counts the memory not yet used,
+  so the Task Manager's Free is right.
+- Network statistics in Internet 5's layouts (Socket_Sysctl for the
+  interface list, routes, ARP and TCP/UDP/IP counters and connections;
+  Socket_InternalLookup), from Linux: NetStats and InetStat work.
+- The version string with the build number: "RISC OS 5.31-2 (29 Oct
+  2026)".
+
+## 5.31-1 (30 October 2026): from 5.29 to 5.31
+
+The first build: Timothy Baldwin's Linux port, which was RISC OS 5.29
+(its kernel 6.57 of April 2021, last updated in December 2022), brought
+up to RISC OS Open's 5.31 development sources (the nightly of 29 October
+2026), and built natively with the DDE on a Raspberry Pi. Released as
+`riscos-rom` 1.0.0001-1 in the first images. What it took:
+
+**The merge** (`NIGHTLY-MERGE.md` has the detail)
+
+- Baldwin's own "merge with RISC OS Open" commits carry Linux changes of
+  their own, so every file was merged three ways against the version first
+  imported into the port (2017), not against a later upstream. Of the
+  files that differ: 669 taken from upstream (the port never changed
+  them), 128 kept from the port (upstream never changed them), 155 merged
+  cleanly, **266 conflicts resolved by hand**, and 21 that both had added
+  taken from upstream. Lines that carry the port's Linux structure
+  (`[ Linux`, `[ PagedMemory`, KSWI, ROMLimit...) were never resolved
+  automatically, and every changed assembler file was checked to have the
+  same `[`/`]` nesting as the port's.
+- Kernel: KernelWS rebuilt as upstream's plus the port's Linux layout;
+  `s.HAL` is the port's with upstream's later changes; Linux keeps its own
+  abort veneers (upstream's AbortTrap ones are for real hardware);
+  upstream's new separate RW/ZI data segment placed at &24400000 for
+  Linux, with the link address to match; KSWI restored wherever the port
+  had it; raw MSR/MRS that upstream added in code Linux runs converted to
+  the port's PVOps macros; `TaskControl_ResetStacks` from upstream, in
+  PVOps form.
+- The port's copies of files upstream has since renamed or retyped
+  dropped (they collide on RISC OS's case-insensitive discs), 77 files
+  upstream had deleted removed, and 110 files the port never changed taken
+  at upstream's current version.
+
+**Building it natively** (the DDE runs only on the machine it's installed
+on, so the first builds were on Andrew's Raspberry Pi)
+
+- `nightly/BuildROM`: an Obey file that builds the ROM from RISC OS
+  itself, from a source zip: checks for files lost in unzipping, finds the
+  DDE's C library, runs RISC OS Open's `srcbuild` once per phase and stops
+  at the first failure. The port's build-it-first `srcbuild` wrapper
+  replaced by upstream's binary; BuildSys makefiles back to upstream's.
+- First build: `Hdr:CPU.PVOps` back in Generic32 (behind most of the
+  "Unknown opcode pvMSR/pvMRS" errors); DAReason_AlterFile back for
+  SocketKVM; FileSwitch's internal `object_image` renamed (upstream now
+  defines one); CModule accepts the port's `CUSTOMEXP=no`.
+- Second build: PVOps import and jump-table lines the merge had lost
+  (RISC_OSLib, TaskWindow, FileSwitch, BufferManager, DeviceFS,
+  FPEmulator); `s.MemInfo`'s OS_Memory 64+ dispatch and ReservePages the
+  merge had duplicated; L1PT only with ShortDesc.
+- Linking as the port did: modules that call the Linux HAL can't be
+  linked at base 0, so the `rom` phase only assembles and linking waits
+  for `rom_link` with the ROM address; RISC_OSLib's linked libraries
+  relinked when the ROM address changes.
+- TerritoryManager: the port's assembler version, since upstream's C one
+  needs a newer cmhg than DDE 31's.
+
+**Fixes from the first runs on a real Pi**
+
+- Boot hung in AbortTrap's set-up: reading CP15's MIDR raises SIGILL in
+  user mode before RISC OS's handler exists (QEMU emulates the read, so
+  it had booted there). Not read on Linux.
+- Errors reported "abort on data transfer at &FFFFFFF8": the undefined
+  instruction handler reset the stacks over its own register dump. The
+  dump is copied first on Linux.
+- Abortable dynamic areas created as ordinary ones (aborts reach the port
+  through its own veneers, not AbortTrap): ARMEABISupport 1.08 had relied
+  on their handlers and Iris failed with "Internal error".
+- BASIC's RENUMBER message and modulewrap's error path as upstream's.
+- RAM: 3GB instead of 1GB.
+- The version: "RISC OS 5.31 (29 Oct 2026) nightly", the nightly's date
+  instead of the kernel module's own (24 Apr 2024).
 
 ## The `swi-fastpath` test branch
 

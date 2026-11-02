@@ -22,7 +22,8 @@ its package site as the `riscos-rom` package, at `/opt/riscos/RISCOS.IMG`.
 
 ## Builds
 
-`NIGHTLY-MERGE.md` explains how RISC OS Open's sources were merged into the
+`CHANGELOG.md` says what each build changed, from 5.31-1 (the move from
+5.29 to 5.31). `NIGHTLY-MERGE.md` explains how RISC OS Open's sources were merged into the
 port, and lists every RISC OS on Linux change with where it is and what to
 watch when maintaining it. Each change is one commit, whose message has the
 detail. All of them are inside `[ Linux` / `MEMM_Type = "Linux"` conditions
@@ -30,7 +31,8 @@ or in Linux-only directories, so other machines' builds are unchanged.
 
 | Build | Changes |
 |---|---|
-| 5.31-2 | RISC OS Open's 5.31 nightly (29 Oct 2026) merged into the port; native builds with the DDE on a Raspberry Pi; fixes from the first native builds (aborts, the undefined instruction handler, abortable dynamic areas); RAM size from Linux (up to 4095MB) and a free pool that counts memory not yet used; network statistics (Socket_Sysctl and Socket_InternalLookup in Internet 5's layouts, for NetStats and InetStat); the version string. |
+| 5.31-1 | RISC OS Open's 5.31 nightly (29 Oct 2026) merged into Timothy Baldwin's port, which was 5.29: 266 conflicts resolved by hand; native builds with the DDE on a Raspberry Pi; fixes from the first runs on real hardware (aborts, the undefined instruction handler, abortable dynamic areas). See CHANGELOG.md. |
+| 5.31-2 | RAM size from Linux (up to 4095MB) and a free pool that counts memory not yet used; network statistics (Socket_Sysctl and Socket_InternalLookup in Internet 5's layouts, for NetStats and InetStat); the version string with the build number. |
 | 5.31-3 | IXFS gives RISC OS's filing system errors (Disc full, Locked, Already open, ...) and enforces the L (locked) attribute; physical memory pool dynamic areas (OS_DynamicArea 21-23, 25); build fixes. |
 | 5.31-4 | Socket_Select returns when its timeout runs out (it spun forever, hanging TubeSearch and Reel); a locked item can't be renamed. |
 | 5.31-5 | The Internet module reports version 5.73, so `RMEnsure Internet 5.xx` checks pass (!Omni, !Internet). |
