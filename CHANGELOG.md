@@ -6,13 +6,18 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-10 (2 November 2026, not yet built)
+## 5.31-10 (2 November 2026)
 
 - **FileCore discs (USB sticks and SD cards formatted on RISC OS).** The
   ROM has RISC OS Open's SCSI layers as a native Raspberry Pi ROM does:
   SCSISwitch, SCSIFS and SCSIFiler (`SCSI::` drives with their icon-bar
   icons). ROL's SCSILinux module, loaded from HardDisc4, takes the place
   of SCSISoftUSB and passes the discs' commands to Linux.
+- Tested in the test bed (riscos-linux-testbed `tests/filecore.sh`): HForm
+  formats a disc image through SCSIFS and SCSILinux; files and a directory
+  copy on and back identical, with their types; `*Verify` passes; a second
+  boot reads them again.
+- Includes 5.31-9's keyboard LEDs.
 
 ## 5.31-9 (2 November 2026, not built: its change is in 5.31-10)
 
