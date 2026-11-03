@@ -189,7 +189,7 @@ sys "int",    "fchdir",           "int fd";
 sys "int",    "fcntl",            "int fd, int cmd, unsigned arg", "__NR_fcntl64";
 sys "int",    "fstat",            "int fd, struct ix_stat *buf", "__NR_fstat64";
 sys "int",    "fstatat",          "int fd, const char *path, struct ix_stat *buf, int flags", "__NR_fstatat64";
-sys "int",    "fstatfs",          "int fd, struct ix_statfs *buf", "__NR_fstatfs64";
+sys "int",    "fstatfs",          "int fd, unsigned size, struct ix_statfs *buf", "__NR_fstatfs64";
 sys "int",    "fsync",            "int fd";
 sys "int",    "ftruncate",        "int fd, ix_off_t length";
 sys "int",    "fallocate",        "int fd, int mode, SMALL uint32_t offset, SMALL uint32_t len";

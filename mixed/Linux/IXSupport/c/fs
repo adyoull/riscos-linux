@@ -730,11 +730,12 @@ _kernel_oserror *FSEntry_Func_handler(_kernel_swi_regs *regs, void *pw) {
       if (e) return e;
 
       struct ix_statfs s;
-      int r = ix_fstatfs(pd1.fd, &s);
+      int r = ix_fstatfs(pd1.fd, sizeof s, &s);
       if (r) return fs_error(r);
       regs->r[2] = mul_sat32(s.f_blocks, s.f_bsize);
       regs->r[0] = mul_sat32(s.f_bfree, s.f_bsize);
       regs->r[1] = mul_sat32(s.f_bavail, s.f_bsize);
+      break;
     }
     case fsfunc_ReadFreeSpace64: {
       pd1.sf = parse_special_field((const char *)regs->r[6]);
@@ -742,11 +743,12 @@ _kernel_oserror *FSEntry_Func_handler(_kernel_swi_regs *regs, void *pw) {
       if (e) return e;
 
       struct ix_statfs s;
-      int r = ix_fstatfs(pd1.fd, &s);
+      int r = ix_fstatfs(pd1.fd, sizeof s, &s);
       if (r) return fs_error(r);
       mul_sat64(regs->r + 3, s.f_blocks, s.f_bsize);
       mul_sat64(regs->r + 0, s.f_bfree, s.f_bsize);
       regs->r[2] = mul_sat32(s.f_bavail, s.f_bsize);
+      break;
     }
     case fsfunc_ResolveWildcard:
       regs->r[4] = -1; // Fileswitch should resolve wildcards
