@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-14 (not yet built)
+## 5.31-14 (3 November 2026)
 
 - ***IXRun runs Linux commands through rol-cmd**, as RISC OS's own Linux
   user (riscos), the way *LinuxUser does: no password and no privileges,
