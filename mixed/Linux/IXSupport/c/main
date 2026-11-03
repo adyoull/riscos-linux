@@ -114,7 +114,163 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
   return error_BAD_SWI;
 }
 
+/*
+ * *IXRun through rol-cmd (RISC OS on Linux images): RISC OS is one Linux
+ * process, and protected RISC OS's view of the files has no Linux
+ * programs or terminals (no /dev/ptmx), so the image's rol-cmd daemon runs
+ * the command for it as RISC OS's own Linux user (its "@user" request, as
+ * LinuxShell's *LinuxUser: no password, no privileges, through /bin/sh -c
+ * so the path is searched), and the output is printed as it comes. This
+ * needs nothing loaded at start-up. Without rol-cmd (no /riscos/cmd, or
+ * nobody takes the request) *IXRun works as before, through a terminal.
+ */
+#define CMD_DIR "/riscos/cmd/"
+#ifndef ix_O_WRONLY
+#define ix_O_WRONLY 0x1
+#endif
+
+static _kernel_oserror err_cmd_failed = {0x81A73, "The Linux command failed"};
+static _kernel_oserror err_cmd_too_long = {0x81A72, "*IXRun: the command is too long"};
+static _kernel_oserror err_escape = {17, "Escape"};
+
+static unsigned ixrun_count;
+
+static unsigned ixrun_now(void) {
+  unsigned t = 0;
+  _swix(OS_ReadMonotonicTime, _OUT(0), &t);
+  return t;
+}
+
+static void ixrun_name(char *d, const char *name, const char *ext) {
+  strcpy(d, CMD_DIR);
+  strcat(d, name);
+  strcat(d, ext);
+}
+
+// Prints what's new in the output file from *pos on (newlines as CR LF).
+static _kernel_oserror *ixrun_drain(const char *out, unsigned *pos) {
+  int f = ix_open(out, ix_O_RDONLY | ix_O_CLOEXEC, 0);
+  if (f < 0) return 0;
+  _kernel_oserror *error = 0;
+  if (ix_lseek(f, *pos, 0) >= 0) {
+    char buf[256];
+    int n;
+    while (!error && (n = ix_read(f, buf, sizeof(buf))) > 0) {
+      *pos += n;
+      for (int i = 0; i < n && !error; ++i) {
+        int c = (unsigned char)buf[i];
+        if (c == 27) continue; // TERM=dumb asks for no escape sequences
+        if (c == '\n') error = _swix(OS_NewLine, 0);
+        else error = _swix(OS_WriteC, _IN(0), c);
+      }
+    }
+  }
+  ix_close(f);
+  return error;
+}
+
+static int ixrun_rc(const char *rc) {
+  char b[16];
+  int f = ix_open(rc, ix_O_RDONLY | ix_O_CLOEXEC, 0);
+  if (f < 0) return -1;
+  int n = ix_read(f, b, sizeof(b) - 1);
+  ix_close(f);
+  if (n <= 0) return -1;
+  int v = 0;
+  for (int i = 0; i < n && b[i] >= '0' && b[i] <= '9'; ++i) v = v * 10 + (b[i] - '0');
+  return v;
+}
+
+static bool ixrun_escape(void) {
+  int flags = 0;
+  _swix(OS_ReadEscapeState, _OUT(_FLAGS), &flags);
+  return (flags & _C) != 0;
+}
+
+// 0: done (*error set if it failed); 1: no rol-cmd here, use the terminal
+static int ixrun_rolcmd(const char *arg_string, _kernel_oserror **error) {
+  *error = 0;
+  if (ix_access(CMD_DIR, 2) != 0) return 1;
+
+  static char body[1100];
+  int n = 0;
+  memcpy(body, "@user\n", 6);
+  n = 6;
+  while (arg_string[n - 6] >= ' ' || arg_string[n - 6] == '\t') {
+    if (n >= (int)sizeof(body) - 2) {
+      *error = &err_cmd_too_long;
+      return 0;
+    }
+    body[n] = arg_string[n - 6];
+    ++n;
+  }
+  body[n++] = '\n';
+
+  char name[20], tmp[48], req[48], out[48], rc[48], kill[48];
+  sprintf(name, "x%08x%04x", ixrun_now(), ++ixrun_count & 0xFFFF);
+  ixrun_name(tmp, name, ".new");
+  ixrun_name(req, name, ".req");
+  ixrun_name(out, name, ".out");
+  ixrun_name(rc, name, ".rc");
+  ixrun_name(kill, name, ".kill");
+
+  int f = ix_open(tmp, ix_O_WRONLY | ix_O_CREAT | ix_O_TRUNC | ix_O_CLOEXEC, 0600);
+  if (f < 0) return 1;
+  ix_write(f, body, n);
+  ix_close(f);
+  if (ix_rename(tmp, req) != 0) {
+    ix_unlink(tmp);
+    return 1;
+  }
+
+  unsigned pos = 0, t0 = ixrun_now();
+  bool escaped = false;
+  int code;
+  static volatile int pollword = 1; // non-zero: a TaskWindow resumes us at its next poll
+  for (;;) {
+    _kernel_oserror *e = ixrun_drain(out, &pos);
+    if (e && !*error) *error = e;
+    if ((code = ixrun_rc(rc)) >= 0) break;
+    if (!escaped && ixrun_escape()) {
+      _kernel_osbyte(OsByte_AcknowledgeEscape, 0, 0);
+      int k = ix_open(kill, ix_O_WRONLY | ix_O_CREAT | ix_O_TRUNC | ix_O_CLOEXEC, 0644);
+      if (k >= 0) ix_close(k);
+      escaped = true;
+    }
+    // Nobody took it in 5 seconds: no rol-cmd running, use the terminal
+    if (pos == 0 && ixrun_now() - t0 > 500 && ix_access(req, 0) == 0) {
+      if (ix_unlink(req) == 0) return 1;
+    }
+    _swix(OS_UpCall, _INR(0, 1), UpCall_Sleep, &pollword);
+    struct ix_timespec ts = {0, 20 * 1000 * 1000};
+    ix_nanosleep(&ts, 0);
+  }
+  _kernel_oserror *e = ixrun_drain(out, &pos);
+  if (e && !*error) *error = e;
+  ix_unlink(out);
+  ix_unlink(rc);
+  if (*error) return 0;
+  if (escaped) {
+    *error = &err_escape;
+  } else if (code != 0) {
+    char msg[32];
+    sprintf(msg, "(exit status %i)", code);
+    _swix(OS_Write0, _IN(0), msg);
+    _swix(OS_NewLine, 0);
+    *error = &err_cmd_failed;
+  }
+  return 0;
+}
+
+static _kernel_oserror *ixrun_terminal(const char *arg_string, int argc);
+
 static _kernel_oserror *do_IXRun(const char *arg_string, int argc) {
+  _kernel_oserror *error;
+  if (ixrun_rolcmd(arg_string, &error) == 0) return error;
+  return ixrun_terminal(arg_string, argc);
+}
+
+static _kernel_oserror *ixrun_terminal(const char *arg_string, int argc) {
 
   // TODO list:
   // Handle non-zero return codes.

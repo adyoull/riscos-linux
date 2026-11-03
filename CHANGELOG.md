@@ -6,6 +6,20 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-14 (not yet built)
+
+- ***IXRun runs Linux commands through rol-cmd**, as RISC OS's own Linux
+  user (riscos), the way *LinuxUser does: no password and no privileges,
+  through `/bin/sh -c`, so a command's name is enough (`*IXRun ls -l`), in
+  protected RISC OS too (whose view of the files has no Linux programs or
+  /dev/ptmx, so IXSupport's own *IXRun always gave ENOENT there). It needs
+  nothing loaded at start-up (until now riscos-harddisc set an alias for
+  *LinuxUser in the boot sequence). Output is printed as it comes; Escape
+  stops the command; a non-zero exit status gives "(exit status N)" and
+  "The Linux command failed". Without rol-cmd (no /riscos/cmd, or nothing
+  takes the request in 5 seconds) *IXRun works as before, through a
+  terminal.
+
 ## 5.31-13 (3 November 2026)
 
 - **IXFS files over 2GB** (up to RISC OS's 4GB - 1). IXFS opened files
