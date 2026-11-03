@@ -11,6 +11,8 @@
 #
 # Needs: git gcc make bubblewrap libseccomp-dev libattr1-dev libsdl2-dev attr
 # Result: Built/RISCOS.IMG (and Build2/Linux/RiscOS/Images/rom)
+#
+# Copyright (c) 2026 Andrew Youll. Apache License 2.0.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"

@@ -3,6 +3,7 @@
 ; Definitions for FPA instructions and registers. Also used by "fplib".
 ;
 ; Copyright (C) Advanced RISC Machines Limited, 1992-7 (now named ARM Limited).
+; Copyright (C) 2026 Andrew Youll
 ; All rights reserved.
 ;
 ; Redistribution and use in source and binary forms, with or without

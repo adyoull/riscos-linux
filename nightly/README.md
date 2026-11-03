@@ -69,3 +69,5 @@ doesn't have.
   `Kernel/Makefile`.
 - New ROM modules upstream adds to `Components/ROOL/IOMD32` may be wanted in
   `Components/ROOL/Linux` too. Hardware drivers aren't wanted there.
+
+Copyright (c) 2026 Andrew Youll.

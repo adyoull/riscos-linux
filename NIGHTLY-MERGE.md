@@ -85,3 +85,5 @@ directories, so other machines' builds are unchanged.
 
 Not in this tree (they're in riscos-linux-testbed / riscos-linux): the image's
 init, rol-fb, LinuxCodec, NetWatch, the packages.
+
+Copyright (c) 2026 Andrew Youll.

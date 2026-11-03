@@ -237,3 +237,5 @@ in applications, 85–95% of SWIs come from outside the ROM, so this helps
 little; on the Raspberry Pi the kernel's fast SWI entry (riscos-linux
 kernels with NativeSupport 0.16) speeds up every SWI instead, with any
 ROM. The branch carries every `nightly-merge` change.
+
+Copyright (c) 2026 Andrew Youll.

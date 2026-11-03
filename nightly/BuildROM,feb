@@ -18,6 +18,8 @@
 |
 | Adapted from Unix.LinuxSupport.Build (Timothy Baldwin, Apache 2.0),
 | which does the same inside RISC OS for Linux.
+|
+| Copyright (c) 2026 Andrew Youll. Apache License 2.0.
 
 Set ROLSrc$Dir <Obey$Dir>
 If "<SetPaths$Dir>" = "" Then Error Let the Filer see AcornC/C++.!SetPaths (or run it) first: the DDE's tools must be on Run$Path

@@ -11,6 +11,8 @@
 #
 # Tarballs: https://www.riscosopen.org/content/downloads/risc-os-tarballs
 # ("IOMD HAL" development source).
+#
+# Copyright (c) 2026 Andrew Youll. Apache License 2.0.
 
 set -euo pipefail
 tarball=$(realpath "$1")

@@ -12,6 +12,7 @@ merge hazards:
 
     python3 nightly/check.py [REV]     (default HEAD)
 """
+# Copyright (c) 2026 Andrew Youll. Apache License 2.0.
 import collections, re, subprocess, sys
 
 rev = sys.argv[1] if len(sys.argv) > 1 else 'HEAD'
