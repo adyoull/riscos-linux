@@ -6,6 +6,20 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-12 (3 November 2026, not yet built)
+
+- **A connection closed by the other end is seen.** After a read, the
+  Internet module kept a socket readable only if more data was waiting,
+  so a close that had already arrived was never reported: Socket_Select
+  (UnixLib's `select()`) waited out its timeout instead of the program's
+  `read()` getting 0. ClawsMail's HTTP fetches (feeds, calendars) each
+  took 60 s. A close or an error now also raises an async socket's
+  Internet event. Test: riscos-linux-testbed `select-eof` (`t_eof`).
+- **IXFS free space** (OS_FSControl 49 and 55) works; it always failed,
+  so editors that check the space before saving (StrongEd) couldn't save
+  to HardDisc4. Test: `ixfs-freespace`. (5.31-11's change; 5.31-12
+  includes it.)
+
 ## 5.31-10 (2 November 2026)
 
 - **FileCore discs (USB sticks and SD cards formatted on RISC OS).** The
