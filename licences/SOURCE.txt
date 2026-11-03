@@ -14,6 +14,9 @@ from the date of this image, for the parts under the GPL or LGPL):
       merged into Timothy Baldwin's Linux port).
   https://github.com/adyoull/riscos-rolpkg
       The packages Configure's Updates installs.
+  https://github.com/adyoull/riscos-rdpserver
+      !RDPServer (HardDisc4.Apps.Network, where PackMan installs it),
+      built with xrdp and Mbed TLS (Apache-2.0; the app's Licences file).
   https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source
       Timothy Baldwin's Linux port of RISC OS.
   https://gitlab.riscosopen.org
