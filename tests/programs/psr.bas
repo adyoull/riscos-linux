@@ -6,6 +6,8 @@ REM and a SWI after switching back to USR mode must leave USR's r14 (the
 REM return address) alone. Prints the low byte of the CPSR at each step.
 REM Last, MRS with sp not a stack (code does that): natively it must not
 REM touch memory.
+REM
+REM Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 DIM code% 256, res% 32
 FOR pass%=0 TO 2 STEP 2
 P%=code%

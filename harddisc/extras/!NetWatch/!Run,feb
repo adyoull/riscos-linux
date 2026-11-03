@@ -1,3 +1,5 @@
 | NetWatch: RISC OS's name servers follow Linux's network
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 WimpSlot -min 32k -max 32k
 BASIC -quit <Obey$Dir>.!RunImage

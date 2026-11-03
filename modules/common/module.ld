@@ -3,6 +3,7 @@
    only absolute addresses are in the GOT, which module.s relocates when
    the module starts (check-pic.sh checks that). .bss is kept inside the
    image (zero-filled), as a RISC OS module gets no separate bss. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 ENTRY(module_start)
 SECTIONS
 {

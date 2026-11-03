@@ -63,6 +63,8 @@
 # /home/me/x.c). Wimp$ScrapDir (UnixLib's /tmp) is a fresh directory.
 # Arguments pass through an Obey file: one with spaces is put in double
 # quotes; avoid < and | (RISC OS reads <...> as a variable).
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 
 set -uo pipefail
 

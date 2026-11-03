@@ -12,6 +12,8 @@
 # Output: $(OUT)/VFPSupport,ffa, $(OUT)/ARMEABISupport,ffa, $(OUT)/SoundDMA,ffa
 #
 #   make -C modules [OUT=dir] [RISCOS_TOOLCHAIN=...]
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 
 RISCOS_TOOLCHAIN ?= $(RCD_DIR)/toolchain/env
 OUT ?= ../out/modules

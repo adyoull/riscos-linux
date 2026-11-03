@@ -5,6 +5,7 @@
 @
 @ Copyright (c) 2005-2011 David Schultz <das@FreeBSD.ORG>
 @ Copyright (c) 2021 RISC OS Open Limited
+@ Copyright (c) 2026 Andrew Youll
 @ All rights reserved.
 @
 @ Redistribution and use in source and binary forms, with or without

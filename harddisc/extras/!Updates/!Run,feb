@@ -1,4 +1,6 @@
 | Updates: opens Configure's Updates (RISC OS on Linux and Debian)
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set Updates$Dir <Obey$Dir>
 IconSprites <Updates$Dir>.!Sprites
 Filer_Run <Boot$Dir>.Resources.Configure.!ROLUpdate

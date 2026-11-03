@@ -5,6 +5,8 @@ REM left, for half a second; 0.3 s of nothing; then a linear handler's
 REM output for a second: left -4096, right +4096 (the low halfword of each
 REM word is the right sample, as SoundDMA has it); then a note scheduled
 REM (SoundScheduler: SOUND's fifth parameter) for 0.2 s later, centred.
+REM
+REM Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 ON ERROR PRINT "Error: ";REPORT$;" at ";ERL:END
 SYS "Sound_Enable",2
 SYS "Sound_Stereo",1,-127

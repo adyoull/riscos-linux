@@ -12,6 +12,8 @@
 #   docker run --rm -v "$PWD":/src riscos-linux-testbed rol-run out/myprog
 #
 # BASE is the riscos-crossdev image (the version in .riscos-crossdev).
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 ARG BASE=ghcr.io/adyoull/riscos-crossdev:1.8.1
 
 # The build context, so that dl/ (local copies of downloads) can be used

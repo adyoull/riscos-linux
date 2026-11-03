@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 """rol-sndcap.py FIFO OUT.wav: save the sound LinuxAudio sends to FIFO as a
 WAV file (16-bit stereo, at the first buffer's sample rate; buffers at
 another rate are resampled to it, nearest sample). LinuxAudio's stream:

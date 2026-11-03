@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 """pngpixel.py FILE X Y...: print the colour (RRGGBB) of each pixel X,Y
 (from the top left) of an 8-bit RGB or RGBA PNG with no interlacing,
 such as rol-kvm writes. Also prints the size first, as WxH."""

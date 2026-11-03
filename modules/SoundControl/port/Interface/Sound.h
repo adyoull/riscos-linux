@@ -1,5 +1,6 @@
 /* Interface/Sound.h: SoundDMA's Sound_ReadSysInfo and Sound_ControllerInfo
    reason codes (Sound0HAL hdr/Sound). */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #define Sound_RSI_Features                     1
 #define Sound_RSI_DefaultController            2
 #define Sound_RSI_Feature_Service8910          1

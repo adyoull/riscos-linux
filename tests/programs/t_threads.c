@@ -1,6 +1,7 @@
 /* Two threads. Known not to work on the Linux port (see README): UnixLib's
    thread switcher uses privileged instructions the port runs in user mode.
    tests/run.sh expects this one to time out, and says so if it ever passes. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>

@@ -1,5 +1,7 @@
 | ROLUpdate: Configure's plug-in for updating RISC OS on Linux (it asks
 | the image's rol-cmd, the Linux side, to run apt-get)
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set ROLUpdate$Dir <Obey$Dir>
 IconSprites <ROLUpdate$Dir>.!Sprites
 WimpSlot -min 192k -max 192k

@@ -4,6 +4,8 @@
 # Straight-line blocks of VFP and NEON floating point instructions for
 # t_fpchain.c: each block is a C function body of inline assembly working
 # on d0-d31 (loaded from and stored to memory around it).
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 import random, sys
 seed, nblocks, length = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
 R = random.Random(seed)

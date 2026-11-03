@@ -1,5 +1,7 @@
 REM soundctrl: SoundControl's SWIs by name (Configure's Sound plug-in uses
 REM them): the mixer's description, and a gain set and read back.
+REM
+REM Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 ON ERROR PRINT "Error: ";REPORT$:END
 SYS "SoundCtrl_ExamineMixer",0,0,0 TO ,,need%,size%
 DIM b% -need%

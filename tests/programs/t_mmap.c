@@ -1,5 +1,6 @@
 /* mmap, mremap and munmap (ARMEABISupport's MMapOp), a file mapping, and
    a large malloc. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>

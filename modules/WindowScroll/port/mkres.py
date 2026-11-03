@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 """mkres.py MESSAGES CMDHELP OUT.inc: a ResourceFS file block (for
 ResourceFS_RegisterFiles) holding Resources.WindowScroll.Messages: ROOL's
 Messages with the *Help texts (CmdHelp) appended, as ROOL's build does."""

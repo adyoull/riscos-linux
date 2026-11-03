@@ -1,4 +1,5 @@
 /* Arguments in, output on stdout and stderr, exit status out. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include <stdio.h>
 #include <stdlib.h>
 

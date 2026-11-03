@@ -11,6 +11,8 @@
 #    name suffixes (xattr2comma.py), so the tree survives tar, git and
 #    container layers.
 # The CMOS RAM written while unpacking goes to !Boot.Loader.CMOS.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TB=$(cd "$HERE/.." && pwd)

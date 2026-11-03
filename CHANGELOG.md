@@ -385,3 +385,5 @@ First version.
   runs in user mode.
 - Container image (`docker/Dockerfile`) on riscos-crossdev 1.8; CI
   workflows.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

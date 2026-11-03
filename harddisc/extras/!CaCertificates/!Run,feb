@@ -1,3 +1,5 @@
 | CaCertificates: Mozilla's root certificates, for programs using curl or
 | OpenSSL (PackMan, ported programs): /<CaCertificates$Dir>/ca-certificates.crt
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set CaCertificates$Dir <Obey$Dir>

@@ -1,5 +1,7 @@
 | WheelSetup: Configure's plug-in for the scroll wheel's direction
 | (*KVMWheel Reverse|Normal; the choice is kept in Choices:KVMWheel)
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set WheelSetup$Dir <Obey$Dir>
 IconSprites <WheelSetup$Dir>.!Sprites
 WimpSlot -min 64k -max 64k

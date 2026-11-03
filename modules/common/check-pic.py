@@ -3,6 +3,8 @@
 # IMAGE0 is a module linked at 0, IMAGE1 the same module linked at BASE1.
 # Passes if they differ only in GOT words, each by exactly BASE1: then the
 # module runs anywhere once cmodule.inc has relocated its GOT.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 import struct, sys
 a = open(sys.argv[1], "rb").read()
 b = open(sys.argv[2], "rb").read()

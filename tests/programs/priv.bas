@@ -2,6 +2,8 @@ REM priv: the other privileged instructions code from disc uses (as
 REM HardDisc4's SharedCLibrary 6.22 does to resume a program): MSR/MRS
 REM SPSR, STM {r13}^ (USR's r13 from SVC mode), LDM {pc}^ and MOVS pc, lr
 REM (exception return to USR mode). Prints the low bytes of what it saw.
+REM
+REM Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 DIM code% 512, res% 64, blk% 16
 FOR pass%=0 TO 2 STEP 2
 P%=code%

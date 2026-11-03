@@ -1,5 +1,6 @@
 /* AsmUtils/rminfo.h: the module's own base address (CMHG's Image_RO_Base),
    which the Current Active Object is while the module's task runs. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_RMINFO_H
 #define WS_RMINFO_H
 extern char module_start[];

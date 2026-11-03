@@ -17,6 +17,8 @@
 #
 # RCD_DIR is the riscos-crossdev checkout (default /opt/riscos-crossdev,
 # as in its container image).
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 
 RCD_DIR ?= /opt/riscos-crossdev
 export RCD_DIR

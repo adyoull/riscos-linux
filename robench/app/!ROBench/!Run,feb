@@ -1,6 +1,8 @@
 | !Run for !ROBench: CPU, memory, OS, file and graphics benchmark.
 | Runs single-tasking (as games do) so other tasks don't disturb the
 | timing, then opens the results file. Takes about 15 minutes.
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set ROBench$Dir <Obey$Dir>
 IconSprites <ROBench$Dir>.!Sprites
 RMEnsure UtilityModule 5.00 Error ROBench needs RISC OS 5

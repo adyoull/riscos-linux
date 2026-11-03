@@ -1,3 +1,5 @@
 | !Boot for !ROBench
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 If "<ROBench$Dir>"="" Then Set ROBench$Dir <Obey$Dir>
 IconSprites <Obey$Dir>.!Sprites

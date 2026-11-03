@@ -1,3 +1,5 @@
 | ROLUpdate: Configure's plug-in for updating RISC OS on Linux
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 If "<ROLUpdate$Dir>" = "" then Set ROLUpdate$Dir <Obey$Dir>
 IconSprites <ROLUpdate$Dir>.!Sprites

@@ -5,6 +5,8 @@
 # about 0.5 s long, then a second of left -4096, right +4096 (a linear
 # handler's), then a scheduled note in both channels. Prints PASS or what
 # went wrong.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TB=$(cd "$HERE/.." && pwd)

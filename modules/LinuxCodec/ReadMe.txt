@@ -143,3 +143,5 @@ Notes
 - Untested on real hardware yet: the Pi kernel's codec drivers and this
   module were built and checked here, but the emulated Pi used for
   testing has no VideoCore.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

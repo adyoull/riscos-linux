@@ -1,3 +1,4 @@
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_STDLIB_H
 #define WS_STDLIB_H
 #include <stddef.h>

@@ -3,6 +3,7 @@
    (also with the Wimp's Lazy+AppSpace flags, and through FastAPI); then
    ExamineContext, ExceptionDump, DestroyContext of the active context,
    Features (0-3), Version and the program's own context. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include <stdio.h>
 #include <string.h>
 #include <kernel.h>

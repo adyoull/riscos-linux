@@ -1,5 +1,7 @@
 #!/bin/bash
 # static aarch64 libnl 3.11 + wpa_supplicant 2.11 (nl80211, internal TLS)
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -euo pipefail
 # W: a work directory holding src/libnl-3.11.0 (from libnl-3.11.0.tar.gz,
 # here) and src/wpa_supplicant-2.11 (https://w1.fi/releases/wpa_supplicant-2.11.tar.gz)

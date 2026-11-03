@@ -3,6 +3,7 @@
 @ (VFPv4: VFMA). The original's
 @ copyright and licence follow; they apply to this file.
 @ Copyright 2021 RISC OS Open Limited
+@ Copyright 2026 Andrew Youll
 @
 @ Licensed under the Apache License, Version 2.0 (the "License");
 @ you may not use this file except in compliance with the License.

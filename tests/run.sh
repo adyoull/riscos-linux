@@ -8,6 +8,8 @@
 # fail the run.
 #
 #   tests/run.sh [NAME...]      (RCD_DIR or RISCOS_TOOLCHAIN must be set)
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TB=$(cd "$HERE/.." && pwd)

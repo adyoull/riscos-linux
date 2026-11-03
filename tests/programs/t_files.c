@@ -1,5 +1,6 @@
 /* Files through UnixLib and IXFS: write, read back, stat, rename, remove,
    directories, and the environment. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>

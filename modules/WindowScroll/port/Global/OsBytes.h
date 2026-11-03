@@ -1,3 +1,4 @@
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_GLOBAL_OSBYTES_H
 #define WS_GLOBAL_OSBYTES_H
 #define OsByte_DisableEvent 13

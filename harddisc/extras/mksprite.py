@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 """mksprite.py OUT NAME SIZE: a RISC OS sprite file with one 32bpp sprite
 (180 dpi, 1bpp mask) of a mouse with its wheel and up/down arrows, drawn
 here: the scroll wheel plug-in's icon."""

@@ -1,5 +1,6 @@
 /* Linux evdev keycode -> RISC OS key number (-1: none). Generated from
  * the port's sdlkey.c (Timothy Baldwin, Apache-2.0) and Keyboard.h. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 static const short linux2ro[256] = {
   -1,
   0,

@@ -52,3 +52,5 @@ make check RCD_DIR=...    # must end "51 passed, 0 failed, 0 expected failures, 
   there first; when a UnixLib release has it, drop `unixlib/`.
 - Known limitations are XFAIL tests in `tests/run.sh`. If one passes
   (XPASS), update the test, the README and the CHANGELOG.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

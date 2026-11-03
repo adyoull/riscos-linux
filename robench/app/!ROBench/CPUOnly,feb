@@ -1,4 +1,6 @@
 | CPUOnly: the processor and memory tests only, in a task window or here
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set ROBench$Dir <Obey$Dir>
 WimpSlot -min 4096K -max 4096K
 CDir <ROBench$Dir>.Results

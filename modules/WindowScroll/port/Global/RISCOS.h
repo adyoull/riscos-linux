@@ -1,4 +1,5 @@
 /* Constants from RISC OS's Hdr:RISCOS, as WindowScroll uses them. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_GLOBAL_RISCOS_H
 #define WS_GLOBAL_RISCOS_H
 #define EventV                          0x10

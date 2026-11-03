@@ -5,6 +5,8 @@
 # UnixLib's source is cloned from github.com/adyoull/riscos-unixlib. If that
 # repository is private, add a secret UNIXLIB_TOKEN (a token that can read
 # it) to this repository.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 name: Test bed
 
 on:

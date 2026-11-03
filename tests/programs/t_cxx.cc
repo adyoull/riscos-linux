@@ -1,3 +1,4 @@
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 // C++: exceptions, iostreams, the standard containers, static constructors.
 #include <iostream>
 #include <map>

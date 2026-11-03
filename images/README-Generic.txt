@@ -207,3 +207,5 @@ Pis and the Pinebook Pro (LICENCE.cypress, LICENCE.broadcom_bcm43xx) and
 Realtek's for the Pinebook (LICENCE.rtlwifi_firmware.txt).
 wpa_supplicant 2.11 is BSD licensed: LICENCE.wpa_supplicant; libnl:
 LICENCE.libnl.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

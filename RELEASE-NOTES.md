@@ -117,3 +117,5 @@ All the source is at [riscos-linux](https://github.com/adyoull/riscos-linux)
 (RISC OS 5.31 on the `riscos-5.31-source` branch). Each image carries
 `SOURCE.txt` and a `LICENCES` folder on its FAT partition, and
 HardDisc4.Documents.Licences.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

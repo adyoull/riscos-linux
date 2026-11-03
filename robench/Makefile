@@ -1,5 +1,7 @@
 # ROBench: make RCD_DIR=<riscos-crossdev>   (RISC OS build, out/robench,ff8)
 #          make native                       (host build, out/robench-native)
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 RCD_DIR ?= ../riscos-crossdev
 include $(RCD_DIR)/riscos.mk
 SRC := src/main.c src/cpu.c src/neon.c src/riscos.c

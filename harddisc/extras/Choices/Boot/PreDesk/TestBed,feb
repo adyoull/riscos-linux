@@ -1,5 +1,7 @@
 | riscos-linux-testbed: VFPSupport, ARMEABISupport, BASIC VFP and the
 | UnixLib modules, from <IXFS$HardDisc4>.TestBed.Modules
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 RMEnsure SharedUnixLibrary 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.SharedULib
 RMEnsure PThreadTicker 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.PThrTicker
 RMEnsure VFPSupport 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.VFPSupport

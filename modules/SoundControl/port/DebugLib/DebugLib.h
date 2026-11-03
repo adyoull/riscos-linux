@@ -1,4 +1,5 @@
 /* DebugLib/DebugLib.h: debugging off. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #define dprintf(args)
 #define debug_initialise(a, b, c)
 #define debug_atexit()

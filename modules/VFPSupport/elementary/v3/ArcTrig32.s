@@ -4,6 +4,7 @@
 @ copyright and licence follow; they apply to this file.
 @
 @ Copyright (c) 2021 RISC OS Open Limited
+@ Copyright (c) 2026 Andrew Youll
 @ All rights reserved.
 @
 @ Redistribution and use in source and binary forms, with or without

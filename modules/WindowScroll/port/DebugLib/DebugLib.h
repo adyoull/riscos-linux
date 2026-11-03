@@ -1,4 +1,5 @@
 /* DebugLib: debugging output compiled out. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_DEBUGLIB_H
 #define WS_DEBUGLIB_H
 #define TRUE 1

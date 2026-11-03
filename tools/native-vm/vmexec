@@ -30,6 +30,8 @@
 # On a timeout it is killed (TERM): the VM is stopped and what the program
 # wrote so far is printed. The kernel's messages are left in
 # /tmp/rol-native-vm/job/dmesg.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 TB=$(cd "$(dirname "$0")/../.." && pwd)
 J=/tmp/rol-native-vm/job
 DISK=${ROL_VM_DISK:-$TB/out/native-vm/riscos.qcow2}

@@ -5,6 +5,8 @@
 # Needs: build-essential ninja-build python3-venv libglib2.0-dev, and meson
 # 1.2.3 (pip install meson==1.2.3: the Ubuntu "+ds" tarball has no wheels).
 #   qemu/build.sh            (RCD_DIR = the riscos-crossdev checkout)
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${RCD_DIR:?set RCD_DIR to the riscos-crossdev directory}"

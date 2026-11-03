@@ -7,6 +7,8 @@
 # desktop) into scrolling. Passes if the window scrolled (the two
 # screenshots differ) and RISC OS saw the six steps.
 # Prints PASS or FAIL: REASON. Needs out/harddisc and out/modules.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TB=$(cd "$HERE/.." && pwd)

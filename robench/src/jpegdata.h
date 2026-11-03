@@ -1,4 +1,5 @@
 /* 640x480 baseline JPEG (quality 85, 4:2:0) made by mkjpeg.py */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #define JPEG_W 640
 #define JPEG_H 480
 static const unsigned char jpeg_data[37648] __attribute__ ((aligned (4))) = {

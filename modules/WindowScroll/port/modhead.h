@@ -1,5 +1,6 @@
 /* modhead.h: what CMHG would generate from rool/cmhg/modhead for C (the
    module header itself is header.s). */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_MODHEAD_H
 #define WS_MODHEAD_H
 #include "kernel.h"

@@ -122,3 +122,5 @@ Forgotten it? An empty file called RESETPW on this partition clears it.
 HardDisc4 is a hard disc icon on the icon bar (Free, drag to copy). The
 desktop starts at the monitor's resolution until a mode is chosen and
 saved in Configure, Screen.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

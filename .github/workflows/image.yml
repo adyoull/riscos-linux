@@ -3,6 +3,8 @@
 # it, and only then publish it as
 # ghcr.io/adyoull/riscos-linux-testbed:<version> (and :latest).
 # The package is private, like the repository.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 name: Container image
 
 on:

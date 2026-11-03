@@ -1,4 +1,5 @@
 /* stdint.h: what WindowScroll uses (freestanding, 32-bit ARM) */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_STDINT_H
 #define WS_STDINT_H
 typedef __UINTPTR_TYPE__ uintptr_t;

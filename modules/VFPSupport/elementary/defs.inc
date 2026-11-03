@@ -1,5 +1,7 @@
 @ Constants the translated elementary functions use (from RISC OS Open's
 @ hdr/VFPSupport and s/Macros: FPSCR fields and IEEE 754 parameters).
+@
+@ Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 	.equ	FPSCR_IOC, 1 << 0
 	.equ	FPSCR_DZC, 1 << 1
 	.equ	FPSCR_OFC, 1 << 2

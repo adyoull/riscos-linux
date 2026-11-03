@@ -19,6 +19,8 @@
 #
 # Needs git, autoconf2.69, automake 1.11, perl (riscos-crossdev 1.8.1's
 # image has them).
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TB=$(cd "$HERE/.." && pwd)

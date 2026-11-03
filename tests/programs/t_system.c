@@ -2,6 +2,7 @@
    ARMEABISupport must free the child's stacks and maps (and only those), so
    the parent's mapping and its own stack still work afterwards, and only
    the parent is left running (*ARMEABISupport_Info: "nested 1"). */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

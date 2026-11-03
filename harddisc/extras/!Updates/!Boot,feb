@@ -1,3 +1,5 @@
 | Updates: keeps the Linux under RISC OS for Linux up to date
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 If "<Updates$Dir>" = "" then Set Updates$Dir <Obey$Dir>
 IconSprites <Updates$Dir>.!Sprites

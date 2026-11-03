@@ -3,6 +3,8 @@
 #   gen-tables.py DIR  ->  DIR/tables-save.inc, DIR/tables-load.inc
 # For n = 1..32 registers, entry n-1 (3 instructions) stores or loads
 # D0..D(n-1) at r3, then branches to save_done / load_done.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 import sys
 
 for op, name in (("vstmia", "save"), ("vldmia", "load")):

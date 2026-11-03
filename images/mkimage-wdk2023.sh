@@ -3,6 +3,8 @@
 # partition (its 7.2 kernel, which loads blackrock.dtb), with the generic
 # image's Debian root ($ROOTFS) except the generic and Pi
 # kernel packages, and riscos-kernel-wdk2023 preinstalled instead.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -euo pipefail
 # Where things are (override from the environment):
 #   TOP          this repository

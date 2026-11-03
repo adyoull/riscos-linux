@@ -104,3 +104,5 @@ Youll directs the work. The algorithms follow Whetstone (Curnow and
 Wichmann), LINPACK (Dongarra), STREAM (McCalpin), CoreMark (EEMBC) and
 the Computer Language Benchmarks Game's N-body; the code is ROBench's
 own and the results are not official results of any of them.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

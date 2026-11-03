@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 """mbr.py IMG DISKID BOOT_MB ROOT_MB [START_MB]: an MBR on IMG: partition 1
 FAT32 (LBA, bootable) from START_MB MiB (default 1), partition 2 Linux after it."""
 import struct, sys

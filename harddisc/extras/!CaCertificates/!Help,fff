@@ -8,3 +8,5 @@ CaCertificates$Dir when the machine starts; the bundle is
 
 The certificate data is Mozilla's, under the Mozilla Public Licence 2.0
 (https://mozilla.org/MPL/2.0/).
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

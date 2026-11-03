@@ -1,6 +1,8 @@
 | The screen mode at start. This one fits the screen (ROL$ScreenWidth and
 | ROL$ScreenHeight are its size, from rol-fb); choosing a mode in
 | Configure, Screen and clicking Set replaces this file with that mode.
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 LoadModeFile BootResources:Configure.Monitors.Other.UTM
 Set Alias$ROLScreenMode WimpMode X<ROL$ScreenWidth> Y<ROL$ScreenHeight> C16M
 ROLScreenMode

@@ -13,6 +13,8 @@
 # of VFPSupport_ElementaryFunctions. rol-run loads it when it's there. The
 # port's ROM has SoundDMA, but not SharedSound (several programs' sound at
 # once), which sound players use.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TB=$(cd "$HERE/.." && pwd)

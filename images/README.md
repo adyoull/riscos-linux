@@ -19,3 +19,5 @@ The root file system is Debian 13 "trixie" slim for arm64, from Debian's
 official container image build (debuerreotype, the `dist-arm64v8` branch of
 github.com/debuerreotype/docker-debian-artifacts), with
 `/etc/dpkg/dpkg.cfg.d/docker-apt-speedup` (unsafe I/O) removed.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

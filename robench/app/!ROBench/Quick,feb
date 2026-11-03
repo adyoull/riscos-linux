@@ -1,4 +1,6 @@
 | Quick: the same tests, shorter (0.5 s runs, 3 of each): about 4 minutes
+|
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set ROBench$Quick 1
 Run <Obey$Dir>.!Run -q
 Unset ROBench$Quick

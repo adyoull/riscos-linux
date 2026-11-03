@@ -1,4 +1,6 @@
 # Makes src/jpegdata.h: the 640x480 test photo for gfx.jpeg (needs Pillow).
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 from PIL import Image, ImageDraw, ImageFilter
 import random, math
 random.seed(7)

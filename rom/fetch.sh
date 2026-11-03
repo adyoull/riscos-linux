@@ -1,6 +1,8 @@
 #!/bin/bash
 # Download the RISC OS for Linux ROM image named in rom/ROM into out/rom/
 # and check its sha256. Set ROL_ROM_FILE to use a copy you already have.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${OUT:=$HERE/../out/rom}"

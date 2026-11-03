@@ -52,3 +52,5 @@ The licence texts are in `licences/` and on each image's FAT partition.
 
 `TESTBED.md` describes the test bed this grew from: running RISC OS programs
 on Linux headless, for CI.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).

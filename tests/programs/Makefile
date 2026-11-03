@@ -1,4 +1,6 @@
 # Test programs, built with riscos-crossdev (RCD_DIR), run by tests/run.sh.
+#
+# Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 RCD_DIR ?= /opt/riscos-crossdev
 include $(RCD_DIR)/riscos.mk
 OUT ?= ../../out/tests

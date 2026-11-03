@@ -3,6 +3,7 @@
    Each thread runs a calculation that keeps many double registers live
    (D0-D31 where the CPU has them) under its own rounding mode; the results
    must match the same calculations run one at a time. */
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include <fenv.h>
 #include <pthread.h>
 #include <sched.h>

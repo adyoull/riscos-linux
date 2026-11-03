@@ -1,3 +1,4 @@
+/* Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #ifndef WS_STDIO_H
 #define WS_STDIO_H
 int sprintf (char *buf, const char *fmt, ...);   /* %d and %s only */
