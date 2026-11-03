@@ -175,7 +175,11 @@ static ssize_t do_msg(int fd, struct ix_msghdr *m, int flags, int syscall) {
     }
     if (result != -ix_EAGAIN) {
       char c;
-      if (syscall == __NR_sendmsg || ix_recv(fd, &c, 1, ix_MSG_DONTWAIT | ix_MSG_PEEK) > 0)
+      // Still readable if more data is waiting, and also at end of file
+      // (the other end closed: recv gives 0) or on an error: select must
+      // report those too, or a program waiting for the close never sees
+      // it (ClawsMail's HTTP fetches waited out their 60 s timeout).
+      if (syscall == __NR_sendmsg || ix_recv(fd, &c, 1, ix_MSG_DONTWAIT | ix_MSG_PEEK) != -ix_EAGAIN)
         pollword->s.data = 1;
       return result;
     }
@@ -601,13 +605,15 @@ int sigio_handler(_kernel_swi_regs *regs, void *pw) {
   ix_siginfo_t *info = (void *)regs->r[1];
   int band = info->u.sigpoll.band;
 
-  if (band & (ix_POLLIN | ix_POLLERR))
+  if (band & (ix_POLLIN | ix_POLLERR | ix_POLLHUP))
     sockets[s].pollword[__NR_recvmsg & 1].s.data = 1;
 
   if (band & (ix_POLLOUT))
     sockets[s].pollword[__NR_sendmsg & 1].s.data = 1;
 
-  if (sockets[s].async && (band & ix_POLLIN)) {
+  // (a close or an error is news for an async socket's owner too, as on
+  // RISC OS's own stack, where the close wakes its readers)
+  if (sockets[s].async && (band & (ix_POLLIN | ix_POLLERR | ix_POLLHUP))) {
     eprintf("Sending Internet Event for socket %i\n", s);
     _swix(OS_AddCallBack, _INR(0, 1), raise_event, s);
   }
