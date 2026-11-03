@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-13 (3 November 2026, not yet built)
+## 5.31-13 (3 November 2026)
 
 - **IXFS files over 2GB** (up to RISC OS's 4GB - 1). IXFS opened files
   without O_LARGEFILE and moved through them with the 32-bit lseek and
@@ -15,6 +15,8 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   Now O_LARGEFILE, _llseek and ftruncate64, with the pointer, extent and
   sizes as unsigned 32 bits (a file over 4GB reads as 4GB - 1). Test:
   riscos-linux-testbed `ixfs-bigfile`.
+- Tested in the test bed: 61/61 under QEMU; `ixfs-bigfile` natively too
+  (it fails there on 5.31-12).
 
 ## 5.31-12 (3 November 2026)
 
