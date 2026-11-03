@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-12 (3 November 2026, not yet built)
+## 5.31-12 (3 November 2026)
 
 - **A connection closed by the other end is seen.** After a read, the
   Internet module kept a socket readable only if more data was waiting,
@@ -19,6 +19,8 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   so editors that check the space before saving (StrongEd) couldn't save
   to HardDisc4. Test: `ixfs-freespace`. (5.31-11's change; 5.31-12
   includes it.)
+- Tested in the test bed: 60/60 under QEMU (`select-eof` and
+  `ixfs-freespace` pass; they fail on 5.31-10).
 
 ## 5.31-10 (2 November 2026)
 
