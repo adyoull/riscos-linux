@@ -373,8 +373,22 @@ free_error:
     e = ix_dup2(pts, 2);
     if (e < 0) goto error;
 
-    // Execute command
-    e = ix_execve(cmd[0], cmd, 0);
+    // Execute command: a name without a '/' is looked for in the path
+    if (strchr(cmd[0], '/')) {
+      e = ix_execve(cmd[0], cmd, 0);
+    } else {
+      static const char *const dirs[] = {"/usr/local/bin/", "/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/"};
+      char path[256];
+      e = -ix_ENOENT;
+      for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+        if (strlen(dirs[i]) + strlen(cmd[0]) >= sizeof(path)) break;
+        strcpy(path, dirs[i]);
+        strcat(path, cmd[0]);
+        int r = ix_execve(path, cmd, 0);
+        if (r != -ix_ENOENT) e = r;
+        if (r != -ix_ENOENT && r != -ix_EACCES) break;
+      }
+    }
 error:
     ix_write(pipe[1], &e, sizeof(e));
     ix_exit(1);

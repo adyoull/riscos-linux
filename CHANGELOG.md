@@ -17,8 +17,10 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   *LinuxUser in the boot sequence). Output is printed as it comes; Escape
   stops the command; a non-zero exit status gives "(exit status N)" and
   "The Linux command failed". Without rol-cmd (no /riscos/cmd, or nothing
-  takes the request in 5 seconds) *IXRun works as before, through a
-  terminal.
+  takes the request in 5 seconds) *IXRun works through a terminal as
+  before, but now looks for a command name without a "/" in /usr/local/bin,
+  /usr/bin, /bin, /usr/sbin and /sbin (it ran only full paths, so
+  `*IXRun ls` always gave ENOENT).
 
 ## 5.31-13 (3 November 2026)
 
