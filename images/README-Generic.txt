@@ -82,7 +82,7 @@ USBDriver gives RISC OS programs RISC OS's USB device interface (DeviceFS
 Linux itself has no driver for: phones, tablets and cameras in file
 transfer (MTP/PTP) mode, and the like (keyboards, mice, discs, sound and
 network adapters stay Linux's). *USBDevices lists them. So PDFS works
-unchanged: HardDisc4.TestBed.PDFS has PDFS 0.16 beta (*RMLoad it, or put
+unchanged: HardDisc4.TestBed.PDFS has PDFS 0.16.2 beta (*RMLoad it, or put
 it in PreDesk as on a Pi, then *PDFSMount). Tried with QEMU's MTP
 device: browsing and copying files both ways; not yet with a real phone.
 
