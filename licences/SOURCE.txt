@@ -17,6 +17,11 @@ from the date of this image, for the parts under the GPL or LGPL):
   https://github.com/adyoull/riscos-rdpserver
       !RDPServer (HardDisc4.Apps.Network, where PackMan installs it),
       built with xrdp and Mbed TLS (Apache-2.0; the app's Licences file).
+  https://www.netsurf-browser.org/downloads/source/ (netsurf-all-3.11)
+      !NetSurf 3.11 (HardDisc4.Apps.Network), unchanged from NetSurf's
+      RISC OS release: GPL-2.0, its other licences in its about:licence
+      page. With !Cache (MIT, Licences.Cache-Copyright) and Tinct
+      (Richard Wilson's licence, Licences.Tinct: free use, unchanged).
   https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source
       Timothy Baldwin's Linux port of RISC OS.
   https://gitlab.riscosopen.org
