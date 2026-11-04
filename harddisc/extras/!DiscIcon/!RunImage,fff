@@ -14,10 +14,15 @@ REM Free is RISC OS's own Free window (*ShowFree): this registers a free
 REM space routine for IXFS with the Free module (Free_Register), in the
 REM RMA, which asks Linux (statfs64 of /riscos, through IXSupport).
 REM On RISC OS for Linux, HardDisc4 is IXFS:$.riscos.HardDisc4.
+REM IXFS:$ itself (Linux's whole file system) gets an icon too, a folder
+REM labelled "IXFS:$" next to Apps, where the boot's AddTinyDir put one:
+REM from RISC OS 5.31-16 IXFS's full names have a disc name
+REM (IXFS::ROL.$), and Pinboard labels a folder with the last part of its
+REM name, so that one said just "$". Its Free is the whole disc's ("ROL").
 REM Copyright (c) 2026 Andrew Youll. MIT licence.
 fs%=0 : ws%=0
 ON ERROR PROCderegister : ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
-MAXD%=12
+MAXD%=13 : ROOT%=MAXD%
 DIM blk% 1024, menu% 28+24*3, icon%(MAXD%), dname$(MAXD%), dpath$(MAXD%), ind%(MAXD%)
 FOR i%=0 TO MAXD% : DIM b% 80 : ind%(i%)=b% : icon%(i%)=-1 : NEXT
 list$="IXFS:$.riscos.mediactl.discs" : listed$="" : nextcheck%=0
@@ -35,6 +40,7 @@ usb$="floppyscsi"
 SYS "XWimp_SpriteOp",40,,usb$ TO ;f%
 IF f% AND 1 THEN usb$=spr$
 PROCadd(0,"HardDisc4","<IXFS$HardDisc4>")
+PROCadd(ROOT%,"IXFS:$","IXFS:$")
 PROCregister
 ON ERROR PROCerror
 quit%=FALSE : pdir$="" : pleaf$="" : pdisc%=0 : menudisc%=0
@@ -57,14 +63,19 @@ DEF PROCadd(i%,n$,p$)
 LOCAL w%,p%
 dname$(i%)=n$ : dpath$(i%)=p$
 $ind%(i%)=n$
-IF i%=0 THEN $(ind%(i%)+32)="S"+spr$ ELSE $(ind%(i%)+32)="S"+usb$
+CASE i% OF
+  WHEN 0 : $(ind%(i%)+32)="S"+spr$
+  WHEN ROOT% : $(ind%(i%)+32)="Sdirectory"
+  OTHERWISE : $(ind%(i%)+32)="S"+usb$
+ENDCASE
 SYS "Wimp_TextOp",1,n$,0 TO w%
 IF w%<68 THEN w%=68
 blk%!0=-5 : blk%!4=0 : blk%!8=-16 : blk%!12=w%+16 : blk%!16=84
 blk%!20=&1700310B : blk%!24=ind%(i%) : blk%!28=ind%(i%)+32 : blk%!32=LEN(n$)+1
-REM HardDisc4 with the hard discs (priority &60000000); USB discs and
-REM cards after Apps, as PDFS's devices (&30000000, each next one lower)
-IF i%=0 THEN p%=&60000000 ELSE p%=&30000000-i%
+REM HardDisc4 with the hard discs (priority &60000000); IXFS:$ after
+REM Apps (&30000000), USB discs and cards after it, as PDFS's devices
+REM (each next one lower)
+IF i%=0 THEN p%=&60000000 ELSE IF i%=ROOT% THEN p%=&30000000 ELSE p%=&30000000-i%
 SYS "Wimp_CreateIcon",p%,blk% TO icon%(i%)
 ENDPROC
 
@@ -98,14 +109,14 @@ IF ejecting$<>"" THEN PROCejectcheck(l$)
 IF l$=listed$ THEN ENDPROC
 listed$=l$
 REM gone
-FOR i%=1 TO MAXD%
+FOR i%=1 TO MAXD%-1
   IF icon%(i%)>=0 AND INSTR(" "+l$," "+dname$(i%)+" ")=0 THEN PROCremove(i%)
 NEXT
 REM new
 WHILE l$<>""
   n$=LEFT$(l$,INSTR(l$," ")-1) : l$=MID$(l$,INSTR(l$," ")+1)
   found%=FALSE : j%=0
-  FOR i%=1 TO MAXD%
+  FOR i%=1 TO MAXD%-1
     IF icon%(i%)>=0 AND dname$(i%)=n$ THEN found%=TRUE
     IF icon%(i%)<0 AND j%=0 THEN j%=i%
   NEXT
@@ -239,8 +250,12 @@ $menu%=dname$(d%)
 menu%?12=7 : menu%?13=2 : menu%?14=7 : menu%?15=0
 menu%!16=200 : menu%!20=44 : menu%!24=0
 i%=menu%+28 : PROCitem(i%,0,"Open '$'")
-i%+=24 : PROCitem(i%,0,"Free")
-i%+=24 : IF d%=0 THEN PROCitem(i%,&80,"Dismount") ELSE PROCitem(i%,&80,"Eject")
+IF d%=ROOT% THEN
+  i%+=24 : PROCitem(i%,&80,"Free")
+ELSE
+  i%+=24 : PROCitem(i%,0,"Free")
+  i%+=24 : IF d%=0 THEN PROCitem(i%,&80,"Dismount") ELSE PROCitem(i%,&80,"Eject")
+ENDIF
 ENDPROC
 
 DEF PROCitem(i%,f%,t$)
@@ -266,6 +281,7 @@ CASE c% OF
   WHEN 0 : OSCLI "Filer_OpenDir "+dpath$(menudisc%)
   WHEN 1 : PROCfree(menudisc%)
   WHEN 2 :
+    IF menudisc%=ROOT% THEN ENDPROC
     IF menudisc%=0 THEN quit%=TRUE : ENDPROC
     REM ask Linux to unmount it: the icon goes when it has
     OSCLI "Filer_CloseDir "+dpath$(menudisc%)
@@ -281,15 +297,18 @@ ENDPROC
 REM --- the Free window --------------------------------------------------
 
 DEF PROCfree(d%)
+IF d%=ROOT% THEN OSCLI "ShowFree -fs IXFS ROL" : ENDPROC
 OSCLI "ShowFree -fs IXFS "+dname$(d%)
 ENDPROC
 
 REM Free's routine for IXFS (Free's sources: s.NFS and hdr.Free). It runs
 REM in User mode, with R12 = ws% and only the return address on the stack;
-REM R3 is the drive's name (HardDisc4, or a USB disc's or card's).
+REM R3 is the drive's name (HardDisc4, ROL for IXFS:$ - Linux's whole
+REM file system, or a USB disc's or card's).
 REM ws%: +0 saved registers, +64 statfs64's buffer, +160 "/riscos",
-REM +176 "/riscos/media/", +192 an error block, +256 "HardDisc4",
-REM +288 the Linux path asked about, +416 the code.
+REM +168 "/", +176 "/riscos/media/", +192 an error block, +256
+REM "HardDisc4", +272 "ROL", +288 the Linux path asked about, +416 the
+REM code.
 DEF PROCregister
 LOCAL p%,pass%,code%
 REM (OS_FSControl 13 gives the filing system's number in R1)
@@ -298,6 +317,8 @@ fs%=fs% AND &FF
 IF (f% AND 1) OR fs%=0 THEN fs%=0 : ENDPROC
 SYS "OS_Module",6,,,1280 TO ,,ws%
 $(ws%+160)="/riscos"+CHR$0
+$(ws%+168)="/"+CHR$0
+$(ws%+272)="ROL"+CHR$0
 $(ws%+176)="/riscos/media/"+CHR$0
 ws%!192=0 : $(ws%+196)="Linux didn't say how much space is free"+CHR$0
 $(ws%+256)="HardDisc4"+CHR$0
@@ -317,9 +338,18 @@ FOR pass%=0 TO 2 STEP 2
   .fr_cmp
   LDRB R6,[R4],#1 : LDRB R7,[R5],#1
   CMP R7,#32 : MOVLT R7,#0
-  CMP R6,R7 : BNE fr_media
+  CMP R6,R7 : BNE fr_rol
   CMP R6,#0 : BNE fr_cmp
   ADD R4,R12,#160 : ADD R5,R12,#288
+  B fr_hd
+  .fr_rol
+  ADD R4,R12,#272 : MOV R5,R1
+  .fr_cmp2
+  LDRB R6,[R4],#1 : LDRB R7,[R5],#1
+  CMP R7,#32 : MOVLT R7,#0
+  CMP R6,R7 : BNE fr_media
+  CMP R6,#0 : BNE fr_cmp2
+  ADD R4,R12,#168 : ADD R5,R12,#288
   .fr_hd
   LDRB R6,[R4],#1 : STRB R6,[R5],#1 : CMP R6,#0 : BNE fr_hd
   B fr_ask

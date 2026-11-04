@@ -64,11 +64,11 @@ python3 -I "$HERE/xattr2comma.py" "$hd"
 boot=$hd/!Boot
 rm -rf "$boot/Choices/Boot"
 cp -a "$boot/RO520Hook/Boot" "$boot/Choices/Boot"
-# IXFS:$ as a folder on the icon bar (Pinboard's file); HardDisc4, USB
-# discs and SD cards as drive icons (!DiscIcon, from its own Tasks file, so
-# a pinboard that replaces Pinboard's file, like ROD's Pinboard2, keeps them)
-printf 'X AddTinyDir IXFS:$\n' > "$boot/Choices/Boot/Tasks/Pinboard,feb"
-printf '| DiscIcon: HardDisc4, USB discs and SD cards as drive icons\nX Filer_Run <IXFS$HardDisc4>.!Boot.Resources.!DiscIcon\n' > "$boot/Choices/Boot/Tasks/DiscIcon,feb"
+# HardDisc4, IXFS:$ (a folder labelled "IXFS:$"), USB discs and SD cards
+# on the icon bar: !DiscIcon, from its own Tasks file, so a pinboard that
+# replaces Pinboard's file, like ROD's Pinboard2, keeps them. (Not
+# Pinboard's AddTinyDir: from RISC OS 5.31-16 that labels IXFS:$ just "$".)
+printf '| DiscIcon: HardDisc4, IXFS:$, USB discs and SD cards on the icon bar\nX Filer_Run <IXFS$HardDisc4>.!Boot.Resources.!DiscIcon\n' > "$boot/Choices/Boot/Tasks/DiscIcon,feb"
 extras=$HERE/extras
 cp -a "$extras/!DiscIcon" "$boot/Resources/"
 # !NetWatch: Inet$Resolvers follows Linux's network (a late link or
