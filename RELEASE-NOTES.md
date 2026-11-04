@@ -1,3 +1,122 @@
+# RISC OS on Linux 1.0.0017 (4 November 2026): public test release
+
+RISC OS 5.31 (RISC OS 5.31-15: RISC OS Open's nightly in Timothy
+Baldwin's Linux port) on Debian 13, for 64-bit ARM machines. This is a
+test release: it runs well on the machines below, but please report
+anything that doesn't work.
+
+![The desktop with NetSurf](docs/screenshots/1.0.0017/01-desktop-netsurf.png)
+
+## The images
+
+| Image | For | File |
+|---|---|---|
+| Generic | Raspberry Pi 3/3B+/CM3, Zero 2 W, 4/400/CM4, 5/500/CM5; UEFI machines (QEMU, ARM boards and servers); Pinebook and Pinebook Pro | `riscos-generic.img.xz` |
+| UTM | Apple Silicon Macs | `RISC OS 1.0.0017.utm` (in `RISC OS 1.0.0017.utm.zip`) |
+| Windows Dev Kit 2023 | Snapdragon 8cx Gen 3 ("Project Volterra") | `riscos-wdk2023.img.xz` |
+
+Write the .img.xz to a card or USB disc with Raspberry Pi Imager ("Use
+custom") or balenaEtcher. Unzip the .utm and double-click it to add it to
+UTM. Each image starts straight into the RISC OS desktop; Shutdown powers
+the machine off. `SHA256SUMS` lists the files' checksums.
+
+Already running 1.0.0006 or later? Configure → Updates brings you to the
+same versions without reinstalling.
+
+## What's new since 1.0.0006
+
+- **Faster:** on a processor that runs 32-bit ARM code (a Pi, the Dev
+  Kit), RISC OS runs natively; SWIs are now about three times faster on a
+  Raspberry Pi 4 (a kernel fast path), and programs that used to stop
+  through Linux on every return to user mode (RiscOSM's map drawing) no
+  longer do.
+- **USB discs and SD cards:** FAT, exFAT, NTFS and ext discs appear on the
+  icon bar when plugged in, by their volume names; discs in RISC OS's own
+  format (FileCore) appear as `SCSI::` drives, as on a native Pi, and HForm
+  can format them. A machine's own SD slot works the same way. Ejecting
+  closes the disc's windows; pulling a disc out does too. Files get the
+  type of their extension (a `photo/jpg` is a JPEG).
+- **Files over 2GB** on HardDisc4 and USB discs (up to RISC OS's 4GB − 1).
+- **Video in hardware on the Raspberry Pi 3 and 4:** H.264 decoding by the
+  VideoCore for Reel, Matinee and FFmpeg, shown on the display's video
+  plane without tearing. (The Pi 5 has no H.264 decoder in hardware; it,
+  and other machines, decode in software.)
+- **Networking:** !Omni (LanManFS, Access) works; servers see their
+  clients' first data (RDPServer); closed connections are seen at once;
+  socket options for GLib programs; NetStats and InetStat work.
+- **Linux commands:** `*IXRun` runs a Linux command as RISC OS's own Linux
+  user (no password, no privileges), by name (`*IXRun ls -l`); `*Linux`
+  still runs them as root after asking for the root password.
+- **Updates** has a Changes button: what each newer version changes,
+  before you install it.
+- **Included apps:** NetSurf 3.11 and RDPServer 0.2 (in Apps.Network, where
+  PackMan puts them), PDFS 0.16.2 beta (TestBed.PDFS), ROBench, and !Omni.
+- **Finer timing** for programs (sub-centisecond clocks: games, SDL), and
+  the keyboard's LEDs follow RISC OS.
+- RISC OS errors from HardDisc4 instead of Linux's ("This item is locked"),
+  editors that check the free space can save there (StrongEd), all the RAM
+  Linux can give (up to 4GB), restart restarts, and the boot partition is
+  always left clean.
+
+The full list is in Configure → Updates → Changes, and in
+[riscos-rolpkg's CHANGELOG](https://github.com/adyoull/riscos-rolpkg/blob/main/CHANGELOG.md).
+
+![Configure](docs/screenshots/1.0.0017/02-configure.png)
+
+![Configure → Linux network](docs/screenshots/1.0.0017/03-linux-network.png)
+
+![Configure → Updates](docs/screenshots/1.0.0017/04-updates.png)
+
+## Versions in this release
+
+| Package | Version |
+|---|---|
+| RISC OS (`riscos-rom`) | 5.31-15 |
+| The Linux side (`riscos-support`) | 1.0.0024-1 |
+| The desktop parts (`riscos-harddisc`) | 1.0.0027-1 |
+| Kernels | Pi 6.6.78-4; generic and Dev Kit 7.2.0-3 |
+
+## Tested
+
+| Machine | |
+|---|---|
+| Raspberry Pi 4 | Andrew Youll, including H.264 video in hardware |
+| Raspberry Pi 5 | Chris Gransden |
+| Windows Dev Kit 2023 | Chris Gransden |
+| UTM on an Apple Silicon Mac | earlier builds; this disc in QEMU |
+| QEMU (UEFI, and the Dev Kit's kernel) | every build, with the test suite |
+| Raspberry Pi 3, Zero 2 W | untried |
+| Pinebook, Pinebook Pro | untried: treat as experimental |
+
+**Thank you to Chris Gransden** for his testing on the Windows Dev Kit
+2023 and the Raspberry Pi 5, and for his clear, detailed reports: many of
+the fixes in this release started with them.
+
+## Known issues
+
+- The Filer can stop with an abort in the kernel's sprite plotting when
+  opening certain directories (seen with !RiscOSM's).
+- On a Raspberry Pi, ROBench's BPut/BGet tests fail to open their file.
+- Discs inside the machine in RISC OS's own format (FileCore on an
+  internal SSD or NVMe) aren't offered to RISC OS; USB discs and SD cards
+  are.
+- Socket_Connect can report success for a connection that was refused.
+- Iris isn't included: get it from riscosdev.com or PackMan (1.029 is the
+  latest that runs properly on RISC OS on Linux).
+
+Please send reports with the `LOGS` folder from the FAT partition.
+
+## Source and licences
+
+All the source is at [riscos-linux](https://github.com/adyoull/riscos-linux)
+(RISC OS 5.31-15 on the `riscos-5.31-source` branch). Each image carries
+`SOURCE.txt` and a `LICENCES` folder on its FAT partition, and
+HardDisc4.Documents.Licences and .Source.
+
+Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
+
+---
+
 # RISC OS on Linux 1.0.0006 (31 October 2026)
 
 The first release: version 1.0, build 0006.
