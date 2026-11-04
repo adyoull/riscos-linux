@@ -6,6 +6,21 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-15 (not yet built)
+
+- **The HAL counter reloads at each centisecond tick, as on hardware.**
+  HAL_CounterPeriod said one second (equal to the 1 GHz rate), so the
+  counter counted down for a whole second: the Internet module's
+  microtime added up to a second (0 to 999,999 µs, and tv_usec could
+  reach about 1,990,000) to its centisecond time, and programs that
+  check the counter's period (UnixLib's clock_gettime, Mesa's tests,
+  DrawSpy 0.01) only got centiseconds. The counter is now timer 0's
+  countdown at nanosecond resolution (Linux's timer_gettime: time to the
+  next tick), period rate/100 with the usual 10 ms tick, reading
+  period-1 down to 0; before timer 0 runs it reloads every 10 ms of
+  CLOCK_MONOTONIC. The rate and the readings both come from
+  CLOCK_MONOTONIC (the rate came from CLOCK_MONOTONIC_RAW).
+
 ## 5.31-14 (3 November 2026)
 
 - ***IXRun runs Linux commands through rol-cmd**, as RISC OS's own Linux

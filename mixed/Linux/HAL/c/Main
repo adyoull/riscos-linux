@@ -166,8 +166,8 @@ unsigned int counter_resolution, counter_rate;
 
 static inline void init_counter(void) {
   struct ix_timespec t;
-  ix_clock_getres(ix_CLOCK_MONOTONIC_RAW, &t);
-  counter_resolution = t.tv_nsec;
+  ix_clock_getres(ix_CLOCK_MONOTONIC, &t);
+  counter_resolution = t.tv_nsec ? t.tv_nsec : 1;
   counter_rate = 1000000000 / counter_resolution;
 }
 
@@ -175,14 +175,48 @@ unsigned int HAL_CounterRate(void) {
   return counter_rate;
 }
 
+/*
+ * The counter is timer 0's countdown, as on real hardware: it counts down
+ * from HAL_CounterPeriod()-1 to 0 within each centisecond tick and reloads
+ * at the tick, so software can add (period - count) / rate to the
+ * centisecond clock (the Internet module's microtime, UnixLib's
+ * clock_gettime). Linux's timer_gettime gives timer 0's time to its next
+ * expiry in nanoseconds, which is that countdown at the counter's
+ * resolution, kept in step with the tick by Linux itself (late or merged
+ * signals don't move it). Until timer 0 runs (or with a period of a
+ * second or more), the counter reloads every 10 ms of CLOCK_MONOTONIC.
+ * (It used to report a period of one second, so microtime added up to a
+ * second to the centisecond time, and UnixLib fell back to centiseconds.)
+ */
+static unsigned int counter_now(unsigned int *period) {
+  if (timers[0].created) {
+    struct ix_itimerspec it;
+    if (ix_timer_gettime(timers[0].id, &it) == 0 && it.it_interval.tv_sec == 0 &&
+        it.it_interval.tv_nsec >= counter_resolution) {
+      unsigned int p = it.it_interval.tv_nsec / counter_resolution;
+      unsigned int v = it.it_value.tv_sec ? p : it.it_value.tv_nsec / counter_resolution;
+      unsigned int count = v ? v - 1 : 0;
+      if (count > p - 1) count = p - 1;
+      *period = p;
+      return count;
+    }
+  }
+  struct ix_timespec t;
+  ix_clock_gettime(ix_CLOCK_MONOTONIC, &t);
+  unsigned int p = counter_rate / 100;
+  *period = p;
+  return p - 1 - (t.tv_nsec / counter_resolution) % p;
+}
+
 unsigned int HAL_CounterPeriod(void) {
-  return counter_rate; // Lie - one second
+  unsigned int period;
+  counter_now(&period);
+  return period;
 }
 
 unsigned int HAL_CounterRead(void) {
-  struct ix_timespec t;
-  ix_clock_gettime(ix_CLOCK_MONOTONIC, &t);
-  return counter_rate - t.tv_nsec / counter_resolution;
+  unsigned int period;
+  return counter_now(&period);
 }
 
 void HAL_CounterDelay(unsigned int microseconds) {
