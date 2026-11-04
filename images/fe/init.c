@@ -823,7 +823,8 @@ kernel_log (void)
    runs as the user "riscos" (uid 1000) in its own view of the files (rol-fb
    sets that up: ROL_CONFINE). The switch is in /etc, which RISC OS can only
    read, so RISC OS can't turn it off. This gives that user the devices
-   RISC OS uses itself (group video) and its own folders. */
+   RISC OS uses itself (group video: also a Pi 3 or 4's GPIO registers,
+   /dev/gpiomem, for the ROM's GPIO HAL devices) and its own folders. */
 #define RO_UID 1000
 #define RO_GID 1000
 #define VIDEO_GID 44
@@ -857,7 +858,8 @@ protect_setup (void)
   struct dirent *e;
   while (d && (e = readdir (d)))
     if (!strncmp (e->d_name, "video", 5) || !strncmp (e->d_name, "media", 5)
-	|| !strcmp (e->d_name, "vchiq") || !strcmp (e->d_name, "vcio"))
+	|| !strcmp (e->d_name, "vchiq") || !strcmp (e->d_name, "vcio")
+	|| !strcmp (e->d_name, "gpiomem"))
       {
 	char p[300];
 	snprintf (p, sizeof p, "/dev/%s", e->d_name);

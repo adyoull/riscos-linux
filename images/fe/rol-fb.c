@@ -1803,10 +1803,11 @@ confine (void)
   snprintf (p, sizeof p, "%s/proc", R);
   if (mount ("proc", p, "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2"))
     mount ("proc", p, "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
-  /* /dev: only what RISC OS uses (the video decoder, the VideoCore) */
+  /* /dev: only what RISC OS uses (the video decoder, the VideoCore, a Pi 3
+     or 4's GPIO registers) */
   snprintf (p, sizeof p, "%s/dev", R);
   mount ("tmpfs", p, "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=755");
-  const char *devs[] = { "null", "zero", "full", "random", "urandom", "vchiq", "vcio", NULL };
+  const char *devs[] = { "null", "zero", "full", "random", "urandom", "vchiq", "vcio", "gpiomem", NULL };
   for (int i = 0; devs[i]; i++)
     {
       char s2[64];

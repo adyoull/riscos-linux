@@ -2442,7 +2442,7 @@ CONFIG_DEVPORT=y
 # CONFIG_TCG_TPM is not set
 # CONFIG_XILLYBUS is not set
 # CONFIG_XILLYUSB is not set
-# CONFIG_RASPBERRYPI_GPIOMEM is not set
+CONFIG_RASPBERRYPI_GPIOMEM=y
 # end of Character devices
 
 #
