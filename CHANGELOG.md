@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-15 (not yet built)
+## 5.31-15 (4 November 2026)
 
 - **The HAL counter reloads at each centisecond tick, as on hardware.**
   HAL_CounterPeriod said one second (equal to the 1 GHz rate), so the
