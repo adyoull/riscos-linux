@@ -7,6 +7,38 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### QEMU: cheaper TB lookups (4 Nov 2026)
+
+- The VFP state the translated code depends on (short-vector length and
+  stride, FPEXC.EN, the inline floating point's FZ and rounding mode) is
+  kept with QEMU's cached TB flags, rebuilt when FPSCR or FPEXC is
+  written, instead of being worked out at every jump through a register
+  or return (`qemu/` patch item 13). Checked with QEMU's own debug build,
+  which compares the cached flags at every lookup, over the whole suite.
+- Direct jumps are chained across pages too (QEMU only chains within a
+  page, for system emulation's sake; in user mode a page's code is
+  invalidated, and the jumps into it unlinked, when it's unmapped,
+  loses execute permission or is written). `RISCOS_NO_XPAGE_CHAIN=1`
+  turns it off.
+- FFmpeg's H.264 decoding (720p, one thread) 7.19 s -> 5.65 s (21%);
+  ROBench: SWI calls 1.26x, LZ77 compress 1.37x (1.5x on an AArch64
+  host), the rest within noise.
+
+### QEMU: NEON integer inline (4 Nov 2026)
+
+- The test bed's QEMU no longer calls a helper per lane for NEON's long
+  and wide arithmetic (VADDL/W, VSUBL/W, VMULL, VMLAL, VMLSL, VABDL,
+  VABAL), narrowing shifts (VSHRN, VQSHRN, VQRSHRUN and the rest; QC
+  too), VSHLL/VMOVL, 16-bit multiply by scalar, VZIP/VUZP, and 8- and
+  16-bit VLD2/VLD4/VST2/VST4: they're host vector instructions on x86-64
+  and AArch64, through new TCG vector ops (`qemu/` patch item 12).
+  ROBench neon: blend 3.4x, yuv2rgb 5.6x, sad 2.1x on x86-64 (2.3x,
+  4.5x, 1.6x on an AArch64 host); FFmpeg's H.264 decoding 9% faster.
+  `RISCOS_NO_INLINENEON=1` turns it off.
+- Tests: `t_neonperm` (236 forms, `tests/gen-neonperm.py`); `t_neonint`
+  and `t_neonperm` give the same CRCs with it, without it, and with
+  QEMU's exact emulation, on both hosts.
+
 ### Running natively (NativeSupport 0.11 to 0.17)
 
 - User-bank LDM/STM ^ (also next to an MRS already stubbed, conditional

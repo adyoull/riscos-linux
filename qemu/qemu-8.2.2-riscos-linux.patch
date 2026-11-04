@@ -184,9 +184,74 @@ needs, ported from Timothy Baldwin's qemu_swi.diff for QEMU 5.2
      with neg_vec, such as aarch64).
    RISCOS_NO_INLINEFP turns it off (to compare).
 
+12. (ours) NEON integer inline in the translated code
+   (target/arm/tcg/riscos-neon.h), where QEMU calls a helper per lane:
+   the long and wide forms (VADDL/W, VSUBL/W, VMULL, VMLAL, VMLSL, VABDL,
+   VABAL), the narrowing shifts (VSHRN, VRSHRN, VQSHRN, VQRSHRN, VQSHRUN,
+   VQRSHRUN; QC set from a widen-and-compare), VSHLL, VMOVL, 16-bit
+   multiply by scalar, VZIP and VUZP, and VLD2/VLD4 and VST2/VST4 of 8 and
+   16 bits (loaded or stored as 64-bit accesses, then unzipped or zipped
+   in registers). New TCG vector ops for them (tcg-opc.h: rouxtl, rosxtl,
+   rosqxtn, rosqxtun, rozip1, rozip2, ropack; TCG_TARGET_HAS_roint_vec)
+   on x86-64 (PMOVZX/SX, PACKSS/US, PUNPCKL/H) and AArch64 (UXTL/SXTL,
+   SQXTN/SQXTUN, ZIP1/ZIP2, UZP1); other hosts use the helpers.
+   Rounding narrows add the rounding bit after the shift, so no lane can
+   overflow. Checked with tests/programs/t_neonint (324 instructions)
+   and t_neonperm (236 permute and structure load/store forms): the same
+   CRCs with and without, on x86-64 and AArch64. ROBench neon, x86-64:
+   blend 3.4x, yuv2rgb 5.6x, sad 2.1x; AArch64 2.3x, 4.5x, 1.6x.
+   RISCOS_NO_INLINENEON turns it off (to compare).
+
+13. (ours) Cheaper TB lookups (an indirect branch or a return looks up
+   its next TB; that was 35% of FFmpeg's H.264 decoding):
+   - target/arm/tcg/hflags.c: A32's VECLEN, VECSTRIDE, VFPEN and ROFP_FZ/
+     ROFP_NOTRN are cached in hflags instead of computed at each lookup
+     (cpu_get_tb_cpu_state; XScale keeps the old way). vfp_set_fpscr and
+     FPEXC writes (VMSR, signal return, gdbstub) rebuild hflags. Checked
+     with --enable-debug-tcg, whose assert_hflags_rebuild_correctly
+     compares them at every lookup (whole test suite).
+   - accel/tcg/translator.c: in user mode, direct jumps are chained across
+     pages too (the same-page rule is for system mode's changing
+     mappings; here page_set_flags or a write invalidates a page's TBs,
+     which unlinks the jumps into them). RISCOS_NO_XPAGE_CHAIN turns it
+     off (to compare).
+   FFmpeg H.264 720p decode 7.19 s -> 5.65 s (21%); ROBench SWI 1.26x,
+   LZ77 compress 1.37x (1.5x on an AArch64 host), the rest about the same.
+
 Applied on top of riscos-crossdev's qemu-8.2.2-align-trap.patch.
 QEMU is GPL-2.0-or-later; so are these changes.
 
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index 38c3400..8bb32c2 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -119,6 +119,26 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
+         return false;
+     }
+ 
++#ifdef CONFIG_USER_ONLY
++    /*
++     * RISC OS testbed: in user mode, chain to any page. The page check is
++     * there for system mode, where a virtual page's mapping can change
++     * under a chained jump; here a page's code is only invalidated by
++     * page_set_flags (munmap, mprotect without exec, a new mapping) or a
++     * write to it, and invalidating a TB unlinks the jumps into it
++     * (tb_jmp_unlink). The flags are checked when a jump is linked, as
++     * for jumps within the page. RISCOS_NO_XPAGE_CHAIN turns it off.
++     */
++    {
++        static int xpage = -1;
++        if (xpage < 0) {
++            xpage = getenv("RISCOS_NO_XPAGE_CHAIN") == NULL;
++        }
++        if (xpage) {
++            return true;
++        }
++    }
++#endif
+     /* Check for the dest on the same page as the start of the TB.  */
+     return ((db->pc_first ^ dest) & TARGET_PAGE_MASK) == 0;
+ }
 diff --git a/fpu/softfloat.c b/fpu/softfloat.c
 index 027a8e5..81ba288 100644
 --- a/fpu/softfloat.c
@@ -725,10 +790,10 @@ index 2d932a5..b870681 100644
  void tcg_gen_dup_i64_vec(unsigned vece, TCGv_vec, TCGv_i64);
  void tcg_gen_dup_mem_vec(unsigned vece, TCGv_vec, TCGv_ptr, tcg_target_long);
 diff --git a/include/tcg/tcg-opc.h b/include/tcg/tcg-opc.h
-index b80227f..bde7e0d 100644
+index b80227f..495eeba 100644
 --- a/include/tcg/tcg-opc.h
 +++ b/include/tcg/tcg-opc.h
-@@ -299,6 +299,28 @@ DEF(cmp_vec, 1, 2, 1, IMPLVEC)
+@@ -299,6 +299,52 @@ DEF(cmp_vec, 1, 2, 1, IMPLVEC)
  DEF(bitsel_vec, 1, 3, 0, IMPLVEC | IMPL(TCG_TARGET_HAS_bitsel_vec))
  DEF(cmpsel_vec, 1, 4, 1, IMPLVEC | IMPL(TCG_TARGET_HAS_cmpsel_vec))
  
@@ -754,19 +819,46 @@ index b80227f..bde7e0d 100644
 +DEF(rofcat_vec, 1, 2, 0, IMPLROF)
 +#undef IMPLROF
 +
++/*
++ * RISC OS testbed: integer lane width changes, for Neon's long and narrow
++ * instructions; vece is the narrow lanes' size (MO_8 or MO_16). rouxtl,
++ * rosxtl: the low 64 bits' lanes zero- or sign-extended to twice the width
++ * (128 bits). rosqxtn, rosqxtun: lanes of twice the width narrowed to
++ * signed or unsigned lanes with signed saturation, into the low 64 bits
++ * (the high 64 bits are undefined).
++ */
++#define IMPLROI IMPLVEC | IMPL(TCG_TARGET_HAS_roint_vec)
++DEF(rouxtl_vec, 1, 1, 0, IMPLROI)
++DEF(rosxtl_vec, 1, 1, 0, IMPLROI)
++DEF(rosqxtn_vec, 1, 1, 0, IMPLROI)
++DEF(rosqxtun_vec, 1, 1, 0, IMPLROI)
++/*
++ * rozip1, rozip2: the lanes of the low (zip1) or high (zip2) halves of a
++ * and b interleaved (a0 b0 a1 b1 ...); vece is the lanes' size. ropack:
++ * lanes of twice vece's width from a then b, each truncated to vece (the
++ * front end clears the high halves first: x86 packs with saturation).
++ */
++DEF(rozip1_vec, 1, 2, 0, IMPLROI)
++DEF(rozip2_vec, 1, 2, 0, IMPLROI)
++DEF(ropack_vec, 1, 2, 0, IMPLROI)
++#undef IMPLROI
++
  DEF(last_generic, 0, 0, 0, TCG_OPF_NOT_PRESENT)
  
  #if TCG_TARGET_MAYBE_vec
 diff --git a/include/tcg/tcg.h b/include/tcg/tcg.h
-index 451f3fe..2f5210e 100644
+index 451f3fe..7d23af6 100644
 --- a/include/tcg/tcg.h
 +++ b/include/tcg/tcg.h
-@@ -160,6 +160,9 @@ typedef uint64_t TCGRegSet;
+@@ -160,6 +160,12 @@ typedef uint64_t TCGRegSet;
  #else
  #define TCG_TARGET_MAYBE_vec            1
  #endif
 +#ifndef TCG_TARGET_HAS_rofp_vec
 +#define TCG_TARGET_HAS_rofp_vec         0
++#endif
++#ifndef TCG_TARGET_HAS_roint_vec
++#define TCG_TARGET_HAS_roint_vec        0
 +#endif
  #ifndef TCG_TARGET_HAS_v64
  #define TCG_TARGET_HAS_v64              0
@@ -2456,7 +2548,7 @@ index b404117..68ed668 100644
  }
  
 diff --git a/linux-user/arm/signal.c b/linux-user/arm/signal.c
-index f77f692..5518fcd 100644
+index f77f692..2b46d6b 100644
 --- a/linux-user/arm/signal.c
 +++ b/linux-user/arm/signal.c
 @@ -318,6 +318,8 @@ static void setup_sigframe(struct target_ucontext *uc,
@@ -2484,6 +2576,14 @@ index f77f692..5518fcd 100644
      force_sigsegv(usig);
  }
  
+@@ -430,6 +434,7 @@ static abi_ulong *restore_sigframe_vfp(CPUARMState *env, abi_ulong *regspace)
+     fpexc |= (1 << 30);
+     fpexc &= ~((1 << 31) | (1 << 28));
+     env->vfp.xregs[ARM_VFP_FPEXC] = fpexc;
++    arm_rebuild_hflags(env);    /* RISC OS testbed: FPEXC.EN is cached */
+     __get_user(env->vfp.xregs[ARM_VFP_FPINST], &vfpframe->ufp_exc.fpinst);
+     __get_user(env->vfp.xregs[ARM_VFP_FPINST2], &vfpframe->ufp_exc.fpinst2);
+     return (abi_ulong*)(vfpframe + 1);
 diff --git a/linux-user/elfload.c b/linux-user/elfload.c
 index cf9e744..32c0a50 100644
 --- a/linux-user/elfload.c
@@ -2791,7 +2891,7 @@ index c63ef45..d353d2f 100644
  typedef struct IOCTLEntry IOCTLEntry;
  
 diff --git a/target/arm/cpu.h b/target/arm/cpu.h
-index a0282e0..21d7a7f 100644
+index a0282e0..bf6db0e 100644
 --- a/target/arm/cpu.h
 +++ b/target/arm/cpu.h
 @@ -3194,6 +3194,13 @@ FIELD(TBFLAG_A32, NS, 10, 1)
@@ -2801,32 +2901,58 @@ index a0282e0..21d7a7f 100644
 +/*
 + * RISC OS testbed: the VFP status's modes the inline floating point
 + * (tcg/riscos-fp.h) is translated for: FPSCR.FZ, and a rounding mode other
-+ * than to nearest. Not cached: from env->vfp.fp_status at each lookup.
++ * than to nearest. Cached (rebuild_hflags_a32), except on XScale.
 + */
-+FIELD(TBFLAG_A32, ROFP_FZ, 12, 1)              /* Not cached. */
-+FIELD(TBFLAG_A32, ROFP_NOTRN, 13, 1)           /* Not cached. */
++FIELD(TBFLAG_A32, ROFP_FZ, 12, 1)
++FIELD(TBFLAG_A32, ROFP_NOTRN, 13, 1)
  
  /*
   * Bit usage when in AArch32 state, for M-profile only.
+diff --git a/target/arm/gdbstub.c b/target/arm/gdbstub.c
+index 28f546a..dea8e22 100644
+--- a/target/arm/gdbstub.c
++++ b/target/arm/gdbstub.c
+@@ -175,6 +175,7 @@ static int vfp_gdb_set_sysreg(CPUARMState *env, uint8_t *buf, int reg)
+         return 4;
+     case 1:
+         env->vfp.xregs[ARM_VFP_FPEXC] = ldl_p(buf) & (1 << 30);
++        arm_rebuild_hflags(env);    /* RISC OS testbed: EN is cached */
+         return 4;
+     }
+     return 0;
 diff --git a/target/arm/helper.c b/target/arm/helper.c
-index df1646d..3c0df53 100644
+index df1646d..67fafca 100644
 --- a/target/arm/helper.c
 +++ b/target/arm/helper.c
-@@ -12231,6 +12231,14 @@ void cpu_get_tb_cpu_state(CPUARMState *env, vaddr *pc,
-             if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
-                 DP_TBFLAG_A32(flags, VFPEN, 1);
+@@ -12222,14 +12222,22 @@ void cpu_get_tb_cpu_state(CPUARMState *env, vaddr *pc,
+              * Note that XSCALE_CPAR shares bits with VECSTRIDE.
+              * Note that VECLEN+VECSTRIDE are RES0 for M-profile.
+              */
++            /*
++             * RISC OS testbed: VECLEN, VECSTRIDE, VFPEN and ROFP_FZ/NOTRN
++             * are cached in hflags (rebuild_hflags_a32), except on XScale.
++             */
+             if (arm_feature(env, ARM_FEATURE_XSCALE)) {
+                 DP_TBFLAG_A32(flags, XSCALE_CPAR, env->cp15.c15_cpar);
+-            } else {
+-                DP_TBFLAG_A32(flags, VECLEN, env->vfp.vec_len);
+-                DP_TBFLAG_A32(flags, VECSTRIDE, env->vfp.vec_stride);
+-            }
+-            if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
+-                DP_TBFLAG_A32(flags, VFPEN, 1);
++                if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
++                    DP_TBFLAG_A32(flags, VFPEN, 1);
++                }
++                if (env->vfp.fp_status.flush_inputs_to_zero) {
++                    DP_TBFLAG_A32(flags, ROFP_FZ, 1);
++                }
++                if (env->vfp.fp_status.float_rounding_mode !=
++                    float_round_nearest_even) {
++                    DP_TBFLAG_A32(flags, ROFP_NOTRN, 1);
++                }
              }
-+            /* RISC OS testbed: see TBFLAG_A32 ROFP_FZ */
-+            if (env->vfp.fp_status.flush_inputs_to_zero) {
-+                DP_TBFLAG_A32(flags, ROFP_FZ, 1);
-+            }
-+            if (env->vfp.fp_status.float_rounding_mode !=
-+                float_round_nearest_even) {
-+                DP_TBFLAG_A32(flags, ROFP_NOTRN, 1);
-+            }
          }
  
-         DP_TBFLAG_AM32(flags, THUMB, env->thumb);
 diff --git a/target/arm/helper.h b/target/arm/helper.h
 index 2b02733..16a8c60 100644
 --- a/target/arm/helper.h
@@ -2851,6 +2977,40 @@ index 2b02733..16a8c60 100644
  DEF_HELPER_1(neon_widen_u8, i64, i32)
  DEF_HELPER_1(neon_widen_s8, i64, i32)
  DEF_HELPER_1(neon_widen_u16, i64, i32)
+diff --git a/target/arm/tcg/hflags.c b/target/arm/tcg/hflags.c
+index a6ebd75..327a7de 100644
+--- a/target/arm/tcg/hflags.c
++++ b/target/arm/tcg/hflags.c
+@@ -130,6 +130,29 @@ static CPUARMTBFlags rebuild_hflags_a32(CPUARMState *env, int fp_el,
+         DP_TBFLAG_A32(flags, VFPEN, 1);
+     }
+ 
++    /*
++     * RISC OS testbed: cached here instead of computed at each TB lookup
++     * (cpu_get_tb_cpu_state): short-vector Len/Stride, FPEXC.EN and the
++     * inline floating point's modes (see TBFLAG_A32 ROFP_FZ). Whatever
++     * changes them rebuilds hflags: vfp_set_fpscr, FPEXC writes (VMSR,
++     * signal return, gdbstub) and reset. Not for XScale (CPAR shares
++     * VECSTRIDE's bits): that stays per lookup.
++     */
++    if (!arm_feature(env, ARM_FEATURE_XSCALE)) {
++        DP_TBFLAG_A32(flags, VECLEN, env->vfp.vec_len);
++        DP_TBFLAG_A32(flags, VECSTRIDE, env->vfp.vec_stride);
++        if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
++            DP_TBFLAG_A32(flags, VFPEN, 1);
++        }
++        if (env->vfp.fp_status.flush_inputs_to_zero) {
++            DP_TBFLAG_A32(flags, ROFP_FZ, 1);
++        }
++        if (env->vfp.fp_status.float_rounding_mode !=
++            float_round_nearest_even) {
++            DP_TBFLAG_A32(flags, ROFP_NOTRN, 1);
++        }
++    }
++
+     if (el < 2 && env->cp15.hstr_el2 && arm_is_el2_enabled(env) &&
+         (arm_hcr_el2_eff(env) & (HCR_E2H | HCR_TGE)) != (HCR_E2H | HCR_TGE)) {
+         DP_TBFLAG_A32(flags, HSTR_ACTIVE, 1);
 diff --git a/target/arm/tcg/neon_helper.c b/target/arm/tcg/neon_helper.c
 index bc6c4a5..d77c42a 100644
 --- a/target/arm/tcg/neon_helper.c
@@ -4198,27 +4358,578 @@ index 0000000..2d2187a
 +}
 +
 +#endif
+diff --git a/target/arm/tcg/riscos-neon.h b/target/arm/tcg/riscos-neon.h
+new file mode 100644
+index 0000000..1c5d3e8
+--- /dev/null
++++ b/target/arm/tcg/riscos-neon.h
+@@ -0,0 +1,535 @@
++/*
++ * RISC OS testbed: Neon integer long, narrowing and by-scalar instructions
++ * as host vector instructions in the translated code.
++ *
++ * These were single helper calls each (rol_long, rol_nshift, rol_shll,
++ * rol_2sc16 in neon_helper.c), which perf showed taking 30-55% of the time
++ * in Neon integer code (ROBench blend, yuv2rgb, sad): the call, the
++ * registers going through memory, and the stall when a helper reads 16
++ * bytes that the translated code wrote as two 8-byte halves. Here they are
++ * built from TCG's vector operations and four of ours that change the lane
++ * width (tcg-opc.h: rouxtl, rosxtl, rosqxtn, rosqxtun: x86 PMOVZX/PMOVSX/
++ * PACKSS/PACKUS, AArch64 UXTL/SXTL/SQXTN/SQXTUN). The results are the
++ * helpers' to the bit, and saturation sets QC as QEMU's own saturating
++ * vector operations do (a non-zero lane in vfp.qc). Where the host can't,
++ * the helpers run as before. RISCOS_NO_HOSTNEON=1 turns both off (QEMU's
++ * own code); RISCOS_NO_INLINENEON=1 keeps the helpers.
++ */
++
++#ifndef RISCOS_NEON_H
++#define RISCOS_NEON_H
++
++static bool rol_neon_off, roln_inline_off;
++
++static void __attribute__((constructor)) roln_init(void)
++{
++    rol_neon_off = getenv("RISCOS_NO_HOSTNEON") != NULL;
++    roln_inline_off = rol_neon_off ||
++                      getenv("RISCOS_NO_INLINENEON") != NULL;
++}
++
++/* 3 registers, different lengths: the operations (as neon_helper.c's) */
++enum { ROLN_ADDL, ROLN_SUBL, ROLN_ADDW, ROLN_SUBW, ROLN_ABDL, ROLN_ABAL,
++       ROLN_MULL, ROLN_MLAL, ROLN_MLSL };
++
++static const TCGOpcode roln_ops_long[] = {
++    INDEX_op_rouxtl_vec, INDEX_op_rosxtl_vec, INDEX_op_add_vec,
++    INDEX_op_sub_vec, INDEX_op_mul_vec, INDEX_op_umin_vec,
++    INDEX_op_umax_vec, INDEX_op_smin_vec, INDEX_op_smax_vec, 0
++};
++static const TCGOpcode roln_ops_narrow[] = {
++    INDEX_op_rouxtl_vec, INDEX_op_rosxtl_vec, INDEX_op_rosqxtn_vec,
++    INDEX_op_rosqxtun_vec, INDEX_op_shri_vec, INDEX_op_sari_vec,
++    INDEX_op_add_vec, INDEX_op_umin_vec, INDEX_op_cmp_vec, 0
++};
++static const TCGOpcode roln_ops_mul16[] = {
++    INDEX_op_mul_vec, INDEX_op_add_vec, INDEX_op_sub_vec, 0
++};
++static const TCGOpcode roln_ops_shll[] = {
++    INDEX_op_rouxtl_vec, INDEX_op_rosxtl_vec, INDEX_op_shli_vec, 0
++};
++
++/* Can this host do it? (vece: the lanes the operations work on) */
++static bool roln_ok(const TCGOpcode *ops, unsigned vece)
++{
++    return !roln_inline_off && TCG_TARGET_HAS_v128 &&
++           tcg_can_emit_vecop_list(ops, TCG_TYPE_V128, vece);
++}
++
++/* a D register's 64 bits, in the low half of a 128-bit vector */
++static TCGv_vec roln_ld_d(int reg)
++{
++    TCGv_vec v = rofp_tv(TCG_TYPE_V128);
++    tcg_gen_dup_mem_vec(MO_64, v, tcg_env, neon_full_reg_offset(reg));
++    return v;
++}
++
++/* a Q register (as two 64-bit loads: see rofp_ld_neon) */
++static TCGv_vec roln_ld_q(int reg)
++{
++    TCGv_vec v = rofp_tv(TCG_TYPE_V128);
++    rofp_ld_neon(TCG_TYPE_V128, v, neon_full_reg_offset(reg));
++    return v;
++}
++
++static TCGv_vec roln_xtl(TCGv_vec a, unsigned vece, bool sgn)
++{
++    TCGv_vec r = rofp_tv(TCG_TYPE_V128);
++    tcg_gen_rof2_vec(sgn ? INDEX_op_rosxtl_vec : INDEX_op_rouxtl_vec,
++                     vece, r, a);
++    return r;
++}
++
++static TCGv_vec roln_xtn(TCGv_vec a, unsigned vece, bool to_unsigned)
++{
++    TCGv_vec r = rofp_tv(TCG_TYPE_V128);
++    tcg_gen_rof2_vec(to_unsigned ? INDEX_op_rosqxtun_vec
++                                 : INDEX_op_rosqxtn_vec, vece, r, a);
++    return r;
++}
++
++/* QC |= lanes that are non-zero in sat */
++static void roln_set_qc(TCGv_vec sat)
++{
++    TCGv_vec qc = rofp_tv(TCG_TYPE_V128);
++    uint32_t ofs = offsetof(CPUARMState, vfp.qc);
++
++    tcg_gen_ld_vec(qc, tcg_env, ofs);
++    tcg_gen_or_vec(MO_64, qc, qc, sat);
++    tcg_gen_st_vec(qc, tcg_env, ofs);
++}
++
++/*
++ * 3 registers, different lengths (sizes 8 and 16): Qd = Dn op Dm, or
++ * Qn op Dm for the wide forms. op as in neon_helper.c (ROLN_*). The wide
++ * lanes are modular, so signedness only matters in widening and in the
++ * absolute difference (computed on the narrow lanes, where it fits
++ * unsigned, then zero-extended).
++ */
++static bool roln_long(int op, int size, bool sgn, int vd, int vn, int vm)
++{
++    unsigned w = size + 1;
++    TCGv_vec a, b, r;
++
++    if (!roln_ok(roln_ops_long, size) || !roln_ok(roln_ops_long, w)) {
++        return false;
++    }
++    if (op == ROLN_ABDL || op == ROLN_ABAL) {
++        TCGv_vec n = roln_ld_d(vn), m = roln_ld_d(vm);
++        TCGv_vec hi = rofp_tv(TCG_TYPE_V128);
++        TCGv_vec lo = rofp_tv(TCG_TYPE_V128);
++
++        if (sgn) {
++            tcg_gen_smax_vec(size, hi, n, m);
++            tcg_gen_smin_vec(size, lo, n, m);
++        } else {
++            tcg_gen_umax_vec(size, hi, n, m);
++            tcg_gen_umin_vec(size, lo, n, m);
++        }
++        tcg_gen_sub_vec(size, hi, hi, lo);
++        r = roln_xtl(hi, size, false);
++        if (op == ROLN_ABAL) {
++            tcg_gen_add_vec(w, r, r, roln_ld_q(vd));
++        }
++    } else {
++        if (op == ROLN_ADDW || op == ROLN_SUBW) {
++            a = roln_ld_q(vn);
++        } else {
++            a = roln_xtl(roln_ld_d(vn), size, sgn);
++        }
++        b = roln_xtl(roln_ld_d(vm), size, sgn);
++        r = rofp_tv(TCG_TYPE_V128);
++        switch (op) {
++        case ROLN_ADDL:
++        case ROLN_ADDW:
++            tcg_gen_add_vec(w, r, a, b);
++            break;
++        case ROLN_SUBL:
++        case ROLN_SUBW:
++            tcg_gen_sub_vec(w, r, a, b);
++            break;
++        case ROLN_MULL:
++            tcg_gen_mul_vec(w, r, a, b);
++            break;
++        case ROLN_MLAL:
++            tcg_gen_mul_vec(w, r, a, b);
++            tcg_gen_add_vec(w, r, roln_ld_q(vd), r);
++            break;
++        default: /* ROLN_MLSL */
++            tcg_gen_mul_vec(w, r, a, b);
++            tcg_gen_sub_vec(w, r, roln_ld_q(vd), r);
++            break;
++        }
++    }
++    tcg_gen_st_vec(r, tcg_env, neon_full_reg_offset(vd));
++    rofp_tmps_free();
++    return true;
++}
++
++/*
++ * Narrowing right shifts by an immediate: Dd = narrow(Qm >> sh), op as
++ * the ROL_NS_* numbers (0 VSHRN, 1 VRSHRN, 2 VQSHRUN, 3 VQRSHRUN,
++ * 4 VQSHRN.S, 5 VQRSHRN.S, 6 VQSHRN.U, 7 VQRSHRN.U; odd ones round).
++ * size: the source lanes (MO_16 or MO_32). Rounding is
++ * (x >> sh) + ((x >> (sh - 1)) & 1), which is (x + 2^(sh-1)) >> sh
++ * without the carry out of the lane.
++ */
++static bool roln_nshift(int op, int size, int sh, int vd, int vm)
++{
++    unsigned n = size - 1;          /* the narrow lanes */
++    int kind = op >> 1;             /* 0 plain, 1 S->U, 2 S->S, 3 U->U */
++    bool sgn = kind == 1 || kind == 2;
++    TCGv_vec x, t, r, back;
++
++    if (size < 1 || size > 2 || sh < 1 || sh > (8 << size) ||
++        !roln_ok(roln_ops_narrow, size) || !roln_ok(roln_ops_narrow, n)) {
++        return false;
++    }
++    x = roln_ld_q(vm);
++    t = rofp_tv(TCG_TYPE_V128);
++    if (op & 1) {
++        TCGv_vec bit = rofp_tv(TCG_TYPE_V128);
++        if (sh > 1) {
++            if (sgn) {
++                tcg_gen_sari_vec(size, bit, x, sh - 1);
++            } else {
++                tcg_gen_shri_vec(size, bit, x, sh - 1);
++            }
++        } else {
++            tcg_gen_mov_vec(bit, x);
++        }
++        tcg_gen_and_vec(size, bit, bit, tcg_constant_vec(TCG_TYPE_V128,
++                                                         size, 1));
++        if (sh == (8 << size)) {
++            /* a shift by the lane width: x >> sh is 0 (or -1 signed) */
++            if (sgn) {
++                tcg_gen_sari_vec(size, t, x, sh - 1);
++            } else {
++                tcg_gen_dupi_vec(size, t, 0);
++            }
++        } else if (sgn) {
++            tcg_gen_sari_vec(size, t, x, sh);
++        } else {
++            tcg_gen_shri_vec(size, t, x, sh);
++        }
++        tcg_gen_add_vec(size, t, t, bit);
++    } else if (sh == (8 << size)) {
++        if (sgn) {
++            tcg_gen_sari_vec(size, t, x, sh - 1);
++        } else {
++            tcg_gen_dupi_vec(size, t, 0);
++        }
++    } else if (sgn) {
++        tcg_gen_sari_vec(size, t, x, sh);
++    } else {
++        tcg_gen_shri_vec(size, t, x, sh);
++    }
++
++    switch (kind) {
++    case 0:
++        /* plain: the low half of each lane */
++        tcg_gen_and_vec(size, t, t, tcg_constant_vec(TCG_TYPE_V128, size,
++                                                     (1u << (8 << n)) - 1));
++        r = roln_xtn(t, n, true);
++        break;
++    case 1:
++        /* signed to unsigned, saturating */
++        r = roln_xtn(t, n, true);
++        back = roln_xtl(r, n, false);
++        tcg_gen_cmp_vec(TCG_COND_NE, size, back, back, t);
++        roln_set_qc(back);
++        break;
++    case 2:
++        /* signed to signed, saturating */
++        r = roln_xtn(t, n, false);
++        back = roln_xtl(r, n, true);
++        tcg_gen_cmp_vec(TCG_COND_NE, size, back, back, t);
++        roln_set_qc(back);
++        break;
++    default:
++        /* unsigned to unsigned, saturating: clamp, then the low half */
++        {
++            TCGv_vec c = rofp_tv(TCG_TYPE_V128);
++            tcg_gen_umin_vec(size, c, t,
++                             tcg_constant_vec(TCG_TYPE_V128, size,
++                                              (1u << (8 << n)) - 1));
++            r = roln_xtn(c, n, true);
++            tcg_gen_cmp_vec(TCG_COND_NE, size, c, c, t);
++            roln_set_qc(c);
++        }
++        break;
++    }
++    tcg_gen_stl_vec(r, tcg_env, neon_full_reg_offset(vd), TCG_TYPE_V64);
++    rofp_tmps_free();
++    return true;
++}
++
++/* VMUL, VMLA, VMLS .I16 by scalar (op 0, 1, 2), D or Q */
++static bool roln_2sc16(int op, bool q, int vd, int vn, TCGv_i32 scalar)
++{
++    TCGType type = q ? TCG_TYPE_V128 : TCG_TYPE_V64;
++    TCGv_vec n, s, d;
++
++    if (roln_inline_off || !(q ? TCG_TARGET_HAS_v128 : TCG_TARGET_HAS_v64) ||
++        !tcg_can_emit_vecop_list(roln_ops_mul16, type, MO_16)) {
++        return false;
++    }
++    n = rofp_tv(type);
++    if (q) {
++        rofp_ld_neon(type, n, neon_full_reg_offset(vn));
++    } else {
++        tcg_gen_ld_vec(n, tcg_env, neon_full_reg_offset(vn));
++    }
++    s = rofp_tv(type);
++    tcg_gen_dup_i32_vec(MO_16, s, scalar);
++    tcg_gen_mul_vec(MO_16, n, n, s);
++    if (op) {
++        d = rofp_tv(type);
++        if (q) {
++            rofp_ld_neon(type, d, neon_full_reg_offset(vd));
++        } else {
++            tcg_gen_ld_vec(d, tcg_env, neon_full_reg_offset(vd));
++        }
++        if (op == 1) {
++            tcg_gen_add_vec(MO_16, n, d, n);
++        } else {
++            tcg_gen_sub_vec(MO_16, n, d, n);
++        }
++    }
++    tcg_gen_st_vec(n, tcg_env, neon_full_reg_offset(vd));
++    rofp_tmps_free();
++    return true;
++}
++
++/* VSHLL / VMOVL, sizes 8 and 16: Qd = widen(Dm) << sh */
++static bool roln_shll(int size, bool sgn, int sh, int vd, int vm)
++{
++    unsigned w = size + 1;
++    TCGv_vec r;
++
++    if (!roln_ok(roln_ops_shll, size) || !roln_ok(roln_ops_shll, w)) {
++        return false;
++    }
++    r = roln_xtl(roln_ld_d(vm), size, sgn);
++    if (sh) {
++        tcg_gen_shli_vec(w, r, r, sh);
++    }
++    tcg_gen_st_vec(r, tcg_env, neon_full_reg_offset(vd));
++    rofp_tmps_free();
++    return true;
++}
++
++/* --- zips, unzips and the interleaving loads and stores ------------------ */
++
++static const TCGOpcode roln_ops_zip[] = {
++    INDEX_op_rozip1_vec, INDEX_op_rozip2_vec, 0
++};
++static const TCGOpcode roln_ops_pack[] = { INDEX_op_ropack_vec, 0 };
++/* (and, or: every vector host has them; TCG's debug build insists they
++   aren't listed) */
++static const TCGOpcode roln_ops_uzpw[] = { INDEX_op_shri_vec, 0 };
++
++static TCGv_vec roln_op3(TCGOpcode opc, unsigned vece, TCGv_vec a, TCGv_vec b)
++{
++    TCGv_vec r = rofp_tv(TCG_TYPE_V128);
++    tcg_gen_rof3_vec(opc, vece, r, a, b);
++    return r;
++}
++
++/* the high 64 bits of a, in the low 64 */
++static TCGv_vec roln_hi64(TCGv_vec a)
++{
++    return roln_op3(INDEX_op_rozip2_vec, MO_64, a, a);
++}
++
++/*
++ * Unzip: the even (odd = false) or odd lanes of size vece from a then b
++ * (lanes of twice the width, each truncated to its low or high half)
++ */
++static TCGv_vec roln_uzp(unsigned vece, TCGv_vec a, TCGv_vec b, bool odd)
++{
++    unsigned w = vece + 1;
++    TCGv_vec x = rofp_tv(TCG_TYPE_V128);
++    TCGv_vec y = rofp_tv(TCG_TYPE_V128);
++
++    if (odd) {
++        tcg_gen_shri_vec(w, x, a, 8 << vece);
++        tcg_gen_shri_vec(w, y, b, 8 << vece);
++    } else {
++        TCGv_vec m = tcg_constant_vec(TCG_TYPE_V128, w,
++                                      (1ull << (8 << vece)) - 1);
++        tcg_gen_and_vec(w, x, a, m);
++        tcg_gen_and_vec(w, y, b, m);
++    }
++    return roln_op3(INDEX_op_ropack_vec, vece, x, y);
++}
++
++/* unzipping lanes of vece: a pack to vece, masks and shifts on twice it */
++static bool roln_can_uzp(unsigned vece)
++{
++    return roln_ok(roln_ops_pack, vece) && roln_ok(roln_ops_uzpw, vece + 1);
++}
++
++/* VZIP: D registers sizes 8 and 16, Q registers 8, 16 and 32 */
++static bool roln_zip(bool q, int size, int vd, int vm)
++{
++    TCGv_vec d, m;
++
++    if (!roln_ok(roln_ops_zip, size) || !roln_ok(roln_ops_zip, MO_64)) {
++        return false;
++    }
++    if (q) {
++        d = roln_ld_q(vd);
++        m = roln_ld_q(vm);
++        TCGv_vec lo = roln_op3(INDEX_op_rozip1_vec, size, d, m);
++        TCGv_vec hi = roln_op3(INDEX_op_rozip2_vec, size, d, m);
++        tcg_gen_st_vec(lo, tcg_env, neon_full_reg_offset(vd));
++        tcg_gen_st_vec(hi, tcg_env, neon_full_reg_offset(vm));
++    } else {
++        d = roln_ld_d(vd);
++        m = roln_ld_d(vm);
++        TCGv_vec z = roln_op3(INDEX_op_rozip1_vec, size, d, m);
++        tcg_gen_stl_vec(z, tcg_env, neon_full_reg_offset(vd), TCG_TYPE_V64);
++        tcg_gen_stl_vec(roln_hi64(z), tcg_env, neon_full_reg_offset(vm),
++                        TCG_TYPE_V64);
++    }
++    rofp_tmps_free();
++    return true;
++}
++
++/* VUZP: D registers sizes 8 and 16, Q registers 8 and 16 */
++static bool roln_unzip(bool q, int size, int vd, int vm)
++{
++    TCGv_vec d, m, ev, od;
++
++    if (size > MO_16 || !roln_can_uzp(size) ||
++        !roln_ok(roln_ops_zip, MO_64) ||
++        !tcg_can_emit_vecop_list(rofp_vecops_cat, TCG_TYPE_V128, MO_64)) {
++        return false;
++    }
++    if (q) {
++        d = roln_ld_q(vd);
++        m = roln_ld_q(vm);
++        ev = roln_uzp(size, d, m, false);
++        od = roln_uzp(size, d, m, true);
++        tcg_gen_st_vec(ev, tcg_env, neon_full_reg_offset(vd));
++        tcg_gen_st_vec(od, tcg_env, neon_full_reg_offset(vm));
++    } else {
++        /* the 16 bytes d:m, unzipped; each half's result is in its low 64 */
++        TCGv_vec x = rofp_tv(TCG_TYPE_V128);
++        tcg_gen_rof3_vec(INDEX_op_rofcat_vec, MO_64, x, roln_ld_d(vd),
++                         roln_ld_d(vm));
++        ev = roln_uzp(size, x, x, false);
++        od = roln_uzp(size, x, x, true);
++        tcg_gen_stl_vec(ev, tcg_env, neon_full_reg_offset(vd), TCG_TYPE_V64);
++        tcg_gen_stl_vec(od, tcg_env, neon_full_reg_offset(vm), TCG_TYPE_V64);
++    }
++    rofp_tmps_free();
++    return true;
++}
++
++/*
++ * VLD2/VST2 and VLD4/VST4 (multiple structures), elements of 8 or 16 bits,
++ * little-endian: the interleaving done with zips and unzips, and memory
++ * accessed 64 bits at a time (QEMU: one access per element, 32 for a
++ * VST4.8). The first access carries the alignment the instruction asks
++ * for, as QEMU's first element access does; the rest are at 8-byte steps
++ * from it. Vectors go to and from the 64-bit accesses through 16 bytes of
++ * vfp.scratch (64-bit loads of what a 128-bit store wrote, and the other
++ * way as rofp_ld_neon does it, so the store buffer forwards them).
++ */
++static TCGv_vec roln_from_mem(DisasContext *s, TCGv_i32 addr, int mmu_idx,
++                              MemOp *mop)
++{
++    TCGv_i64 t = rofp_t64();
++    TCGv_vec v = rofp_tv(TCG_TYPE_V128);
++
++    for (int i = 0; i < 2; i++) {
++        gen_aa32_ld_internal_i64(s, t, addr, mmu_idx, *mop);
++        *mop &= ~MO_AMASK;
++        tcg_gen_addi_i32(addr, addr, 8);
++        tcg_gen_st_i64(t, tcg_env, ROFP_SCRATCH + 8 * i);
++    }
++    rofp_ld_neon(TCG_TYPE_V128, v, ROFP_SCRATCH);
++    return v;
++}
++
++static void roln_to_mem(DisasContext *s, TCGv_vec v, TCGv_i32 addr,
++                        int mmu_idx, MemOp *mop)
++{
++    TCGv_i64 t = rofp_t64();
++
++    tcg_gen_st_vec(v, tcg_env, ROFP_SCRATCH);
++    for (int i = 0; i < 2; i++) {
++        tcg_gen_ld_i64(t, tcg_env, ROFP_SCRATCH + 8 * i);
++        gen_aa32_st_internal_i64(s, t, addr, mmu_idx, *mop);
++        *mop &= ~MO_AMASK;
++        tcg_gen_addi_i32(addr, addr, 8);
++    }
++}
++
++static bool roln_ldst(DisasContext *s, bool load, int size, int nregs,
++                      int interleave, int spacing, int vd, TCGv_i32 addr,
++                      int mmu_idx, MemOp align)
++{
++    MemOp mop = MO_LEUQ | align;
++
++
++    if (roln_inline_off || size > MO_16 ||
++        (interleave != 2 && interleave != 4) ||
++        !roln_ok(roln_ops_zip, size) || !roln_ok(roln_ops_zip, size + 1) ||
++        (load && !roln_can_uzp(size)) ||
++        !tcg_can_emit_vecop_list(rofp_vecops_cat, TCG_TYPE_V128, MO_64)) {
++        return false;
++    }
++    for (int reg = 0; reg < nregs; reg++) {
++        int t[4];
++        for (int xs = 0; xs < interleave; xs++) {
++            t[xs] = vd + reg + spacing * xs;
++        }
++        if (load) {
++            TCGv_vec x0 = roln_from_mem(s, addr, mmu_idx, &mop);
++            if (interleave == 2) {
++                TCGv_vec a = roln_uzp(size, x0, x0, false);
++                TCGv_vec b = roln_uzp(size, x0, x0, true);
++                tcg_gen_stl_vec(a, tcg_env, neon_full_reg_offset(t[0]),
++                                TCG_TYPE_V64);
++                tcg_gen_stl_vec(b, tcg_env, neon_full_reg_offset(t[1]),
++                                TCG_TYPE_V64);
++            } else {
++                TCGv_vec x1 = roln_from_mem(s, addr, mmu_idx, &mop);
++                /* ev: lanes 0, 2 of each structure; od: 1, 3 */
++                TCGv_vec ev = roln_uzp(size, x0, x1, false);
++                TCGv_vec od = roln_uzp(size, x0, x1, true);
++                TCGv_vec r[4] = {
++                    roln_uzp(size, ev, ev, false), roln_uzp(size, od, od, false),
++                    roln_uzp(size, ev, ev, true), roln_uzp(size, od, od, true),
++                };
++                for (int xs = 0; xs < 4; xs++) {
++                    tcg_gen_stl_vec(r[xs], tcg_env,
++                                    neon_full_reg_offset(t[xs]),
++                                    TCG_TYPE_V64);
++                }
++            }
++        } else {
++            if (interleave == 2) {
++                TCGv_vec z = roln_op3(INDEX_op_rozip1_vec, size,
++                                      roln_ld_d(t[0]), roln_ld_d(t[1]));
++                roln_to_mem(s, z, addr, mmu_idx, &mop);
++            } else {
++                TCGv_vec z1 = roln_op3(INDEX_op_rozip1_vec, size,
++                                       roln_ld_d(t[0]), roln_ld_d(t[1]));
++                TCGv_vec z2 = roln_op3(INDEX_op_rozip1_vec, size,
++                                       roln_ld_d(t[2]), roln_ld_d(t[3]));
++                roln_to_mem(s, roln_op3(INDEX_op_rozip1_vec, size + 1, z1, z2),
++                            addr, mmu_idx, &mop);
++                roln_to_mem(s, roln_op3(INDEX_op_rozip2_vec, size + 1, z1, z2),
++                            addr, mmu_idx, &mop);
++            }
++        }
++    }
++    rofp_tmps_free();
++    return true;
++}
++
++#endif
 diff --git a/target/arm/tcg/translate-neon.c b/target/arm/tcg/translate-neon.c
-index 144f18b..a19424b 100644
+index 144f18b..b6d3239 100644
 --- a/target/arm/tcg/translate-neon.c
 +++ b/target/arm/tcg/translate-neon.c
-@@ -23,6 +23,7 @@
+@@ -23,6 +23,8 @@
  #include "qemu/osdep.h"
  #include "translate.h"
  #include "translate-a32.h"
 +#include "riscos-fp.h"
++#include "riscos-neon.h"
  
  /* Include the generated Neon decoder */
  #include "decode-neon-dp.c.inc"
-@@ -509,6 +510,7 @@ static bool trans_VLDST_multiple(DisasContext *s, arg_VLDST_multiple *a)
+@@ -508,7 +510,16 @@ static bool trans_VLDST_multiple(DisasContext *s, arg_VLDST_multiple *a)
+     addr = tcg_temp_new_i32();
      load_reg_var(s, addr, a->rn);
  
++    /* RISC OS testbed: VLD2/4, VST2/4 of 8 and 16 bits (riscos-neon.h) */
++    if (interleave > 1 && endian == MO_LE &&
++        roln_ldst(s, a->l, size, nregs, interleave, spacing, a->vd, addr,
++                  mmu_idx, align == MO_ALIGN ? pow2_align(size) : align)) {
++        gen_neon_ldst_base_update(s, a->rm, a->rn, nregs * interleave * 8);
++        return true;
++    }
++
      mop = endian | size | align;
 +
      for (reg = 0; reg < nregs; reg++) {
          for (n = 0; n < 8 >> size; n++) {
              int xs;
-@@ -1112,8 +1114,54 @@ DO_3SAME_VQDMULH(VQRDMULH, qrdmulh)
+@@ -1112,8 +1123,54 @@ DO_3SAME_VQDMULH(VQRDMULH, qrdmulh)
                             oprsz, maxsz, 0, FUNC);                      \
      }
  
@@ -4275,7 +4986,7 @@ index 144f18b..a19424b 100644
      WRAP_FP_GVEC(gen_##INSN##_fp16_3s, FPST_STD_F16, HFUNC)             \
      static bool trans_##INSN##_fp_3s(DisasContext *s, arg_3same *a)     \
      {                                                                   \
-@@ -1127,19 +1175,19 @@ DO_3SAME_VQDMULH(VQRDMULH, qrdmulh)
+@@ -1127,19 +1184,19 @@ DO_3SAME_VQDMULH(VQRDMULH, qrdmulh)
      }
  
  
@@ -4308,31 +5019,23 @@ index 144f18b..a19424b 100644
  DO_3S_FP_GVEC(VFMA, gen_helper_gvec_vfma_s, gen_helper_gvec_vfma_h)
  DO_3S_FP_GVEC(VFMS, gen_helper_gvec_vfms_s, gen_helper_gvec_vfms_h)
  DO_3S_FP_GVEC(VRECPS, gen_helper_gvec_recps_nf_s, gen_helper_gvec_recps_nf_h)
-@@ -1407,6 +1455,54 @@ DO_2SHIFT_ENV(VQSHLU, qshlu_s)
+@@ -1407,6 +1464,49 @@ DO_2SHIFT_ENV(VQSHLU, qshlu_s)
  DO_2SHIFT_ENV(VQSHL_U, qshl_u)
  DO_2SHIFT_ENV(VQSHL_S, qshl_s)
  
 +/*
 + * RISC OS testbed: emit one host-vectorised helper for a whole NEON
-+ * instruction instead of QEMU's chain of 32/64-bit helpers.
-+ * RISCOS_NO_HOSTNEON=1 turns it off (to compare against).
++ * instruction instead of QEMU's chain of 32/64-bit helpers, or (where the
++ * host can) the instruction itself as host vector instructions
++ * (riscos-neon.h, included at the top, where rol_neon_off is:
++ * RISCOS_NO_HOSTNEON=1 turns both off, to compare against).
 + */
-+static bool rol_neon_off;
-+
-+static void __attribute__((constructor)) rol_neon_init(void)
-+{
-+    rol_neon_off = getenv("RISCOS_NO_HOSTNEON") != NULL;
-+}
-+
 +static TCGv_ptr rol_reg_ptr(int reg)
 +{
 +    TCGv_ptr p = tcg_temp_new_ptr();
 +    tcg_gen_addi_ptr(p, tcg_env, neon_full_reg_offset(reg));
 +    return p;
 +}
-+
-+enum { ROLN_ADDL, ROLN_SUBL, ROLN_ADDW, ROLN_SUBW, ROLN_ABDL, ROLN_ABAL,
-+       ROLN_MULL, ROLN_MLAL, ROLN_MLSL };
 +
 +/* the 3-regs-different-lengths ops, sizes 8 and 16 */
 +static bool rol_long_3d(DisasContext *s, arg_3diff *a, int op, bool sgn)
@@ -4352,6 +5055,9 @@ index 144f18b..a19424b 100644
 +    if (!vfp_access_check(s)) {
 +        return true;
 +    }
++    if (roln_long(op, a->size, sgn, a->vd, a->vn, a->vm)) {
++        return true;
++    }
 +    gen_helper_rol_long(rol_reg_ptr(a->vd), rol_reg_ptr(a->vn),
 +                        rol_reg_ptr(a->vm),
 +                        tcg_constant_i32(op | a->size << 4 | sgn << 6));
@@ -4363,7 +5069,7 @@ index 144f18b..a19424b 100644
  static bool do_2shift_narrow_64(DisasContext *s, arg_2reg_shift *a,
                                  NeonGenTwo64OpFn *shiftfn,
                                  NeonGenNarrowEnvFn *narrowfn)
-@@ -1532,11 +1628,60 @@ static bool do_2shift_narrow_32(DisasContext *s, arg_2reg_shift *a,
+@@ -1532,11 +1632,63 @@ static bool do_2shift_narrow_32(DisasContext *s, arg_2reg_shift *a,
      {                                                                   \
          return do_2shift_narrow_64(s, a, FUNC, NARROWFUNC);             \
      }
@@ -4380,6 +5086,9 @@ index 144f18b..a19424b 100644
 +        return false;
 +    }
 +    if (!vfp_access_check(s)) {
++        return true;
++    }
++    if (roln_nshift(op, a->size, a->shift, a->vd, a->vm)) {
 +        return true;
 +    }
 +    gen_helper_rol_nshift(tcg_env, rol_reg_ptr(a->vd), rol_reg_ptr(a->vm),
@@ -4424,10 +5133,14 @@ index 144f18b..a19424b 100644
  
  static void gen_neon_narrow_u32(TCGv_i32 dest, TCGv_ptr env, TCGv_i64 src)
  {
-@@ -1609,6 +1754,13 @@ static bool do_vshll_2sh(DisasContext *s, arg_2reg_shift *a,
+@@ -1609,6 +1761,17 @@ static bool do_vshll_2sh(DisasContext *s, arg_2reg_shift *a,
          return true;
      }
  
++    if (!rol_neon_off && a->size < 2 &&
++        roln_shll(a->size, !u, a->shift, a->vd, a->vm)) {
++        return true;
++    }
 +    if (!rol_neon_off && a->size < 2) {
 +        gen_helper_rol_shll(rol_reg_ptr(a->vd), rol_reg_ptr(a->vm),
 +                            tcg_constant_i32(a->size << 4 | !u << 6 |
@@ -4438,7 +5151,7 @@ index 144f18b..a19424b 100644
      /*
       * This is a widen-and-shift operation. The shift is always less
       * than the width of the source type, so after widening the input
-@@ -1857,6 +2009,10 @@ static bool do_prewiden_3d(DisasContext *s, arg_3diff *a,
+@@ -1857,6 +2020,10 @@ static bool do_prewiden_3d(DisasContext *s, arg_3diff *a,
  #define DO_PREWIDEN(INSN, S, OP, SRC1WIDE, SIGN)                        \
      static bool trans_##INSN##_3d(DisasContext *s, arg_3diff *a)        \
      {                                                                   \
@@ -4449,7 +5162,7 @@ index 144f18b..a19424b 100644
          static NeonGenWidenFn * const widenfn[] = {                     \
              gen_helper_neon_widen_##S##8,                               \
              gen_helper_neon_widen_##S##16,                              \
-@@ -1874,6 +2030,10 @@ static bool do_prewiden_3d(DisasContext *s, arg_3diff *a,
+@@ -1874,6 +2041,10 @@ static bool do_prewiden_3d(DisasContext *s, arg_3diff *a,
                                narrow_mop);                              \
      }
  
@@ -4460,7 +5173,7 @@ index 144f18b..a19424b 100644
  DO_PREWIDEN(VADDL_S, s, add, false, MO_SIGN)
  DO_PREWIDEN(VADDL_U, u, add, false, 0)
  DO_PREWIDEN(VSUBL_S, s, sub, false, MO_SIGN)
-@@ -2033,6 +2193,9 @@ static bool do_long_3d(DisasContext *s, arg_3diff *a,
+@@ -2033,6 +2204,9 @@ static bool do_long_3d(DisasContext *s, arg_3diff *a,
  
  static bool trans_VABDL_S_3d(DisasContext *s, arg_3diff *a)
  {
@@ -4470,7 +5183,7 @@ index 144f18b..a19424b 100644
      static NeonGenTwoOpWidenFn * const opfn[] = {
          gen_helper_neon_abdl_s16,
          gen_helper_neon_abdl_s32,
-@@ -2045,6 +2208,9 @@ static bool trans_VABDL_S_3d(DisasContext *s, arg_3diff *a)
+@@ -2045,6 +2219,9 @@ static bool trans_VABDL_S_3d(DisasContext *s, arg_3diff *a)
  
  static bool trans_VABDL_U_3d(DisasContext *s, arg_3diff *a)
  {
@@ -4480,7 +5193,7 @@ index 144f18b..a19424b 100644
      static NeonGenTwoOpWidenFn * const opfn[] = {
          gen_helper_neon_abdl_u16,
          gen_helper_neon_abdl_u32,
-@@ -2057,6 +2223,9 @@ static bool trans_VABDL_U_3d(DisasContext *s, arg_3diff *a)
+@@ -2057,6 +2234,9 @@ static bool trans_VABDL_U_3d(DisasContext *s, arg_3diff *a)
  
  static bool trans_VABAL_S_3d(DisasContext *s, arg_3diff *a)
  {
@@ -4490,7 +5203,7 @@ index 144f18b..a19424b 100644
      static NeonGenTwoOpWidenFn * const opfn[] = {
          gen_helper_neon_abdl_s16,
          gen_helper_neon_abdl_s32,
-@@ -2075,6 +2244,9 @@ static bool trans_VABAL_S_3d(DisasContext *s, arg_3diff *a)
+@@ -2075,6 +2255,9 @@ static bool trans_VABAL_S_3d(DisasContext *s, arg_3diff *a)
  
  static bool trans_VABAL_U_3d(DisasContext *s, arg_3diff *a)
  {
@@ -4500,7 +5213,7 @@ index 144f18b..a19424b 100644
      static NeonGenTwoOpWidenFn * const opfn[] = {
          gen_helper_neon_abdl_u16,
          gen_helper_neon_abdl_u32,
-@@ -2111,6 +2283,9 @@ static void gen_mull_u32(TCGv_i64 rd, TCGv_i32 rn, TCGv_i32 rm)
+@@ -2111,6 +2294,9 @@ static void gen_mull_u32(TCGv_i64 rd, TCGv_i32 rn, TCGv_i32 rm)
  
  static bool trans_VMULL_S_3d(DisasContext *s, arg_3diff *a)
  {
@@ -4510,7 +5223,7 @@ index 144f18b..a19424b 100644
      static NeonGenTwoOpWidenFn * const opfn[] = {
          gen_helper_neon_mull_s8,
          gen_helper_neon_mull_s16,
-@@ -2123,6 +2298,9 @@ static bool trans_VMULL_S_3d(DisasContext *s, arg_3diff *a)
+@@ -2123,6 +2309,9 @@ static bool trans_VMULL_S_3d(DisasContext *s, arg_3diff *a)
  
  static bool trans_VMULL_U_3d(DisasContext *s, arg_3diff *a)
  {
@@ -4520,7 +5233,7 @@ index 144f18b..a19424b 100644
      static NeonGenTwoOpWidenFn * const opfn[] = {
          gen_helper_neon_mull_u8,
          gen_helper_neon_mull_u16,
-@@ -2136,6 +2314,9 @@ static bool trans_VMULL_U_3d(DisasContext *s, arg_3diff *a)
+@@ -2136,6 +2325,9 @@ static bool trans_VMULL_U_3d(DisasContext *s, arg_3diff *a)
  #define DO_VMLAL(INSN,MULL,ACC)                                         \
      static bool trans_##INSN##_3d(DisasContext *s, arg_3diff *a)        \
      {                                                                   \
@@ -4530,7 +5243,7 @@ index 144f18b..a19424b 100644
          static NeonGenTwoOpWidenFn * const opfn[] = {                   \
              gen_helper_neon_##MULL##8,                                  \
              gen_helper_neon_##MULL##16,                                 \
-@@ -2151,6 +2332,14 @@ static bool trans_VMULL_U_3d(DisasContext *s, arg_3diff *a)
+@@ -2151,6 +2343,14 @@ static bool trans_VMULL_U_3d(DisasContext *s, arg_3diff *a)
          return do_long_3d(s, a, opfn[a->size], accfn[a->size]);         \
      }
  
@@ -4545,12 +5258,15 @@ index 144f18b..a19424b 100644
  DO_VMLAL(VMLAL_S,mull_s,add)
  DO_VMLAL(VMLAL_U,mull_u,add)
  DO_VMLAL(VMLSL_S,mull_s,sub)
-@@ -2349,6 +2538,12 @@ static bool do_2scalar(DisasContext *s, arg_2scalar *a,
+@@ -2349,6 +2549,15 @@ static bool do_2scalar(DisasContext *s, arg_2scalar *a,
      }
  
      scalar = neon_get_scalar(a->size, a->vm);
 +    if (!rol_neon_off && a->size == MO_16 && opfn == gen_helper_neon_mul_u16) {
 +        int op = !accfn ? 0 : accfn == gen_helper_neon_add_u16 ? 1 : 2;
++        if (roln_2sc16(op, a->q, a->vd, a->vn, scalar)) {
++            return true;
++        }
 +        gen_helper_rol_2sc16(rol_reg_ptr(a->vd), rol_reg_ptr(a->vn), scalar,
 +                             tcg_constant_i32(op | a->q << 4));
 +        return true;
@@ -4558,7 +5274,7 @@ index 144f18b..a19424b 100644
      tmp = tcg_temp_new_i32();
  
      for (pass = 0; pass < (a->q ? 4 : 2); pass++) {
-@@ -2451,6 +2646,16 @@ static bool do_2scalar_fp_vec(DisasContext *s, arg_2scalar *a,
+@@ -2451,6 +2660,16 @@ static bool do_2scalar_fp_vec(DisasContext *s, arg_2scalar *a,
      a->vm = extract32(a->vm, 0, a->size + 2);
      rm_ofs = neon_full_reg_offset(a->vm);
  
@@ -4575,7 +5291,25 @@ index 144f18b..a19424b 100644
      fpstatus = fpstatus_ptr(a->size == 1 ? FPST_STD_F16 : FPST_STD);
      tcg_gen_gvec_3_ptr(rd_ofs, rn_ofs, rm_ofs, fpstatus,
                         vec_size, vec_size, idx, fn);
-@@ -3658,6 +3863,9 @@ static bool trans_VQNEG(DisasContext *s, arg_2misc *a)
+@@ -3096,6 +3315,17 @@ static bool do_zip_uzp(DisasContext *s, arg_2misc *a,
+         return true;
+     }
+ 
++    /* RISC OS testbed: as host vector instructions (riscos-neon.h) */
++    if (fn == gen_helper_neon_zip8 || fn == gen_helper_neon_zip16 ||
++        fn == gen_helper_neon_qzip8 || fn == gen_helper_neon_qzip16 ||
++        fn == gen_helper_neon_qzip32) {
++        if (roln_zip(a->q, a->size, a->vd, a->vm)) {
++            return true;
++        }
++    } else if (roln_unzip(a->q, a->size, a->vd, a->vm)) {
++        return true;
++    }
++
+     pd = vfp_reg_ptr(true, a->vd);
+     pm = vfp_reg_ptr(true, a->vm);
+     fn(pd, pm);
+@@ -3658,6 +3888,9 @@ static bool trans_VQNEG(DisasContext *s, arg_2misc *a)
  }
  
  #define DO_2MISC_FP_VEC(INSN, HFUNC, SFUNC)                             \
@@ -4585,7 +5319,7 @@ index 144f18b..a19424b 100644
      static void gen_##INSN(unsigned vece, uint32_t rd_ofs,              \
                             uint32_t rm_ofs,                             \
                             uint32_t oprsz, uint32_t maxsz)              \
-@@ -3666,6 +3874,11 @@ static bool trans_VQNEG(DisasContext *s, arg_2misc *a)
+@@ -3666,6 +3899,11 @@ static bool trans_VQNEG(DisasContext *s, arg_2misc *a)
              NULL, HFUNC, SFUNC, NULL,                                   \
          };                                                              \
          TCGv_ptr fpst;                                                  \
@@ -4597,7 +5331,7 @@ index 144f18b..a19424b 100644
          fpst = fpstatus_ptr(vece == MO_16 ? FPST_STD_F16 : FPST_STD);   \
          tcg_gen_gvec_2_ptr(rd_ofs, rm_ofs, fpst, oprsz, maxsz, 0,       \
                             fns[vece]);                                  \
-@@ -3684,15 +3897,15 @@ static bool trans_VQNEG(DisasContext *s, arg_2misc *a)
+@@ -3684,15 +3922,15 @@ static bool trans_VQNEG(DisasContext *s, arg_2misc *a)
  
  DO_2MISC_FP_VEC(VRECPE_F, gen_helper_gvec_frecpe_h, gen_helper_gvec_frecpe_s)
  DO_2MISC_FP_VEC(VRSQRTE_F, gen_helper_gvec_frsqrte_h, gen_helper_gvec_frsqrte_s)
@@ -4623,7 +5357,7 @@ index 144f18b..a19424b 100644
  DO_2MISC_FP_VEC(VRINTX_impl, gen_helper_gvec_vrintx_h, gen_helper_gvec_vrintx_s)
  
 diff --git a/target/arm/tcg/translate-vfp.c b/target/arm/tcg/translate-vfp.c
-index b9af03b..64fca7e 100644
+index b9af03b..a3be1bd 100644
 --- a/target/arm/tcg/translate-vfp.c
 +++ b/target/arm/tcg/translate-vfp.c
 @@ -23,6 +23,7 @@
@@ -4654,7 +5388,16 @@ index b9af03b..64fca7e 100644
          } else {
              store_reg(s, a->rt, tmp);
          }
-@@ -1345,6 +1355,99 @@ static inline int vfp_advance_dreg(int reg, int delta)
+@@ -866,6 +876,8 @@ static bool trans_VMSR_VMRS(DisasContext *s, arg_VMSR_VMRS *a)
+             tmp = load_reg(s, a->rt);
+             tcg_gen_andi_i32(tmp, tmp, 1 << 30);
+             store_cpu_field(tmp, vfp.xregs[a->reg]);
++            /* RISC OS testbed: FPEXC.EN is cached in hflags */
++            gen_helper_rebuild_hflags_a32_newel(tcg_env);
+             gen_lookup_tb(s);
+             break;
+         case ARM_VFP_FPINST:
+@@ -1345,6 +1357,99 @@ static inline int vfp_advance_dreg(int reg, int delta)
      return ((reg + delta) & 0x3) | (reg & ~0x3);
  }
  
@@ -4754,7 +5497,7 @@ index b9af03b..64fca7e 100644
  /*
   * Perform a 3-operand VFP data processing instruction. fn is the
   * callback to do the actual operation; this function deals with the
-@@ -1390,6 +1493,16 @@ static bool do_vfp_3op_sp(DisasContext *s, VFPGen3OpSPFn *fn,
+@@ -1390,6 +1495,16 @@ static bool do_vfp_3op_sp(DisasContext *s, VFPGen3OpSPFn *fn,
          }
      }
  
@@ -4771,7 +5514,7 @@ index b9af03b..64fca7e 100644
      f0 = tcg_temp_new_i32();
      f1 = tcg_temp_new_i32();
      fd = tcg_temp_new_i32();
-@@ -1509,6 +1622,16 @@ static bool do_vfp_3op_dp(DisasContext *s, VFPGen3OpDPFn *fn,
+@@ -1509,6 +1624,16 @@ static bool do_vfp_3op_dp(DisasContext *s, VFPGen3OpDPFn *fn,
          }
      }
  
@@ -4788,7 +5531,7 @@ index b9af03b..64fca7e 100644
      f0 = tcg_temp_new_i64();
      f1 = tcg_temp_new_i64();
      fd = tcg_temp_new_i64();
-@@ -1576,6 +1699,16 @@ static bool do_vfp_2op_sp(DisasContext *s, VFPGen2OpSPFn *fn, int vd, int vm)
+@@ -1576,6 +1701,16 @@ static bool do_vfp_2op_sp(DisasContext *s, VFPGen2OpSPFn *fn, int vd, int vm)
          }
      }
  
@@ -4805,7 +5548,7 @@ index b9af03b..64fca7e 100644
      f0 = tcg_temp_new_i32();
      fd = tcg_temp_new_i32();
  
-@@ -1681,6 +1814,16 @@ static bool do_vfp_2op_dp(DisasContext *s, VFPGen2OpDPFn *fn, int vd, int vm)
+@@ -1681,6 +1816,16 @@ static bool do_vfp_2op_dp(DisasContext *s, VFPGen2OpDPFn *fn, int vd, int vm)
          }
      }
  
@@ -4822,7 +5565,7 @@ index b9af03b..64fca7e 100644
      f0 = tcg_temp_new_i64();
      fd = tcg_temp_new_i64();
  
-@@ -2410,12 +2553,52 @@ DO_VFP_VMOV(VMOV_reg, sp, tcg_gen_mov_i32)
+@@ -2410,12 +2555,52 @@ DO_VFP_VMOV(VMOV_reg, sp, tcg_gen_mov_i32)
  DO_VFP_VMOV(VMOV_reg, dp, tcg_gen_mov_i64)
  
  DO_VFP_2OP(VABS, hp, gen_helper_vfp_absh, aa32_fp16_arith)
@@ -4879,7 +5622,7 @@ index b9af03b..64fca7e 100644
  
  static void gen_VSQRT_hp(TCGv_i32 vd, TCGv_i32 vm)
  {
-@@ -2471,6 +2654,168 @@ static bool trans_VCMP_hp(DisasContext *s, arg_VCMP_sp *a)
+@@ -2471,6 +2656,168 @@ static bool trans_VCMP_hp(DisasContext *s, arg_VCMP_sp *a)
      return true;
  }
  
@@ -5048,7 +5791,7 @@ index b9af03b..64fca7e 100644
  static bool trans_VCMP_sp(DisasContext *s, arg_VCMP_sp *a)
  {
      TCGv_i32 vd, vm;
-@@ -2498,6 +2843,13 @@ static bool trans_VCMP_sp(DisasContext *s, arg_VCMP_sp *a)
+@@ -2498,6 +2845,13 @@ static bool trans_VCMP_sp(DisasContext *s, arg_VCMP_sp *a)
          vfp_load_reg32(vm, a->vm);
      }
  
@@ -5062,7 +5805,7 @@ index b9af03b..64fca7e 100644
      if (a->e) {
          gen_helper_vfp_cmpes(vd, vm, tcg_env);
      } else {
-@@ -2538,6 +2890,13 @@ static bool trans_VCMP_dp(DisasContext *s, arg_VCMP_dp *a)
+@@ -2538,6 +2892,13 @@ static bool trans_VCMP_dp(DisasContext *s, arg_VCMP_dp *a)
          vfp_load_reg64(vm, a->vm);
      }
  
@@ -5076,7 +5819,7 @@ index b9af03b..64fca7e 100644
      if (a->e) {
          gen_helper_vfp_cmped(vd, vm, tcg_env);
      } else {
-@@ -2932,6 +3291,15 @@ static bool trans_VCVT_sp(DisasContext *s, arg_VCVT_sp *a)
+@@ -2932,6 +3293,15 @@ static bool trans_VCVT_sp(DisasContext *s, arg_VCVT_sp *a)
      vm = tcg_temp_new_i32();
      vd = tcg_temp_new_i64();
      vfp_load_reg32(vm, a->vm);
@@ -5092,7 +5835,7 @@ index b9af03b..64fca7e 100644
      gen_helper_vfp_fcvtds(vd, vm, tcg_env);
      vfp_store_reg64(vd, a->vd);
      return true;
-@@ -2958,6 +3326,16 @@ static bool trans_VCVT_dp(DisasContext *s, arg_VCVT_dp *a)
+@@ -2958,6 +3328,16 @@ static bool trans_VCVT_dp(DisasContext *s, arg_VCVT_dp *a)
      vd = tcg_temp_new_i32();
      vm = tcg_temp_new_i64();
      vfp_load_reg64(vm, a->vm);
@@ -5109,7 +5852,7 @@ index b9af03b..64fca7e 100644
      gen_helper_vfp_fcvtsd(vd, vm, tcg_env);
      vfp_store_reg32(vd, a->vd);
      return true;
-@@ -3005,6 +3383,16 @@ static bool trans_VCVT_int_sp(DisasContext *s, arg_VCVT_int_sp *a)
+@@ -3005,6 +3385,16 @@ static bool trans_VCVT_int_sp(DisasContext *s, arg_VCVT_int_sp *a)
  
      vm = tcg_temp_new_i32();
      vfp_load_reg32(vm, a->vm);
@@ -5126,7 +5869,7 @@ index b9af03b..64fca7e 100644
      fpst = fpstatus_ptr(FPST_FPCR);
      if (a->s) {
          /* i32 -> f32 */
-@@ -3039,6 +3427,13 @@ static bool trans_VCVT_int_dp(DisasContext *s, arg_VCVT_int_dp *a)
+@@ -3039,6 +3429,13 @@ static bool trans_VCVT_int_dp(DisasContext *s, arg_VCVT_int_dp *a)
      vm = tcg_temp_new_i32();
      vd = tcg_temp_new_i64();
      vfp_load_reg32(vm, a->vm);
@@ -5140,7 +5883,7 @@ index b9af03b..64fca7e 100644
      fpst = fpstatus_ptr(FPST_FPCR);
      if (a->s) {
          /* i32 -> f64 */
-@@ -3302,9 +3697,21 @@ static bool trans_VCVT_sp_int(DisasContext *s, arg_VCVT_sp_int *a)
+@@ -3302,9 +3699,21 @@ static bool trans_VCVT_sp_int(DisasContext *s, arg_VCVT_sp_int *a)
          return true;
      }
  
@@ -5163,7 +5906,7 @@ index b9af03b..64fca7e 100644
  
      if (a->s) {
          if (a->rz) {
-@@ -3342,10 +3749,19 @@ static bool trans_VCVT_dp_int(DisasContext *s, arg_VCVT_dp_int *a)
+@@ -3342,10 +3751,19 @@ static bool trans_VCVT_dp_int(DisasContext *s, arg_VCVT_dp_int *a)
          return true;
      }
  
@@ -5607,7 +6350,7 @@ index 1f93510..0963a9b 100644
  #undef float16_nop
  #undef float32_nop
 diff --git a/target/arm/vfp_helper.c b/target/arm/vfp_helper.c
-index 3e5e37a..a382d99 100644
+index 3e5e37a..107ffd9 100644
 --- a/target/arm/vfp_helper.c
 +++ b/target/arm/vfp_helper.c
 @@ -150,7 +150,14 @@ static void vfp_set_fpscr_to_host(CPUARMState *env, uint32_t val)
@@ -5626,11 +6369,23 @@ index 3e5e37a..a382d99 100644
      set_float_exception_flags(0, &env->vfp.standard_fp_status_f16);
  }
  
+@@ -244,6 +251,11 @@ void HELPER(vfp_set_fpscr)(CPUARMState *env, uint32_t val)
+      * FZ, RMode and FZ16 are kept in vfp.xregs[FPSCR].
+      */
+     env->vfp.xregs[ARM_VFP_FPSCR] = val & 0xf7c80000;
++
++    /* RISC OS testbed: Len, Stride, FZ and RMode are cached in hflags */
++    if (!arm_feature(env, ARM_FEATURE_M)) {
++        arm_rebuild_hflags(env);
++    }
+ }
+ 
+ void vfp_set_fpscr(CPUARMState *env, uint32_t val)
 diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
-index a3efa1e..5b29b9c 100644
+index a3efa1e..cedd810 100644
 --- a/tcg/aarch64/tcg-target.c.inc
 +++ b/tcg/aarch64/tcg-target.c.inc
-@@ -2464,6 +2464,58 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
+@@ -2464,6 +2464,82 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
      a2 = args[2];
  
      switch (opc) {
@@ -5686,10 +6441,34 @@ index a3efa1e..5b29b9c 100644
 +        tcg_out32(s, 0x4ec03800 | (a2 & 0x1f) << 16 | (a1 & 0x1f) << 5
 +                  | (a0 & 0x1f));
 +        break;
++    /*
++     * RISC OS testbed: integer lane width changes (vece = narrow size).
++     * UXTL/SXTL are USHLL/SSHLL #0 (immh = 1 << size); SQXTN/SQXTUN write
++     * the low 64 bits and clear the high ones.
++     */
++    case INDEX_op_rouxtl_vec:
++    case INDEX_op_rosxtl_vec:
++        tcg_out32(s, (opc == INDEX_op_rouxtl_vec ? 0x2f00a400 : 0x0f00a400)
++                  | (8 << vece) << 16 | (a1 & 0x1f) << 5 | (a0 & 0x1f));
++        break;
++    case INDEX_op_rosqxtn_vec:
++    case INDEX_op_rosqxtun_vec:
++        tcg_out32(s, (opc == INDEX_op_rosqxtn_vec ? 0x0e214800 : 0x2e212800)
++                  | vece << 22 | (a1 & 0x1f) << 5 | (a0 & 0x1f));
++        break;
++    /* ZIP1, ZIP2, UZP1 (the truncating pack), 128-bit */
++    case INDEX_op_rozip1_vec:
++    case INDEX_op_rozip2_vec:
++    case INDEX_op_ropack_vec:
++        tcg_out32(s, (opc == INDEX_op_rozip1_vec ? 0x4e003800
++                      : opc == INDEX_op_rozip2_vec ? 0x4e007800 : 0x4e001800)
++                  | vece << 22 | (a2 & 0x1f) << 16 | (a1 & 0x1f) << 5
++                  | (a0 & 0x1f));
++        break;
      case INDEX_op_ld_vec:
          tcg_out_ld(s, type, a0, a1, a2);
          break;
-@@ -2727,6 +2779,18 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
+@@ -2727,6 +2803,29 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
  int tcg_can_emit_vec_op(TCGOpcode opc, TCGType type, unsigned vece)
  {
      switch (opc) {
@@ -5705,10 +6484,21 @@ index a3efa1e..5b29b9c 100644
 +        return 1;
 +    case INDEX_op_rofcat_vec:
 +        return type == TCG_TYPE_V128;
++    case INDEX_op_rouxtl_vec:
++    case INDEX_op_rosxtl_vec:
++        return type == TCG_TYPE_V128 && vece <= MO_32;
++    case INDEX_op_rosqxtn_vec:
++    case INDEX_op_rosqxtun_vec:
++        return type == TCG_TYPE_V128 && vece <= MO_32;
++    case INDEX_op_rozip1_vec:
++    case INDEX_op_rozip2_vec:
++        return type == TCG_TYPE_V128;
++    case INDEX_op_ropack_vec:
++        return type == TCG_TYPE_V128 && vece <= MO_32;
      case INDEX_op_add_vec:
      case INDEX_op_sub_vec:
      case INDEX_op_and_vec:
-@@ -3002,7 +3066,15 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
+@@ -3002,7 +3101,22 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
      case INDEX_op_shrv_vec:
      case INDEX_op_sarv_vec:
      case INDEX_op_aa64_sshl_vec:
@@ -5717,14 +6507,21 @@ index a3efa1e..5b29b9c 100644
 +    case INDEX_op_rofmul_vec:
 +    case INDEX_op_rofdiv_vec:
 +    case INDEX_op_rofcat_vec:
++    case INDEX_op_rozip1_vec:
++    case INDEX_op_rozip2_vec:
++    case INDEX_op_ropack_vec:
          return C_O1_I2(w, w, w);
 +    case INDEX_op_rofsqrt_vec:
 +    case INDEX_op_rofitof_vec:
 +    case INDEX_op_rofftoi_vec:
++    case INDEX_op_rouxtl_vec:
++    case INDEX_op_rosxtl_vec:
++    case INDEX_op_rosqxtn_vec:
++    case INDEX_op_rosqxtun_vec:
      case INDEX_op_not_vec:
      case INDEX_op_neg_vec:
      case INDEX_op_abs_vec:
-@@ -3014,6 +3086,7 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
+@@ -3014,6 +3128,7 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
      case INDEX_op_dupm_vec:
          return C_O1_I1(w, r);
      case INDEX_op_st_vec:
@@ -5733,19 +6530,20 @@ index a3efa1e..5b29b9c 100644
      case INDEX_op_dup_vec:
          return C_O1_I1(w, wr);
 diff --git a/tcg/aarch64/tcg-target.h b/tcg/aarch64/tcg-target.h
-index 33f15a5..ae6d9f5 100644
+index 33f15a5..82c400a 100644
 --- a/tcg/aarch64/tcg-target.h
 +++ b/tcg/aarch64/tcg-target.h
-@@ -161,6 +161,7 @@ typedef enum {
+@@ -161,6 +161,8 @@ typedef enum {
  #define TCG_TARGET_HAS_minmax_vec       1
  #define TCG_TARGET_HAS_bitsel_vec       1
  #define TCG_TARGET_HAS_cmpsel_vec       0
 +#define TCG_TARGET_HAS_rofp_vec         1
++#define TCG_TARGET_HAS_roint_vec        1
  
  #define TCG_TARGET_DEFAULT_MO (0)
  #define TCG_TARGET_NEED_LDST_LABELS
 diff --git a/tcg/i386/tcg-target.c.inc b/tcg/i386/tcg-target.c.inc
-index a83f8aa..22c841b 100644
+index a83f8aa..8c0b509 100644
 --- a/tcg/i386/tcg-target.c.inc
 +++ b/tcg/i386/tcg-target.c.inc
 @@ -397,6 +397,15 @@ static bool tcg_target_const_match(int64_t val, TCGType type, int ct, int vece)
@@ -5764,7 +6562,7 @@ index a83f8aa..22c841b 100644
  #define OPC_VPBLENDD    (0x02 | P_EXT3A | P_DATA16)
  #define OPC_VPBLENDVB   (0x4c | P_EXT3A | P_DATA16)
  #define OPC_VPINSRB     (0x20 | P_EXT3A | P_DATA16)
-@@ -3112,6 +3121,47 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
+@@ -3112,6 +3121,84 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
          a2 = a1;
          a1 = 0;
          goto gen_simd;
@@ -5803,6 +6601,43 @@ index a83f8aa..22c841b 100644
 +        a2 = a1;
 +        a1 = 0;
 +        goto gen_simd;
++    /* RISC OS testbed: integer lane width changes (vece = narrow size) */
++    case INDEX_op_rouxtl_vec:
++        insn = vece == MO_8 ? OPC_PMOVZXBW : vece == MO_16 ? OPC_PMOVZXWD
++                                                           : OPC_PMOVZXDQ;
++        a2 = a1;
++        a1 = 0;
++        type = TCG_TYPE_V128;
++        goto gen_simd;
++    case INDEX_op_rosxtl_vec:
++        insn = vece == MO_8 ? OPC_PMOVSXBW : vece == MO_16 ? OPC_PMOVSXWD
++                                                           : OPC_PMOVSXDQ;
++        a2 = a1;
++        a1 = 0;
++        type = TCG_TYPE_V128;
++        goto gen_simd;
++    case INDEX_op_rosqxtn_vec:
++        insn = vece == MO_8 ? OPC_PACKSSWB : OPC_PACKSSDW;
++        a2 = a1;
++        type = TCG_TYPE_V128;
++        goto gen_simd;
++    case INDEX_op_rosqxtun_vec:
++        insn = vece == MO_8 ? OPC_PACKUSWB : OPC_PACKUSDW;
++        a2 = a1;
++        type = TCG_TYPE_V128;
++        goto gen_simd;
++    case INDEX_op_rozip1_vec:
++        insn = punpckl_insn[vece];
++        type = TCG_TYPE_V128;
++        goto gen_simd;
++    case INDEX_op_rozip2_vec:
++        insn = punpckh_insn[vece];
++        type = TCG_TYPE_V128;
++        goto gen_simd;
++    case INDEX_op_ropack_vec:
++        insn = vece == MO_8 ? OPC_PACKUSWB : OPC_PACKUSDW;
++        type = TCG_TYPE_V128;
++        goto gen_simd;
 +    case INDEX_op_rofftoi_vec:
 +        insn = OPC_CVTTPS2DQ;
 +        a2 = a1;
@@ -5812,7 +6647,7 @@ index a83f8aa..22c841b 100644
      gen_simd:
          tcg_debug_assert(insn != OPC_UD2);
          if (type == TCG_TYPE_V256) {
-@@ -3467,6 +3517,7 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
+@@ -3467,6 +3554,7 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
          return C_O1_I1(x, r);
  
      case INDEX_op_st_vec:
@@ -5820,7 +6655,7 @@ index a83f8aa..22c841b 100644
          return C_O0_I2(x, r);
  
      case INDEX_op_add_vec:
-@@ -3508,8 +3559,16 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
+@@ -3508,8 +3596,23 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
  #if TCG_TARGET_REG_BITS == 32
      case INDEX_op_dup2_vec:
  #endif
@@ -5829,15 +6664,22 @@ index a83f8aa..22c841b 100644
 +    case INDEX_op_rofmul_vec:
 +    case INDEX_op_rofdiv_vec:
 +    case INDEX_op_rofcat_vec:
++    case INDEX_op_rozip1_vec:
++    case INDEX_op_rozip2_vec:
++    case INDEX_op_ropack_vec:
          return C_O1_I2(x, x, x);
  
 +    case INDEX_op_rofsqrt_vec:
 +    case INDEX_op_rofitof_vec:
 +    case INDEX_op_rofftoi_vec:
++    case INDEX_op_rouxtl_vec:
++    case INDEX_op_rosxtl_vec:
++    case INDEX_op_rosqxtn_vec:
++    case INDEX_op_rosqxtun_vec:
      case INDEX_op_abs_vec:
      case INDEX_op_dup_vec:
      case INDEX_op_not_vec:
-@@ -3536,6 +3595,19 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
+@@ -3536,6 +3639,30 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
  int tcg_can_emit_vec_op(TCGOpcode opc, TCGType type, unsigned vece)
  {
      switch (opc) {
@@ -5854,18 +6696,30 @@ index a83f8aa..22c841b 100644
 +        return 1;
 +    case INDEX_op_rofcat_vec:
 +        return type == TCG_TYPE_V128;
++    case INDEX_op_rouxtl_vec:
++    case INDEX_op_rosxtl_vec:
++        return type == TCG_TYPE_V128 && vece <= MO_32;
++    case INDEX_op_rosqxtn_vec:
++    case INDEX_op_rosqxtun_vec:
++        return type == TCG_TYPE_V128 && vece <= MO_16;
++    case INDEX_op_rozip1_vec:
++    case INDEX_op_rozip2_vec:
++        return type == TCG_TYPE_V128;
++    case INDEX_op_ropack_vec:
++        return type == TCG_TYPE_V128 && vece <= MO_16;
      case INDEX_op_add_vec:
      case INDEX_op_sub_vec:
      case INDEX_op_and_vec:
 diff --git a/tcg/i386/tcg-target.h b/tcg/i386/tcg-target.h
-index fa34dee..3ef570a 100644
+index fa34dee..2b05c84 100644
 --- a/tcg/i386/tcg-target.h
 +++ b/tcg/i386/tcg-target.h
-@@ -222,6 +222,7 @@ typedef enum {
+@@ -222,6 +222,8 @@ typedef enum {
  #define TCG_TARGET_HAS_minmax_vec       1
  #define TCG_TARGET_HAS_bitsel_vec       have_avx512vl
  #define TCG_TARGET_HAS_cmpsel_vec       -1
 +#define TCG_TARGET_HAS_rofp_vec         1
++#define TCG_TARGET_HAS_roint_vec        1
  
  #define TCG_TARGET_deposit_i32_valid(ofs, len) \
      (((ofs) == 0 && ((len) == 8 || (len) == 16)) || \
@@ -5940,10 +6794,10 @@ index 094298b..178d017 100644
  {
      vec_gen_ldst(INDEX_op_st_vec, r, b, o);
 diff --git a/tcg/tcg.c b/tcg/tcg.c
-index e2c38f6..063f801 100644
+index e2c38f6..9c3303e 100644
 --- a/tcg/tcg.c
 +++ b/tcg/tcg.c
-@@ -2236,6 +2236,16 @@ bool tcg_op_supported(TCGOpcode op)
+@@ -2236,6 +2236,24 @@ bool tcg_op_supported(TCGOpcode op)
      case INDEX_op_smax_vec:
      case INDEX_op_umax_vec:
          return have_vec && TCG_TARGET_HAS_minmax_vec;
@@ -5957,6 +6811,14 @@ index e2c38f6..063f801 100644
 +    case INDEX_op_rofst32_vec:
 +    case INDEX_op_rofcat_vec:
 +        return have_vec && TCG_TARGET_HAS_rofp_vec;
++    case INDEX_op_rouxtl_vec:
++    case INDEX_op_rosxtl_vec:
++    case INDEX_op_rosqxtn_vec:
++    case INDEX_op_rosqxtun_vec:
++    case INDEX_op_rozip1_vec:
++    case INDEX_op_rozip2_vec:
++    case INDEX_op_ropack_vec:
++        return have_vec && TCG_TARGET_HAS_roint_vec;
      case INDEX_op_bitsel_vec:
          return have_vec && TCG_TARGET_HAS_bitsel_vec;
      case INDEX_op_cmpsel_vec:

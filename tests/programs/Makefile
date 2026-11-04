@@ -9,7 +9,7 @@ OUT ?= ../../out/tests
 UNIXLIB_DIR ?= ../../out/unixlib
 UNIXLIB_A := $(wildcard $(UNIXLIB_DIR)/libunixlib.a)
 UL_LDFLAGS := $(if $(UNIXLIB_A),-L$(abspath $(UNIXLIB_DIR)))
-PROGS := t_exit t_vfpsupport t_cxx t_mmap t_system t_files t_crash t_threads t_vfp_threads t_wimp t_wimp_vfp t_elementary t_vfp_irq t_rool_elementary t_clib t_iconv t_fpconform t_neonint t_fpchain t_fpchain_long t_vfp_errors t_select t_sockopt t_accept t_eof t_mimetype t_pollidle
+PROGS := t_exit t_vfpsupport t_cxx t_mmap t_system t_files t_crash t_threads t_vfp_threads t_wimp t_wimp_vfp t_elementary t_vfp_irq t_rool_elementary t_clib t_iconv t_fpconform t_neonint t_neonperm t_fpchain t_fpchain_long t_vfp_errors t_select t_sockopt t_accept t_eof t_mimetype t_pollidle
 
 all: $(addprefix $(OUT)/,$(PROGS))
 
@@ -23,7 +23,7 @@ $(OUT)/%: %.cc $(UNIXLIB_A) | $(OUT) riscos-toolchain-present
 $(OUT)/t_elementary $(OUT)/t_rool_elementary: elementary_data.h
 
 # VFPv4 and NEON instructions (VFMA, the Q forms): run on ARMv7 with NEON
-$(OUT)/t_fpconform $(OUT)/t_neonint: $(OUT)/%: %.c | $(OUT) riscos-toolchain-present
+$(OUT)/t_fpconform $(OUT)/t_neonint $(OUT)/t_neonperm: $(OUT)/%: %.c | $(OUT) riscos-toolchain-present
 	$(RO_CC) $(RISCOS_CFLAGS) -mfpu=neon-vfpv4 -Wall -Wextra $(UL_LDFLAGS) $(RISCOS_LDFLAGS) -o $@ $<
 
 # Generated blocks of floating point instructions (fpchain_gen.py), built

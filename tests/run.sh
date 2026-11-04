@@ -204,6 +204,8 @@ check fp-chain-long 0 'CRC cc903bbb$' 300 '' -- "$T/t_fpchain_long"
 check fp-chain-long-exact 0 'CRC cc903bbb$' 300 'RISCOS_NO_HOSTFP=1 RISCOS_NO_INLINEFP=1' -- "$T/t_fpchain_long"
 check neon-int-conformance 0 'CRC 2d80f4bf$' 60 '' -- "$T/t_neonint"
 check neon-int-conformance-exact 0 'CRC 2d80f4bf$' 60 'RISCOS_NO_HOSTNEON=1' -- "$T/t_neonint"
+check neon-perm-conformance 0 'CRC 6d60edf5$' 60 '' -- "$T/t_neonperm"
+check neon-perm-conformance-exact 0 'CRC 6d60edf5$' 60 'RISCOS_NO_HOSTNEON=1' -- "$T/t_neonperm"
 # The elementary functions against RISC OS Open's own (its VFPSupport from
 # the Pi ROM: make basicvfp): bit for bit, flags too. The Pi ROM's are the
 # software-FMA build, which ours uses on a VFPv3 CPU (Cortex-A8).
