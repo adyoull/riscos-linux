@@ -30,7 +30,7 @@ MAXC%=300 : DIM chl$(MAXC%) : nch%=0 : chseen%=FALSE
 MAXCL%=600 : DIM cl$(MAXCL%) : ncl%=0
 nl%=0 : cur$="" : indp%=0 : task%=0 : quit%=FALSE
 job$="" : pos%=0 : mode%=0 : sect$="" : ndeb%=0 : neterr%=FALSE
-rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
+busy$="" : crpend%=FALSE : rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
 tok$="" : pendcmd$="" : pendm%=0 : sentpw%=FALSE : pwmode%=0 : chain%=0
 closing%=FALSE
 dir$="IXFS:$.riscos.cmd."
@@ -393,12 +393,18 @@ CASE i% OF
 ENDCASE
 ENDPROC
 
+REM apt-get and dpkg write to rol-cmd's file a line at a time (stdbuf:
+REM written to a file, their output came in 4K lumps, minutes apart, often
+REM cut mid-line), and apt reports its progress ("pmstatus:", "dlstatus:"
+REM lines, APT::Status-Fd), shown as it goes
+DEF FNapt="stdbuf -oL -eL apt-get -o APT::Status-Fd=1 "
+
 DEF PROCcheck
-PROCrun("apt-get update --error-on=any && /usr/lib/riscos/rol-info --fetch",1)
+PROCrun(FNapt+"update --error-on=any && /usr/lib/riscos/rol-info --fetch",1)
 ENDPROC
 
 DEF PROCinstall
-PROCrun("apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade && apt-get -y autoremove --purge && apt-get clean && /usr/lib/riscos/rol-info",2)
+PROCrun(FNapt+"-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade && "+FNapt+"-y autoremove --purge && apt-get clean && /usr/lib/riscos/rol-info",2)
 ENDPROC
 
 DEF PROCrollback
@@ -409,7 +415,7 @@ e%=blk%+3000 : !e%=0
 $(e%+4)="Put RISC OS "+v$+" back in place of "+inst$(1)+"? It takes effect when you restart."+CHR$0
 SYS "Wimp_ReportError",e%,%10011,"Updates" TO ,r%
 IF r%<>1 THEN ENDPROC
-PROCrun("apt-get install -y --allow-downgrades riscos-rom="+v$+" && /usr/lib/riscos/rol-info",3)
+PROCrun(FNapt+"install -y --allow-downgrades riscos-rom="+v$+" && /usr/lib/riscos/rol-info",3)
 ENDPROC
 
 REM --- running commands through rol-cmd ----------------------------------
@@ -444,10 +450,12 @@ pos%=0 : mode%=m% : started%=t% : heard%=FALSE : neterr%=FALSE
 IF m%=1 OR m%=2 OR m%=3 OR m%=4 THEN sect$="" : sawinfo%=FALSE
 IF m%<>4 THEN PROCaddtext("> "+cmd$+CHR$10)
 CASE m% OF
-  WHEN 1 : PROCset(ic%(1),"Checking for updates...")
-  WHEN 2 : PROCset(ic%(1),"Installing updates...")
-  WHEN 3 : PROCset(ic%(1),"Putting the earlier RISC OS back...")
+  WHEN 1 : busy$="Checking for updates"
+  WHEN 2 : busy$="Installing updates"
+  WHEN 3 : busy$="Putting the earlier RISC OS back"
+  OTHERWISE : busy$=""
 ENDCASE
+IF busy$<>"" THEN PROCset(ic%(1),busy$+"...")
 IF m%<>4 THEN PROCset(ic%(2),"")
 PROCbuttons
 ENDPROC
@@ -462,6 +470,12 @@ ENDPROC
 DEF PROCpoll_job
 LOCAL f%,rc%,t%,i%
 IF job$="" THEN ENDPROC
+REM how long it has been going, so that a long install doesn't look stuck
+IF busy$<>"" THEN
+  SYS "OS_ReadMonotonicTime" TO t%
+  t%=(t%-started%) DIV 100
+  PROCset(ic%(1),busy$+"... "+STR$(t% DIV 60)+":"+RIGHT$("0"+STR$(t% MOD 60),2))
+ENDIF
 PROCpoll_rest
 f%=OPENIN(dir$+job$+"/rc")
 IF f%=0 THEN
@@ -505,7 +519,7 @@ SYS "XOS_File",6,dir$+job$+"/rc"
 SYS "XOS_File",6,dir$+job$+"/req"
 SYS "XOS_File",6,dir$+job$+"/kill"
 IF cur$<>"" THEN PROCline(cur$) : cur$=""
-job$="" : mode%=0
+crpend%=FALSE : job$="" : mode%=0 : busy$=""
 IF rc%=77 OR rc%=78 THEN
   tok$=""
   PROCset(ic%(1),"That needs Linux's root password")
@@ -552,26 +566,43 @@ IF s%<172800 THEN =STR$(s%DIV3600)+" hours ago"
 
 REM --- the output --------------------------------------------------------
 
-REM adds text: LF ends a line, CR starts the current one again (apt's
-REM progress), other control characters go
+REM adds text: LF ends a line; CR then more text starts the line again
+REM (apt's and dpkg's progress), but CR LF just ends it (apt's "... Done"
+REM lines: they were stored empty); other control characters go
 DEF PROCaddtext(t$)
 LOCAL i%,c%,changed%
 IF t$="" THEN ENDPROC
 FOR i%=1 TO LEN(t$)
   c%=ASC(MID$(t$,i%,1))
+  IF crpend% AND c%<>10 AND c%<>13 THEN cur$="" : crpend%=FALSE
   CASE TRUE OF
-    WHEN c%=10 : PROCline(cur$) : cur$="" : changed%=TRUE
-    WHEN c%=13 : cur$=""
+    WHEN c%=10 : PROCline(cur$) : cur$="" : changed%=TRUE : crpend%=FALSE
+    WHEN c%=13 : crpend%=TRUE
     WHEN c%<32 OR c%=127 :
     OTHERWISE : IF LEN(cur$)<240 THEN cur$+=CHR$c%
   ENDCASE
 NEXT
-IF cur$<>"" AND sect$="" THEN PROCset(ic%(2),cur$)
+IF cur$<>"" AND sect$="" AND INSTR(cur$,"status:")=0 THEN PROCset(ic%(2),cur$)
 IF changed% THEN PROClogchanged
 ENDPROC
 
 DEF PROCline(l$)
 LOCAL i%,n$,v$
+REM apt's progress (APT::Status-Fd): "pmstatus:PACKAGE:PERCENT:WHAT",
+REM "dlstatus:N:PERCENT:WHAT" go in the status line, not the details;
+REM "pmerror:PACKAGE:PERCENT:MESSAGE" in both
+IF LEFT$(l$,9)="pmstatus:" OR LEFT$(l$,9)="dlstatus:" OR LEFT$(l$,8)="pmerror:" OR LEFT$(l$,11)="pmconffile:" THEN
+  n$=MID$(l$,INSTR(l$,":")+1) : n$=MID$(n$,INSTR(n$,":")+1)
+  v$=LEFT$(n$,INSTR(n$+":",":")-1) : n$=MID$(n$,LEN(v$)+2)
+  IF LEFT$(l$,8)="pmerror:" THEN
+    PROCset(ic%(2),"Error: "+n$) : l$="Error: "+n$
+  ELSE
+    IF LEFT$(l$,11)="pmconffile:" THEN ENDPROC
+    IF n$="" THEN ENDPROC
+    PROCset(ic%(2),n$+" ("+STR$(INT(VAL(v$)))+"%)")
+    ENDPROC
+  ENDIF
+ENDIF
 IF LEFT$(l$,1)="@" THEN
   sect$=MID$(l$,2) : sawinfo%=TRUE
   CASE sect$ OF
@@ -614,6 +645,9 @@ IF sect$<>"" THEN
 ENDIF
 IF INSTR(l$,"Could not resolve")>0 OR INSTR(l$,"Temporary failure resolving")>0 OR INSTR(l$,"Unable to connect")>0 THEN neterr%=TRUE
 IF l$<>"" AND sect$="" AND LEFT$(l$,1)<>"@" THEN PROCset(ic%(2),l$)
+REM the details: what the commands say, not rol-info's data (the
+REM sections above)
+IF sect$<>"" THEN ENDPROC
 IF nl%=MAXL% THEN
   FOR i%=1 TO MAXL%-1 : line$(i%-1)=line$(i%) : NEXT
   nl%-=1
@@ -621,17 +655,21 @@ ENDIF
 line$(nl%)=l$ : nl%+=1
 ENDPROC
 
+REM The details' extent fits the lines (at least the window's height), and
+REM an open window shows the last of them (the first, while they all fit)
 DEF PROClogchanged
-LOCAL h%,b%
-h%=nl%*LH%+32 : IF h%<600 THEN h%=600
+LOCAL h%,b%,c%,vh%
+c%=nl%*LH%+32
 b%=blk%+2048
-b%!0=0 : b%!4=-h% : b%!8=LW% : b%!12=0
-SYS "Wimp_SetExtent",logw%,b%
 b%!0=logw%
 SYS "Wimp_GetWindowState",,b%
+vh%=b%!16-b%!8
+h%=c% : IF h%<vh% THEN h%=vh%
+IF h%<600 THEN h%=600
+b%!100=0 : b%!104=-h% : b%!108=LW% : b%!112=0
+SYS "Wimp_SetExtent",logw%,b%+100
 IF b%!32 AND &10000 THEN
-  b%!24=-(h%-(b%!16-b%!8))
-  IF b%!24>0 THEN b%!24=0
+  IF c%>vh% THEN b%!24=-(c%-vh%) ELSE b%!24=0
   SYS "Wimp_OpenWindow",,b%
   SYS "Wimp_ForceRedraw",logw%,0,-h%,LW%,0
 ENDIF
