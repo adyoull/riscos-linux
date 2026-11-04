@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-17 (not yet built)
+## 5.31-17 (4 November 2026)
 
 - **GPIO HAL devices on a Raspberry Pi 3 or 4**, as RISC OS's own BCM2835
   HAL has them (HALDeviceComms_GPIO, HALDeviceID_GPIO_BCM2835, API 1.0:
