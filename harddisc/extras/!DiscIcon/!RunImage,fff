@@ -2,6 +2,12 @@ REM >!RunImage
 REM DiscIcon: puts HardDisc4 on the icon bar as a hard disc (like ADFS's
 REM or SCSI's drive icons) instead of Pinboard's folder: Select or Adjust
 REM opens it, Menu offers Open '$', Free and Dismount (removes the icon).
+REM USB discs and SD cards (Linux mounts them in IXFS:$.riscos.media, and
+REM lists them in IXFS:$.riscos.mediactl.discs) get an icon each while
+REM they're there, with Open '$', Free and Eject (which asks Linux to
+REM unmount it, so it can be taken out, and says so if something still
+REM has a file on it open). A disc's directory windows close when it goes,
+REM ejected or pulled out.
 REM Files dropped on it are copied into it, by Filer_Action, as the disc
 REM filers do; a program saving to it saves into it.
 REM Free is RISC OS's own Free window (*ShowFree): this registers a free
@@ -11,8 +17,11 @@ REM On RISC OS for Linux, HardDisc4 is IXFS:$.riscos.HardDisc4.
 REM Copyright (c) 2026 Andrew Youll. MIT licence.
 fs%=0 : ws%=0
 ON ERROR PROCderegister : ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
-DIM blk% 1024, ind% 256, menu% 28+24*3
-name$="HardDisc4" : path$="<IXFS$HardDisc4>"
+MAXD%=12
+DIM blk% 1024, menu% 28+24*3, icon%(MAXD%), dname$(MAXD%), dpath$(MAXD%), ind%(MAXD%)
+FOR i%=0 TO MAXD% : DIM b% 80 : ind%(i%)=b% : icon%(i%)=-1 : NEXT
+list$="IXFS:$.riscos.mediactl.discs" : listed$="" : nextcheck%=0
+ejecting$="" : ejectby%=0
 REM messages wanted (Quit always comes): DataSave, DataLoad
 DIM msgs% 12 : msgs%!0=1 : msgs%!4=3 : msgs%!8=0
 SYS "Wimp_Initialise",310,&4B534154,"HardDisc4",msgs% TO ,task%
@@ -20,23 +29,22 @@ REM the sprite: "harddisc" from the Wimp's pool (as the disc filers use)
 spr$="harddisc"
 SYS "XWimp_SpriteOp",40,,spr$ TO ;f%
 IF f% AND 1 THEN spr$="directory"
-$ind%=name$ : $(ind%+32)="S"+spr$
-SYS "Wimp_TextOp",1,name$,0 TO w%
-IF w%<68 THEN w%=68
-blk%!0=-5 : blk%!4=0 : blk%!8=-16 : blk%!12=w%+16 : blk%!16=84
-blk%!20=&1700310B : blk%!24=ind% : blk%!28=ind%+32 : blk%!32=LEN(name$)+1
-SYS "Wimp_CreateIcon",&60000000,blk% TO icon%
-PROCmenu
+REM USB discs and cards: "floppyscsi", the removable drive SCSIFiler shows
+REM for one on a Raspberry Pi (else as HardDisc4)
+usb$="floppyscsi"
+SYS "XWimp_SpriteOp",40,,usb$ TO ;f%
+IF f% AND 1 THEN usb$=spr$
+PROCadd(0,"HardDisc4","<IXFS$HardDisc4>")
 PROCregister
 ON ERROR PROCerror
-quit%=FALSE : pdir$="" : pleaf$=""
+quit%=FALSE : pdir$="" : pleaf$="" : pdisc%=0 : menudisc%=0
 REPEAT
-  IF pdir$<>"" THEN mask%=&3830 ELSE mask%=&3831
-  SYS "Wimp_Poll",mask%,blk% TO reason%
+  SYS "OS_ReadMonotonicTime" TO now%
+  SYS "Wimp_PollIdle",&3830,blk%,now%+100 TO reason%
   CASE reason% OF
     WHEN 6 : PROCclick
     WHEN 9 : PROCchoose
-    WHEN 0 : PROCflush
+    WHEN 0 : PROCflush : PROCmedia
     WHEN 17,18 : PROCmessage
   ENDCASE
 UNTIL quit%
@@ -44,10 +52,110 @@ PROCderegister
 SYS "Wimp_CloseDown",task%,&4B534154
 END
 
+REM a disc's icon on the icon bar
+DEF PROCadd(i%,n$,p$)
+LOCAL w%,p%
+dname$(i%)=n$ : dpath$(i%)=p$
+$ind%(i%)=n$
+IF i%=0 THEN $(ind%(i%)+32)="S"+spr$ ELSE $(ind%(i%)+32)="S"+usb$
+SYS "Wimp_TextOp",1,n$,0 TO w%
+IF w%<68 THEN w%=68
+blk%!0=-5 : blk%!4=0 : blk%!8=-16 : blk%!12=w%+16 : blk%!16=84
+blk%!20=&1700310B : blk%!24=ind%(i%) : blk%!28=ind%(i%)+32 : blk%!32=LEN(n$)+1
+REM HardDisc4 with the hard discs (priority &60000000); USB discs and
+REM cards after Apps, as PDFS's devices (&30000000, each next one lower)
+IF i%=0 THEN p%=&60000000 ELSE p%=&30000000-i%
+SYS "Wimp_CreateIcon",p%,blk% TO icon%(i%)
+ENDPROC
+
+DEF PROCremove(i%)
+blk%!0=-2 : blk%!4=icon%(i%)
+SYS "XWimp_DeleteIcon",,blk%
+REM its directory windows go too (it was ejected, or pulled out)
+IF i%>0 THEN SYS "XOS_CLI","Filer_CloseDir "+dpath$(i%)
+icon%(i%)=-1 : dname$(i%)=""
+ENDPROC
+
+REM USB discs and SD cards: Linux's list, read every second or so
+DEF PROCmedia
+LOCAL f%,l$,n$,i%,j%,t%,found%
+SYS "OS_ReadMonotonicTime" TO t%
+IF t%-nextcheck%<0 THEN ENDPROC
+nextcheck%=t%+100
+l$=""
+SYS "XOS_File",17,list$ TO t%;f%
+IF (f% AND 1)=0 AND t%=1 THEN
+  f%=OPENIN(list$)
+  IF f% THEN
+    WHILE NOT EOF#f% AND LEN(l$)<200
+      n$=GET$#f%
+      IF n$<>"" THEN l$+=n$+" "
+    ENDWHILE
+    CLOSE#f%
+  ENDIF
+ENDIF
+IF ejecting$<>"" THEN PROCejectcheck(l$)
+IF l$=listed$ THEN ENDPROC
+listed$=l$
+REM gone
+FOR i%=1 TO MAXD%
+  IF icon%(i%)>=0 AND INSTR(" "+l$," "+dname$(i%)+" ")=0 THEN PROCremove(i%)
+NEXT
+REM new
+WHILE l$<>""
+  n$=LEFT$(l$,INSTR(l$," ")-1) : l$=MID$(l$,INSTR(l$," ")+1)
+  found%=FALSE : j%=0
+  FOR i%=1 TO MAXD%
+    IF icon%(i%)>=0 AND dname$(i%)=n$ THEN found%=TRUE
+    IF icon%(i%)<0 AND j%=0 THEN j%=i%
+  NEXT
+  IF NOT found% AND j%>0 AND n$<>"" THEN PROCadd(j%,n$,"IXFS:$.riscos.media."+n$)
+ENDWHILE
+ENDPROC
+
+REM which disc an icon bar icon is (-1: none of ours)
+DEF FNdisc(w%,i%)
+LOCAL d%
+IF w%<>-2 THEN =-1
+FOR d%=0 TO MAXD%
+  IF icon%(d%)=i% AND icon%(d%)>=0 THEN =d%
+NEXT
+=-1
+
 DEF PROCerror
 LOCAL e%
 e%=blk%+512 : !e%=ERR : $(e%+4)=REPORT$+CHR$0
-SYS "Wimp_ReportError",e%,1,name$
+SYS "Wimp_ReportError",e%,1,"HardDisc4"
+ENDPROC
+
+REM IXFS keeps the directory it listed last open (to carry on from where
+REM a listing stopped): if that's on the disc, Linux can't unmount it.
+REM Listing another directory to its end closes it.
+DEF PROCdropdir
+LOCAL n%,p%,f%
+p%=0
+REPEAT
+  SYS "XOS_GBPB",10,"IXFS:$.riscos.mediactl",blk%+512,64,p%,256,0 TO ,,,n%,p%;f%
+UNTIL (f% AND 1) OR p%=-1
+ENDPROC
+
+REM after Eject: Linux says "busy-NAME" if something still has a file on
+REM the disc open (then it stays); the disc leaving the list means done
+DEF PROCejectcheck(l$)
+LOCAL t%,f%,e%,b$
+IF INSTR(" "+l$," "+ejecting$+" ")=0 THEN ejecting$="" : ENDPROC
+b$="IXFS:$.riscos.mediactl.busy-"+ejecting$
+SYS "XOS_File",17,b$ TO t%;f%
+IF (f% AND 1)=0 AND t%=1 THEN
+  SYS "XOS_File",6,b$
+  e%=blk%+512 : !e%=0
+  $(e%+4)="'"+ejecting$+"' can't be ejected: a file on it is still open. Close it (or quit the program using it) and try again."+CHR$0
+  ejecting$=""
+  SYS "Wimp_ReportError",e%,1,"HardDisc4"
+  ENDPROC
+ENDIF
+SYS "OS_ReadMonotonicTime" TO t%
+IF t%-ejectby%>0 THEN ejecting$=""
 ENDPROC
 
 REM --- files dropped on the icon -----------------------------------------
@@ -60,7 +168,7 @@ CASE blk%!16 OF
 ENDCASE
 ENDPROC
 
-DEF FNours =(blk%!20=-2 AND blk%!24=icon%)
+DEF FNours =(FNdisc(blk%!20,blk%!24)>=0)
 
 REM a program saving to the icon: tell it where (HardDisc4's root)
 DEF PROCdatasave
@@ -69,7 +177,7 @@ IF NOT FNours THEN ENDPROC
 leaf$=FNstring(blk%+44)
 i%=0 : WHILE INSTR(leaf$,".",i%+1) : i%=INSTR(leaf$,".",i%+1) : ENDWHILE
 leaf$=MID$(leaf$,i%+1)
-$(blk%+44)=path$+"."+leaf$+CHR$0
+$(blk%+44)=dpath$(FNdisc(blk%!20,blk%!24))+"."+leaf$+CHR$0
 SYS "XOS_GSTrans",blk%+44,blk%+300,200 TO ,,i%
 $(blk%+44)=LEFT$(FNstring(blk%+300),i%)+CHR$0
 blk%!0=(44+LEN(FNstring(blk%+44))+4) AND NOT 3
@@ -80,8 +188,9 @@ ENDPROC
 REM a file dropped on the icon: copy it in (several from one directory
 REM go in one Filer_Action, started when the drops stop)
 DEF PROCdataload
-LOCAL f$,d$,l$,i%
+LOCAL f$,d$,l$,i%,k%
 IF NOT FNours THEN ENDPROC
+k%=FNdisc(blk%!20,blk%!24)
 f$=FNstring(blk%+44)
 REM (acknowledge it: we've taken it)
 blk%!12=blk%!8 : blk%!16=4
@@ -89,15 +198,15 @@ SYS "Wimp_SendMessage",17,blk%,blk%!4
 i%=0 : WHILE INSTR(f$,".",i%+1) : i%=INSTR(f$,".",i%+1) : ENDWHILE
 IF i%=0 THEN ENDPROC
 d$=LEFT$(f$,i%-1) : l$=MID$(f$,i%+1)
-IF d$<>pdir$ OR LEN(pleaf$)+LEN(l$)>200 THEN PROCflush
-pdir$=d$
+IF d$<>pdir$ OR k%<>pdisc% OR LEN(pleaf$)+LEN(l$)>200 THEN PROCflush
+pdir$=d$ : pdisc%=k%
 IF pleaf$="" THEN pleaf$=l$ ELSE pleaf$+=" "+l$
 ENDPROC
 
 DEF PROCflush
 LOCAL t%,dst$
 IF pdir$="" THEN ENDPROC
-SYS "XOS_GSTrans",path$+CHR$0,blk%+300,200 TO ,,t%
+SYS "XOS_GSTrans",dpath$(pdisc%)+CHR$0,blk%+300,200 TO ,,t%
 dst$=LEFT$(FNstring(blk%+300),t%)
 IF pdir$<>dst$ THEN
   SYS "Wimp_StartTask","Filer_Action" TO t%
@@ -124,14 +233,14 @@ LOCAL s$
 WHILE ?p%>=32 AND LEN(s$)<250 : s$+=CHR$?p% : p%+=1 : ENDWHILE
 =s$
 
-DEF PROCmenu
+DEF PROCmenu(d%)
 LOCAL i%
-$menu%=name$
+$menu%=dname$(d%)
 menu%?12=7 : menu%?13=2 : menu%?14=7 : menu%?15=0
 menu%!16=200 : menu%!20=44 : menu%!24=0
 i%=menu%+28 : PROCitem(i%,0,"Open '$'")
 i%+=24 : PROCitem(i%,0,"Free")
-i%+=24 : PROCitem(i%,&80,"Dismount")
+i%+=24 : IF d%=0 THEN PROCitem(i%,&80,"Dismount") ELSE PROCitem(i%,&80,"Eject")
 ENDPROC
 
 DEF PROCitem(i%,f%,t$)
@@ -139,46 +248,60 @@ i%!0=f% : i%!4=-1 : i%!8=&07000021 : $(i%+12)=t$
 ENDPROC
 
 DEF PROCclick
-IF blk%!12<>-2 OR blk%!16<>icon% THEN ENDPROC
+LOCAL d%
+d%=FNdisc(blk%!12,blk%!16)
+IF d%<0 THEN ENDPROC
 CASE blk%!8 OF
-  WHEN 4,1 : OSCLI "Filer_OpenDir "+path$
-  WHEN 2 : SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
+  WHEN 4,1 : OSCLI "Filer_OpenDir "+dpath$(d%)
+  WHEN 2 : menudisc%=d% : PROCmenu(d%) : SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
 ENDCASE
 ENDPROC
 
 DEF PROCchoose
-LOCAL c%
+LOCAL c%,f%
 c%=blk%!0
 SYS "Wimp_GetPointerInfo",,blk%
+IF dname$(menudisc%)="" THEN ENDPROC
 CASE c% OF
-  WHEN 0 : OSCLI "Filer_OpenDir "+path$
-  WHEN 1 : PROCfree
-  WHEN 2 : quit%=TRUE : ENDPROC
+  WHEN 0 : OSCLI "Filer_OpenDir "+dpath$(menudisc%)
+  WHEN 1 : PROCfree(menudisc%)
+  WHEN 2 :
+    IF menudisc%=0 THEN quit%=TRUE : ENDPROC
+    REM ask Linux to unmount it: the icon goes when it has
+    OSCLI "Filer_CloseDir "+dpath$(menudisc%)
+    PROCdropdir
+    f%=OPENOUT("IXFS:$.riscos.mediactl.eject-"+dname$(menudisc%))
+    IF f% THEN CLOSE#f%
+    ejecting$=dname$(menudisc%) : SYS "OS_ReadMonotonicTime" TO ejectby% : ejectby%+=1000
+    nextcheck%=0
 ENDCASE
-IF blk%!8=1 THEN SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
+IF blk%!8=1 AND dname$(menudisc%)<>"" THEN SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
 ENDPROC
 
 REM --- the Free window --------------------------------------------------
 
-DEF PROCfree
-OSCLI "ShowFree -fs IXFS "+name$
+DEF PROCfree(d%)
+OSCLI "ShowFree -fs IXFS "+dname$(d%)
 ENDPROC
 
-REM Free's routine for IXFS (PRM 5a, Free: the routine's entry). It runs
-REM in User mode, with R12 = ws% and only the return address on the stack.
-REM ws%: +0 saved registers, +64 statfs64's buffer, +160 the Linux path,
-REM +176 the device's name, +192 an error block, +256 the code.
+REM Free's routine for IXFS (Free's sources: s.NFS and hdr.Free). It runs
+REM in User mode, with R12 = ws% and only the return address on the stack;
+REM R3 is the drive's name (HardDisc4, or a USB disc's or card's).
+REM ws%: +0 saved registers, +64 statfs64's buffer, +160 "/riscos",
+REM +176 "/riscos/media/", +192 an error block, +256 "HardDisc4",
+REM +288 the Linux path asked about, +416 the code.
 DEF PROCregister
 LOCAL p%,pass%,code%
 REM (OS_FSControl 13 gives the filing system's number in R1)
 SYS "XOS_FSControl",13,"IXFS",0 TO ,fs%;f%
 fs%=fs% AND &FF
 IF (f% AND 1) OR fs%=0 THEN fs%=0 : ENDPROC
-SYS "OS_Module",6,,,1024 TO ,,ws%
+SYS "OS_Module",6,,,1280 TO ,,ws%
 $(ws%+160)="/riscos"+CHR$0
-$(ws%+176)=name$+CHR$0
+$(ws%+176)="/riscos/media/"+CHR$0
 ws%!192=0 : $(ws%+196)="Linux didn't say how much space is free"+CHR$0
-code%=ws%+256
+$(ws%+256)="HardDisc4"+CHR$0
+code%=ws%+416
 FOR pass%=0 TO 2 STEP 2
   P%=code%
   [OPT pass%
@@ -188,7 +311,31 @@ FOR pass%=0 TO 2 STEP 2
   LDMNEIA R13!,{PC}
   STMIA R12,{R0-R11,R14}
   MOV R9,R2 : MOV R10,R0
-  ADD R0,R12,#160 : MOV R1,#84 : ADD R2,R12,#64
+  MOV R1,R3
+  LDRB R4,[R1] : CMP R4,#ASC":" : ADDEQ R1,R1,#1
+  ADD R4,R12,#256 : MOV R5,R1
+  .fr_cmp
+  LDRB R6,[R4],#1 : LDRB R7,[R5],#1
+  CMP R7,#32 : MOVLT R7,#0
+  CMP R6,R7 : BNE fr_media
+  CMP R6,#0 : BNE fr_cmp
+  ADD R4,R12,#160 : ADD R5,R12,#288
+  .fr_hd
+  LDRB R6,[R4],#1 : STRB R6,[R5],#1 : CMP R6,#0 : BNE fr_hd
+  B fr_ask
+  .fr_media
+  ADD R4,R12,#176 : ADD R5,R12,#288
+  .fr_pre
+  LDRB R6,[R4],#1 : CMP R6,#0 : STRNEB R6,[R5],#1 : BNE fr_pre
+  MOV R8,#0
+  .fr_nm
+  LDRB R6,[R1],#1 : CMP R6,#32 : MOVLT R6,#0
+  STRB R6,[R5],#1 : ADD R8,R8,#1
+  CMP R6,#0 : BEQ fr_ask
+  CMP R8,#100 : BLT fr_nm
+  MOV R6,#0 : STRB R6,[R5]
+  .fr_ask
+  ADD R0,R12,#288 : MOV R1,#84 : ADD R2,R12,#64
   MOV R3,#0 : MOV R4,#0 : MOV R5,#0 : MOV R6,#0 : MOV R7,#256 : ADD R7,R7,#10
   SWI &79EC0
   BVS fr_fail
@@ -219,12 +366,15 @@ FOR pass%=0 TO 2 STEP 2
   LDMIA R13!,{PC}
   .fr_name
   STMIA R12,{R1-R4}
-  ADD R4,R12,#176
+  MOV R4,R3
+  LDRB R0,[R4] : CMP R0,#ASC":" : ADDEQ R4,R4,#1
+  MOV R1,#0
   .fr_copy
-  LDRB R0,[R4],#1 : STRB R0,[R2],#1
+  LDRB R0,[R4],#1 : CMP R0,#32 : MOVLT R0,#0
+  STRB R0,[R2],#1 : ADD R1,R1,#1
   CMP R0,#0 : BNE fr_copy
+  MOV R0,R1
   LDMIA R12,{R1-R4}
-  MOV R0,#LEN(name$)+1
   LDMIA R13!,{PC}
   .fr_compare
   CMP R0,R0
@@ -238,7 +388,7 @@ ENDPROC
 
 DEF PROCderegister
 IF ws%=0 THEN ENDPROC
-SYS &644C1,fs%,ws%+256,ws%
+SYS &644C1,fs%,ws%+416,ws%
 SYS "XOS_Module",7,,ws%
 ws%=0
 ENDPROC

@@ -33,6 +33,7 @@ static int net_time (const char *dns, int quiet);
 static int nogrow;
 static void splash (const char *what);
 static char fat_dev[96];
+static pid_t fat_logs_pid;	/* the child copying the logs to the FAT partition */
 
 /* "Raspberry Pi 5 Model B Rev 1.0" etc., or "" (a VM) */
 static char model[128];
@@ -47,6 +48,75 @@ read_model (void)
       model[n > 0 ? n : 0] = 0;
       close (fd);
     }
+}
+
+/* Switch off or restart (HOW is RB_POWER_OFF or RB_AUTOBOOT) with the
+   root file system clean. Everything still running (rol-fb, rol-usbd,
+   dhcp, Updates' apt...) gets SIGTERM, then after up to 3 s SIGKILL, so
+   that nothing holds a file open for writing or a deleted file open; then
+   the root is remounted read-only, which writes back the journal and the
+   orphan list. Before this, sync then reboot left the root marked in use
+   and every boot after a Ctrl+Break or a restart spent ~14 s on ext4
+   journal recovery ("orphan inodes deleted, recovery complete"). */
+/* USB discs and cards that rol-usbd mounted under /riscos/media: unmount
+   them (their data is written back first), the latest first */
+static void
+media_umount_all (void)
+{
+  char mp[64][256];
+  int n = 0;
+  FILE *f = fopen ("/proc/mounts", "re");
+  char line[1024];
+  while (f && fgets (line, sizeof line, f) && n < 64)
+    {
+      char dev[256], dir[256];
+      if (sscanf (line, "%255s %255s", dev, dir) == 2 && !strncmp (dir, "/riscos/media/", 14))
+	snprintf (mp[n++], sizeof mp[0], "%s", dir);
+    }
+  if (f)
+    fclose (f);
+  while (n > 0)
+    if (umount (mp[--n]))
+      umount2 (mp[n], MNT_DETACH);
+}
+
+static void fat_logs_stop (void);
+static void fat_umount_all (void);
+
+static void
+machine_off (int how)
+{
+  fat_logs_stop ();
+  sync ();
+  kill (-1, SIGTERM);
+  for (int i = 0; i < 30; i++)
+    {
+      while (waitpid (-1, NULL, WNOHANG) > 0)
+	;
+      if (kill (-1, 0) < 0 && errno == ESRCH)
+	break;
+      usleep (100000);
+    }
+  kill (-1, SIGKILL);
+  while (waitpid (-1, NULL, WNOHANG) > 0)
+    ;
+  usleep (100000);
+  while (waitpid (-1, NULL, WNOHANG) > 0)
+    ;
+  sync ();
+  /* anything mounted under /run (the FAT boot partition for the logs, a
+     Windows partition), then the root. A real unmount, so the FAT
+     partition is marked clean before the restart: a lazy one could still
+     be pending when reboot() is called, which leaves the partition marked
+     "not properly unmounted" for good (Linux doesn't clear that mark) */
+  fat_umount_all ();
+  if (umount ("/run/win"))
+    umount2 ("/run/win", MNT_DETACH);
+  /* USB discs and cards (rol-usbd mounts them in /riscos/media) */
+  media_umount_all ();
+  if (mount (NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL) < 0)
+    sync ();
+  reboot (how);
 }
 
 static int splash_on;
@@ -430,7 +500,7 @@ job_mode (void)
   sync ();
   umount ("/job");
   sync ();
-  reboot (RB_POWER_OFF);
+  machine_off (RB_POWER_OFF);
 }
 
 /* Testing (riscos-linux-testbed's tools/native-vm): with a 9p share
@@ -556,7 +626,7 @@ host_job (void)
       close (fd);
     }
   sync ();
-  reboot (RB_POWER_OFF);
+  machine_off (RB_POWER_OFF);
 }
 
 /* Windows Dev Kit 2023 (Qualcomm SC8280XP): the audio and compute DSPs' and
@@ -806,6 +876,37 @@ protect_setup (void)
   setenv ("ROL_CONFINE", v, 1);
 }
 
+/* USB discs and cards appear in RISC OS as IXFS:$.riscos.media.NAME:
+   rol-usbd mounts them there while RISC OS runs. /riscos/media is made a
+   shared mount point, so that mounts made under it later reach RISC OS's
+   own view of the files (rol-fb's confine() makes it a slave of this one).
+   /riscos/mediactl is RISC OS's: it asks to eject a disc there, and
+   rol-usbd lists the mounted ones in it ("discs"). */
+static void
+media_setup (void)
+{
+  mkdir ("/riscos/media", 0755);
+  if (lchown ("/riscos/media", 0, 0)) { }
+  chmod ("/riscos/media", 0755);
+  /* mount points left by a machine switched off without unmounting */
+  DIR *d = opendir ("/riscos/media");
+  struct dirent *e;
+  while (d && (e = readdir (d)))
+    if (e->d_name[0] != '.')
+      {
+	char p[300];
+	snprintf (p, sizeof p, "/riscos/media/%s", e->d_name);
+	rmdir (p);
+      }
+  if (d)
+    closedir (d);
+  mount ("/riscos/media", "/riscos/media", NULL, MS_BIND, NULL);
+  mount (NULL, "/riscos/media", NULL, MS_SHARED, NULL);
+  mkdir ("/riscos/mediactl", 0755);
+  if (lchown ("/riscos/mediactl", RO_UID, RO_GID)) { }
+  unlink ("/riscos/mediactl/discs");
+}
+
 /* --- rol-cmd: runs Linux commands for RISC OS (*Linux, the updates
    application), when the image has it */
 static void
@@ -954,20 +1055,75 @@ fat_logs_once (void)
 {
   if (!fat_dev[0])
     return;
+  /* Mounted for as short a time as possible, and never left mounted: no
+     SIGTERM while it is (machine_off waits), no system-wide sync (that
+     waited for every disc, up to 10 seconds: umount writes this one's
+     data itself), and nothing mounted on top of a copy already there. */
+  sigset_t term, old;
+  sigemptyset (&term);
+  sigaddset (&term, SIGTERM);
+  sigprocmask (SIG_BLOCK, &term, &old);
   mkdir ("/run/fatlog", 0700);
-  if (mount (fat_dev, "/run/fatlog", "vfat", MS_NOSUID | MS_NODEV | MS_NOEXEC, "shortname=mixed"))
+  if (mount (fat_dev, "/run/fatlog", "vfat", MS_NOSUID | MS_NODEV | MS_NOEXEC, "shortname=mixed") == 0)
+    {
+      mkdir ("/run/fatlog/LOGS", 0755);
+      copy_file ("/riscos/log.txt", "/run/fatlog/LOGS/riscos-log.txt");
+      copy_file ("/riscos/kernel-log.txt", "/run/fatlog/LOGS/kernel-log.txt");
+      if (umount ("/run/fatlog"))
+	umount2 ("/run/fatlog", MNT_DETACH);
+    }
+  sigprocmask (SIG_SETMASK, &old, NULL);
+}
+
+/* Every mount of the FAT partition (and anything on /run/fat*), latest
+   first, until none is left: really unmounted, not lazily */
+static void
+fat_umount_all (void)
+{
+  for (int pass = 0; pass < 8; pass++)
+    {
+      char mp[16][256];
+      int n = 0;
+      FILE *f = fopen ("/proc/mounts", "re");
+      char line[1024];
+      while (f && fgets (line, sizeof line, f) && n < 16)
+	{
+	  char dev[256], dir[256];
+	  if (sscanf (line, "%255s %255s", dev, dir) == 2
+	      && ((fat_dev[0] && !strcmp (dev, fat_dev)) || !strncmp (dir, "/run/fat", 8)))
+	    snprintf (mp[n++], sizeof mp[0], "%s", dir);
+	}
+      if (f)
+	fclose (f);
+      if (!n)
+	return;
+      while (n > 0)
+	if (umount (mp[--n]) && pass == 7)
+	  umount2 (mp[n], MNT_DETACH);
+      sync ();
+    }
+}
+
+/* The copying child finishes the copy it may be in the middle of (it
+   blocks SIGTERM while the partition is mounted), then ends */
+static void
+fat_logs_stop (void)
+{
+  if (fat_logs_pid <= 0)
     return;
-  mkdir ("/run/fatlog/LOGS", 0755);
-  copy_file ("/riscos/log.txt", "/run/fatlog/LOGS/riscos-log.txt");
-  copy_file ("/riscos/kernel-log.txt", "/run/fatlog/LOGS/kernel-log.txt");
-  sync ();
-  umount ("/run/fatlog");
+  kill (fat_logs_pid, SIGTERM);
+  for (int i = 0; i < 100 && waitpid (fat_logs_pid, NULL, WNOHANG) == 0; i++)
+    usleep (50000);
+  fat_logs_pid = 0;
 }
 
 static void
 fat_logs (void)
 {
-  if (!fat_dev[0] || fork () != 0)
+  if (!fat_dev[0])
+    return;
+  fat_logs_pid = fork ();
+  if (fat_logs_pid != 0)
     return;
   for (int i = 0; i < 12; i++)
     {
@@ -1504,6 +1660,7 @@ main (void)
       }
   }
   set_ram_size (native);
+  media_setup ();
   if (protect_on ())
     protect_setup ();
   time_t t0 = time (NULL);
@@ -1585,16 +1742,18 @@ main (void)
       splash ("RISC OS is restarting: saving the clock and the logs");
       save_time ();
       sync ();
+      fat_logs_stop ();
       fat_logs_once ();
       say ("RISC OS is restarting the machine.\n", "");
       sync ();
-      reboot (RB_AUTOBOOT);
+      machine_off (RB_AUTOBOOT);
     }
   int quick = time (NULL) - t0 < 20;
   if (!quick)
     splash ("RISC OS has ended: saving the clock and the logs, then switching off");
   save_time ();
   sync ();
+  fat_logs_stop ();
   fat_logs_once ();
   if (quick)
     {
@@ -1609,6 +1768,6 @@ main (void)
   else
     say ("RISC OS has ended: powering off.\n", "");
   sync ();
-  reboot (RB_POWER_OFF);
+  machine_off (RB_POWER_OFF);
   return 0;
 }

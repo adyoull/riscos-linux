@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"USBDriver"
-help:	.asciz	"USBDriver\t1.31 (30 Oct 2026) RISC OS for Linux (usbfs)"
+help:	.asciz	"USBDriver\t1.31 (02 Nov 2026) RISC OS for Linux (usbfs)"
 swi_names:
 	.asciz	"USBDriver\0RegisterBus\0DeregisterBus\0InsertTransfer\0TransferComplete\0ScheduleSoftInterrupt\0Version\0"
 	.align	2
@@ -37,7 +37,7 @@ commands:
 	.word	cmd_help - module_start
 	.word	0
 cmd_help:
-	.asciz	"*USBDevices lists the USB devices Linux has given RISC OS (those Linux has no driver for: phones, cameras, ...).\rSyntax: *USBDevices"
+	.asciz	"*USBDevices lists the USB devices Linux has given RISC OS (those Linux has no driver for: phones, cameras, ...), then the ones Linux keeps (keyboards, discs, sound, network...) with their Linux drivers and what is on each disc.\rSyntax: *USBDevices"
 	.align	2
 flags:	.word	1				@ 32-bit compatible
 

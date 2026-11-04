@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"NativeSupport"
-help:	.asciz	"NativeSupport\t0.16 (01 Nov 2026) RISC OS for Linux, native"
+help:	.asciz	"NativeSupport\t0.18 (03 Nov 2026) RISC OS for Linux, native"
 	.align	2
 commands:
 	.asciz	"NativeSupport"
@@ -35,7 +35,7 @@ commands:
 	.word	cmd_help - module_start
 	.word	0
 cmd_help:
-	.asciz	"*NativeSupport shows what NativeSupport does for RISC OS running natively on Linux: the privileged instructions patched and emulated, and the other calls it handles. *NativeSupport FastSWI On|Off turns the fast SWI entry (riscos-linux kernels) on or off.\rSyntax: *NativeSupport [FastSWI On|Off]"
+	.asciz	"*NativeSupport shows what NativeSupport does for RISC OS running natively on Linux: the privileged instructions patched and emulated, and the other calls it handles. *NativeSupport FastSWI On|Off turns the fast SWI entry (riscos-linux kernels) on or off. *NativeSupport Reset starts the counts again.\rSyntax: *NativeSupport [FastSWI On|Off|Reset]"
 	.align	2
 flags:	.word	1				@ 32-bit compatible
 

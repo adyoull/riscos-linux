@@ -14,6 +14,11 @@
    idle minutes, kept here in memory). With no password set yet (rc 78)
    this asks for a new one first. *LinuxPassword changes it (from RISC OS: the root password itself, in /etc/shadow).
 
+   *LinuxUser runs the command as RISC OS's own Linux user (riscos, uid
+   1000: rol-cmd's "@user" request) instead: it can't change the system,
+   so no password. Protected RISC OS's *IXRun is an alias for it (TestBed
+   start-up): RISC OS's own view of the files has no Linux programs.
+
    Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include "cmodule.h"
 #include "../LinuxCodec/rolsys.h"
@@ -398,7 +403,11 @@ mod_command (int index, const char *tail, int argc)
     }
   cmd[n++] = '\n';
   cmd[n] = 0;
-  if ((e = authorised (cmd, "", &code)))
+  if (index == 2)
+    e = run_job ("@user\n", cmd, &code);	/* *LinuxUser: no password */
+  else
+    e = authorised (cmd, "", &code);
+  if (e)
     return e;
   if (code != 0)
     {

@@ -1,5 +1,145 @@
 # Changelog
 
+## 1.0 (2026-10-21 to 2026-11-04, unreleased)
+
+From a test bed to RISC OS on Linux's images: the Linux side, the desktop
+parts, and natively on real machines. What users get from this comes in
+the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
+CHANGELOG lists each package).
+
+### Running natively (NativeSupport 0.11 to 0.17)
+
+- User-bank LDM/STM ^ (also next to an MRS already stubbed, conditional
+  and single-register), returns to Thumb code (Iris's JavaScript), CP15
+  barriers in user mode, squeezed programs patched once unsqueezed, abort
+  handling that no longer loops or ends RISC OS on a bad stack.
+- JIT code left alone; Reporter's SWIs ignored without Reporter;
+  `*NativeSupport` lists the busiest patched sites, dynamic areas and free
+  address space; the kernel's sites found by their code.
+- ARMEABISupport 1.05's mmaps over 100MB; dynamic areas created without
+  the Abortable flag; the kernel does physical memory pools itself from
+  RISC OS 5.31-3.
+- **0.16: the fast SWI entry.** With riscos-linux kernels that have it
+  (`kernel/*/0200-riscos-fast-swi.patch`), RISC OS's SWIs go straight to
+  the ROM's handler instead of through seccomp and a signal: about 2.4 µs
+  down to 745 ns on a Raspberry Pi 4. `*NativeSupport FastSWI On|Off`,
+  `NativeSupport$NoFastSWI`. Other kernels: the usual path.
+  On a Raspberry Pi 4: ROBench's OS_SWI 3.3 times faster, OS_ReadVarVal
+  2.4, BPUT 4.2, BGET 2.0, Draw strokes 2.8. It needs no change to the
+  ROM. (ROL-ROM's CHANGELOG has the whole story, including the ROM-side
+  patching it replaced.)
+- **0.17: counting traps.** `*NativeSupport Reset` starts the counts again
+  and the report says how many seconds they cover; each busy place is
+  named by its module (`SoundScheduler+&628`); traps of instructions whose
+  condition failed (which some processors, the Pi 4's Cortex-A72 among
+  them, still trap) are listed by place, as other traps are. For finding
+  what costs RISC OS on Linux time in a program (RiscOSM's map drawing).
+- **0.18: returns to user mode without a signal.** The kernel returns to
+  user mode through the port's LoadUsrRegisters; NativeSupport had made
+  its first instruction trap (to fix up returns to Thumb code), so every
+  return cost a signal: 2.3 million in a RiscOSM map draw, about 10 s on
+  a Pi 4 (RiscOSM took 30 s, 17 s on native RISC OS). It now branches to
+  a 7-instruction stub that does the same fix-up, in the ROM image's
+  unused fill near its end (the trap is kept if there is none).
+  `*NativeSupport` says which.
+
+### Tests and tools (3 Nov 2026)
+
+- `ixfs-freespace`: IXFS's free space (OS_FSControl 49 and 55), which
+  failed before RISC OS 5.31-11 (StrongEd couldn't save to IXFS).
+- `select-eof` (`t_eof`): the other end's close seen by `select()` and
+  `read()`, which before RISC OS 5.31-12 waited out the timeout instead
+  (ClawsMail's HTTP fetches took 60 s each; from riscos-gtk's handoff).
+- USB discs: Eject retries for a second if the disc is busy, and if it's
+  still in use (a file on it open) rol-usbd says so (`busy-NAME` in
+  /riscos/mediactl) and !DiscIcon reports it, instead of nothing
+  happening. !DiscIcon lists another directory before ejecting (IXFS keeps
+  the directory it listed last open, which kept the disc busy), and a
+  disc's directory windows close when it goes, ejected or pulled out.
+- Updates: a Changes button under the RISC OS on Linux packages opens a
+  window of what each version newer than the one installed changes (and
+  what the installed one changed), from rol-info's `@changes` (the
+  repository's changes.txt, fetched by Check for updates).
+- `*IXRun` in protected RISC OS (where it always failed with ENOENT: no
+  Linux programs or terminals in RISC OS's own view of the files) is an
+  alias for LinuxShell 0.03's new `*LinuxUser`, which has rol-cmd run the
+  command as RISC OS's own Linux user (riscos; rol-cmd's `@user` request:
+  no password, no_new_privs, starts in HardDisc4), always: through the
+  shell, so `*IXRun ls` works as well as `*IXRun /bin/ls` (IXSupport's own
+  doesn't search the path, and needs Linux programs and a terminal in
+  RISC OS's view).
+- rol-kvm `-c` may name a regular file, followed as it grows, for
+  tools/native-vm's VM (a FIFO can't be shared with it).
+
+### The images' Linux side (images/fe)
+
+- init: Debian 13 base; protected RISC OS (its own user and view of the
+  files); the root file system fills the disc; logs on the FAT partition;
+  NTP all the time and the time kept across starts; RISC OS's RAM from
+  what Linux has free (`ROL_RAMSIZE_MB`); a start-up screen; devpts;
+  restart restarts the machine; shutdown and restart leave the disc clean.
+- rol-fb: the screen at the monitor's size (a mode saved in Configure
+  kept); only what changed is redrawn; a clear hardware cursor (UTM);
+  Alt+Shift+Backspace as Break; **video overlays** (LinuxCodec's and
+  VideoOverlay's buffers on the display's video plane, under the desktop:
+  on the Pi the desktop goes on a second plane over the video's, so the
+  pointer, windows and menus stay on top); the keyboard LEDs as RISC OS
+  has them (with SocketKVM's `c_leds`, RISC OS 5.31-9).
+- rol-cmd and `*Linux` (LinuxShell) with a root password; output
+  line-buffered for Updates.
+- rol-usbd: RISC OS's USB device interface (USBDriver) for devices Linux
+  has no driver for (PDFS); **USB discs and SD cards** mounted in
+  `/riscos/media` (FAT, exFAT, NTFS, ext), with files not marked
+  executable; a disc it can't mount described in the kernel log;
+  `/riscos/mediactl/usb` for `*USBDevices`.
+
+### Modules and the desktop (harddisc, modules)
+
+- LinuxCodec 0.01 to 0.03: Linux's V4L2 video decoders (the Pi's H.264)
+  for RISC OS programs.
+- The VideoCore stand-ins (VCHIQ, BCMSupport, PCI) over `/dev/vchiq`, for
+  ReelHWAccel.
+- LinuxOverlay: VideoOverlay's GraphicsV calls (20-28) on rol-fb's
+  overlay plane: Reel's hardware overlay.
+- USBDriver: `*USBDevices` also lists Linux's own USB devices.
+- !DiscIcon: HardDisc4 on the icon bar (Free, drag to copy), USB discs and
+  cards with the removable drive icon.
+- Configure: Updates (apt from the desktop, roll back), Linux network,
+  Scroll wheel direction (KVMWheel).
+- NetWatch: name servers follow the network.
+- PackMan set up with riscos-packages and riscosdev.com's list.
+- MbufManager (with MbufRes) for RISC OS before 5.31-7; GCCSDK's
+  ARMEABISupport 1.05 installed (1.08 isn't stable on RISC OS on Linux);
+  Iconv 0.91.
+
+### FileCore discs (with RISC OS 5.31-10)
+
+- rol-usbd recognises a disc or partition in RISC OS's FileCore format
+  (the boot block's checksum and disc record), leaves it unmounted, lists
+  it in `/riscos/mediactl/filecore` and hands it out, opened exclusively
+  (`O_EXCL`, so Linux can't mount it meanwhile) with `O_DSYNC`, on the
+  abstract socket `rol-usbd-discs`.
+  Only USB discs, removable cards and SD cards in the machine's own slot
+  (by the card's MMC type), never internal discs (eMMC, SATA, NVMe). A disc RISC OS
+  set up (FileCore across the whole disc, even with a partition table: a
+  Pi card or SSD with its FAT Loader inside) is given whole, none of its
+  partitions mounted. The check also wants FileCore's ID length and a
+  size that fits the disc (a FAT image is rejected).
+- SCSILinux: the SCSISwitch driver (in place of SCSISoftUSB) that makes
+  each one a SCSI device for RISC OS Open's SCSIFS and SCSIFiler, doing
+  their commands on the disc (reads and writes of its sectors, its size,
+  INQUIRY, sense data). `SCSILinux$Test` names a disc image file to use as
+  a disc, for testing. One unit (LUN 0) per disc. A disc is removable (`SCSI::0` on) or fixed (`SCSI::4` on) as Linux says.
+- `tests/filecore.sh`: HForm formats a disc image through SCSIFS and
+  SCSILinux; a file and a directory copied on and back must be identical
+  (contents and types); `*Verify`; a second boot reads again.
+
+### Tests
+
+- `t_select` (Socket_Select's timeout, 5.31-4), `t_sockopt` (5.31-6),
+  `t_accept` (data sent before Socket_Accept, 5.31-7), `t_mimetype`
+  (types from extensions, 5.31-8).
+
 ## 0.10 (2026-10-18)
 
 Running natively: on a processor that runs 32-bit ARM Linux programs (a

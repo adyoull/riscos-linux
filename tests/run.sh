@@ -88,6 +88,40 @@ if [ -f "$TB/out/modules/BASICVFP,ffa" ]; then
 elif [ ${#want[@]} -eq 0 ]; then
   echo "SKIP  basicvfp (no out/modules/BASICVFP,ffa: make basicvfp)"
 fi
+# IXFS: a file past 2GB (natively needs RISC OS 5.31-13)
+check ixfs-bigfile 0 '^bigfile ok' 120 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.bigfile/bas'
+# IXFS's free space (OS_FSControl 49 and 55): needs RISC OS 5.31-11
+check ixfs-freespace 0 '^freespace ok' 60 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.freespace/bas'
+# *IXRun (RISC OS 5.31-14): rol-cmd's @user request, as on the images, so
+# a host rol-cmd (images/fe/rol-cmd.c, built here) takes it from
+# /riscos/cmd. It needs root (it runs @user commands as uid 1000) and
+# RISC OS seeing the host's /riscos (under QEMU, not in the native VM).
+# (Without rol-cmd *IXRun uses a terminal, which reads the keyboard: under
+# rol-run stdin isn't connected, so that route can't be checked here.)
+ixrun_names='ixrun-path ixrun-user ixrun-status'
+ixrun_wanted=1
+if [ ${#want[@]} -gt 0 ]; then
+  ixrun_wanted=0
+  for n in $ixrun_names; do printf '%s\n' "${want[@]}" | grep -qx "$n" && ixrun_wanted=1; done
+fi
+if [ "$ixrun_wanted" = 1 ]; then
+  if [ "$(id -u)" = 0 ] && [ -z "${ROL_VM:-}" ] && command -v cc >/dev/null &&
+     mkdir -p "$T" /riscos/cmd && cc -O2 -o "$T/rol-cmd-host" "$TB/images/fe/rol-cmd.c" 2>/dev/null; then
+    "$T/rol-cmd-host" & ixrun_pid=$!
+    check ixrun-path 0 '^ixrun ok' 60 '' -- -c 'IXRun echo ixrun ok'
+    check ixrun-user 0 '^1000$' 60 '' -- -c 'IXRun id -u'
+    check ixrun-status 125 'The Linux command failed' 60 '' -- -c 'IXRun exit 3'
+    kill "$ixrun_pid" 2>/dev/null; wait "$ixrun_pid" 2>/dev/null
+  else
+    echo "SKIP  $ixrun_names (needs root, QEMU and a C compiler for a host rol-cmd)"
+  fi
+fi
+# The HAL counter reloads at each centisecond tick, as on hardware
+# (needs RISC OS 5.31-15: it reloaded once a second)
+check hal-counter 0 '^halcounter ok' 60 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.halcounter/bas'
 check armeabisupport-info 0 'Running program 0, nested 0' 60 '' -- -c 'ARMEABISupport_Info'
 # Privileged PSR instructions in code from disc (qemu/: emulated with the
 # port's virtual CPU modes): MRS, MSR CPSR_c, CPSID/CPSIE, then a SWI back
@@ -130,6 +164,24 @@ check vfp-switch-atomic 0 '^PASS$' 60 '' -- "$T/t_vfp_irq"
 # flags kept per context, and VFPSupport's own error numbers.
 check vfp-errors 0 '^PASS$' 60 '' -- "$T/t_vfp_errors"
 check vfp-errors-cortex-a8 0 '^PASS$' 60 QEMU_CPU=cortex-a8 -- "$T/t_vfp_errors"
+# Socket_Select with nothing to read returns 0 when its timeout (0.5 s, 1 s,
+# 5 ms, 0) runs out, and 1 at once with a datagram waiting. Needs a ROM of
+# 5.31-4 or later: before, a select that timed out spun forever.
+check select-timeout 0 '^PASS$' 60 '' -- "$T/t_select"
+# Socket_Getsockopt SO_TYPE (GLib needs it), an unknown TCP option refused,
+# Socket_Sendmsg's flags in R2, and Socket_Sendmsg_1. Needs a ROM of 5.31-6
+# or later (found by the web browser project).
+check sockopt 0 '^PASS$' 60 '' -- "$T/t_sockopt"
+# Socket_Select on an accepted socket whose peer sent before the accept
+# (RDP, TLS): readable and writable at once, and the data received. Needs
+# a ROM of 5.31-7 or later (RDPServer: "server not responding").
+check accept-select 0 '^PASS$' 60 '' -- "$T/t_accept"
+# the other end's close seen by select and read (needs RISC OS 5.31-12)
+check select-eof 0 '^PASS$' 60 '' -- "$T/t_eof"
+# IXFS gives a file with no RISC OS type the type MimeMap gives its
+# extension (photo/jpg is JPEG), as DOSFS does: USB discs and files Linux
+# programs wrote. Needs a ROM of 5.31-8 or later.
+check mimetype 0 '^PASS$' 60 '' -- "$T/t_mimetype"
 # Every VFP/NEON float instruction on special values in 16 FPSCR modes, and
 # the NEON integer ops QEMU does with whole-instruction helpers: CRCs of
 # all the results and flags. The CRCs are those of QEMU's exact (soft)
@@ -208,6 +260,9 @@ desk () {
 desk desktop-window 0 screen-1.png "220 300 ffffff 260 350 dddddd" -- "$T/t_wimp"
 desk desktop-exit-status 4 screen-1.png "220 300 ffffff" -- "$T/t_wimp" exit 4
 desk desktop-closed 4 screen.png "220 300 666666" -- "$T/t_wimp" exit 4
+# Wimp_PollIdle on an idle desktop: three null events, each 50 cs after
+# asking, after a file operation each time (exit status 7).
+desk desktop-pollidle 7 screen.png "" -- -w 15 "$T/t_pollidle"
 # Two desktop tasks keep their own VFP registers and rounding modes across
 # Wimp_Poll (the Wimp switches their contexts through VFPSupport); task A's
 # window shows both results (white work area at 220,300).

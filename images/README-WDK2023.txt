@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0006 for the Windows Dev Kit 2023 ("Project Volterra")
+RISC OS on Linux 1.0.0017 for the Windows Dev Kit 2023 ("Project Volterra")
 ===========================================================================
 Version 1.0, build 0006 (31 October 2026): Timothy
 Baldwin's Linux port of RISC OS 5 (RISC OS 5.31) with RISC OS Open's
@@ -90,6 +90,13 @@ for the first three minutes, for reading on another computer.
 
 Start-up log: IXFS:$.riscos.log/txt in RISC OS (/riscos/log.txt on the
 Linux partition).
+
+Other USB discs and SD cards: plug one in (into the Dev Kit or a hub)
+and its icon appears on the icon bar (after Apps), named by its volume
+label; click to open it. Linux mounts it (FAT, exFAT, NTFS or ext4) and
+RISC OS sees it through IXFS. Its menu has Free and Eject; eject before
+unplugging, so everything is written. Discs are let go cleanly at
+shutdown too.
 
 Licences: the Linux kernel is GPL-2.0 (source: kernel.org, v7.2); the
 device tree is the kernel's (BSD-3-Clause). RISC OS for Linux and

@@ -9,7 +9,10 @@ REM Commands run as root, so rol-cmd wants Linux's root password
 REM ("@password" line first; rc 77 when it's wrong, 78 when none is set
 REM yet, 79 after too many) and gives a token (NAME/tok) for five idle
 REM minutes ("@token" line). "@info" alone (rol-info: versions installed
-REM and available) needs no password.
+REM and available) needs no password. Changes shows, for each RISC OS on
+REM Linux package, what the versions newer than the one installed change
+REM (and what that one changed): rol-info's "@changes", from the list
+REM Check for updates fetches.
 REM Copyright (c) 2026 Andrew Youll. MIT licence.
 ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
 DIM blk% 4096, ind% 8192, buf% 4100
@@ -22,6 +25,9 @@ REM or generic); any other is held
 pk$(3)="riscos-kernel-generic" : pkname$(3)="Linux kernel"
 pk$(4)="riscos-harddisc" : pkname$(4)="Desktop parts"
 DIM romv$(50) : nromv%=0
+REM the changes (rol-info's lines), and the Changes window's lines
+MAXC%=300 : DIM chl$(MAXC%) : nch%=0 : chseen%=FALSE
+MAXCL%=600 : DIM cl$(MAXCL%) : ncl%=0
 nl%=0 : cur$="" : indp%=0 : task%=0 : quit%=FALSE
 job$="" : pos%=0 : mode%=0 : sect$="" : ndeb%=0 : neterr%=FALSE
 rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
@@ -184,6 +190,9 @@ FOR i%=1 TO NP%
   ic%(20+i%)=FNdisplay(win%,F%+350,R%,y%)
   y%-=60
 NEXT
+REM what the new versions change
+ic%(8)=FNbutton(win%,R%-200,R%,y%+4,"Changes")
+y%-=64
 y%-=16
 SYS "Wimp_ResizeIcon",win%,g%,16,y%,W%-16,top%
 REM Debian
@@ -210,6 +219,7 @@ b%=blk%+2000
 b%!0=0 : b%!4=-H% : b%!8=W% : b%!12=0
 SYS "Wimp_SetExtent",win%,b%
 logw%=FNwin(200,120,LW%,560,600,&FF000002,"Updates: details")
+chw%=FNwin(240,160,LW%,640,640,&FF000002,"Updates: changes")
 REM the password dialogue: ic%(37) says what's wanted, ic%(38)/ic%(40)
 REM the password (twice when choosing one; ic%(39) labels the second)
 pww%=FNwin(340,500,1000,300,300,&87000012,"Root password")
@@ -379,11 +389,12 @@ CASE i% OF
   WHEN ic%(5) : PROCrollback
   WHEN ic%(6) : PROCstop
   WHEN ic%(7) : PROCopen(logw%) : PROClogchanged
+  WHEN ic%(8) : PROCchanges : PROCopen(chw%)
 ENDCASE
 ENDPROC
 
 DEF PROCcheck
-PROCrun("apt-get update --error-on=any && /usr/lib/riscos/rol-info",1)
+PROCrun("apt-get update --error-on=any && /usr/lib/riscos/rol-info --fetch",1)
 ENDPROC
 
 DEF PROCinstall
@@ -569,7 +580,8 @@ IF LEFT$(l$,1)="@" THEN
     WHEN "rom-versions" : nromv%=0
     WHEN "rollback" : rollback$=""
     WHEN "checked" : checked%=0 : nowt%=0 : ckn%=0
-    WHEN "end" : sect$=""
+    WHEN "changes" : nch%=0 : chseen%=TRUE
+    WHEN "end" : sect$="" : PROCchanges
     WHEN "machine" :
   ENDCASE
   ENDPROC
@@ -596,6 +608,7 @@ IF sect$<>"" THEN
     WHEN "rollback" : rollback$=l$
     WHEN "machine" : IF l$<>"" THEN pk$(3)="riscos-kernel-"+l$
     WHEN "checked" : ckn%+=1 : IF ckn%=1 THEN checked%=VAL(l$) ELSE nowt%=VAL(l$)
+    WHEN "changes" : IF nch%<MAXC% AND l$<>"" THEN chl$(nch%)=l$ : nch%+=1
   ENDCASE
   IF sect$="upgradable" OR sect$="checked" THEN debknown%=(checked%<>0 OR mode%=1 OR mode%=2)
 ENDIF
@@ -639,8 +652,8 @@ IF h%>LH% THEN LH%=h% : BL%=h% DIV 4
 ENDPROC
 
 DEF PROCredraw(w%)
-LOCAL more%,ox%,oy%,top%,bot%,i%,y%
-IF w%<>logw% THEN
+LOCAL more%,ox%,oy%,top%,bot%,i%,y%,n%,t$
+IF w%<>logw% AND w%<>chw% THEN
   SYS "Wimp_RedrawWindow",,blk% TO more%
   WHILE more% : SYS "Wimp_GetRectangle",,blk% TO more% : ENDWHILE
   ENDPROC
@@ -650,16 +663,91 @@ WHILE more%
   ox%=blk%!4-blk%!20 : oy%=blk%!16-blk%!24
   REM every line that reaches into the rectangle, a line either side to be sure
   top%=(oy%-16-blk%!40) DIV LH%-1 : bot%=(oy%-16-blk%!32) DIV LH%+1
+  IF w%=chw% THEN n%=ncl% ELSE n%=nl%
   IF top%<0 THEN top%=0
-  IF bot%>nl%-1 THEN bot%=nl%-1
+  IF bot%>n%-1 THEN bot%=n%-1
   SYS "Wimp_TextOp",0,&00000000,&FFFFFF00
   FOR i%=top% TO bot%
     y%=oy%-16-(i%+1)*LH%+BL%
-    IF line$(i%)<>"" THEN SYS "Wimp_TextOp",2,line$(i%),-1,-1,ox%+16,y%
+    IF w%=chw% THEN t$=cl$(i%) ELSE t$=line$(i%)
+    IF t$<>"" THEN SYS "Wimp_TextOp",2,t$,-1,-1,ox%+16,y%
   NEXT
   SYS "Wimp_GetRectangle",,blk% TO more%
 ENDWHILE
 ENDPROC
+
+REM --- the Changes window ------------------------------------------------
+
+REM For each package: the versions newer than the one installed (newest
+REM first), then what the installed one changed; from rol-info's lines
+REM "h|new or now|PACKAGE|VERSION|DATE" and the text in "t|..." lines
+REM after each
+DEF PROCchanges
+LOCAL i%,j%,f$,m$,v$,d$,any%,new%,h%,b%
+ncl%=0
+IF NOT chseen% OR nch%=0 THEN
+  PROCcl("No list of changes yet: Check for updates fetches it.")
+ELSE
+  FOR i%=1 TO NP%
+    IF inst$(i%)<>"" THEN
+      PROCcl(pkname$(i%)+" ("+pk$(i%)+"), "+inst$(i%)+" installed")
+      new%=FALSE : any%=FALSE
+      FOR j%=0 TO nch%-1
+        IF LEFT$(chl$(j%),2)="h|" THEN
+          f$=MID$(chl$(j%),3)
+          m$=FNfield(f$,1) : v$=FNfield(f$,3) : d$=FNfield(f$,4)
+          IF FNfield(f$,2)=pk$(i%) THEN
+            any%=TRUE
+            IF m$="new" THEN new%=TRUE : PROCcl("  New in "+v$+" ("+d$+"):") ELSE PROCcl("  "+v$+", the one installed ("+d$+"):")
+            PROCentry(j%+1)
+          ENDIF
+        ENDIF
+      NEXT
+      IF NOT new% THEN PROCcl("  Up to date.")
+      IF NOT any% AND NOT new% THEN PROCcl("  (No changes listed for this version.)")
+      PROCcl("")
+    ENDIF
+  NEXT
+ENDIF
+h%=ncl%*LH%+32 : IF h%<640 THEN h%=640
+b%=blk%+2048
+b%!0=0 : b%!4=-h% : b%!8=LW% : b%!12=0
+SYS "Wimp_SetExtent",chw%,b%
+SYS "Wimp_ForceRedraw",chw%,0,-h%,LW%,0
+ENDPROC
+
+REM the text of the entry whose lines start at chl$(j%), wrapped to fit
+DEF PROCentry(j%)
+LOCAL c$,w$,l$,k%
+l$="    "
+WHILE j%<nch% AND LEFT$(chl$(j%),2)="t|"
+  c$=MID$(chl$(j%),3)+" "
+  WHILE c$<>""
+    k%=INSTR(c$," ") : w$=LEFT$(c$,k%-1) : c$=MID$(c$,k%+1)
+    IF w$<>"" THEN
+      IF LEN(l$)+LEN(w$)>92 AND LEN(l$)>4 THEN PROCcl(l$) : l$="    "
+      IF LEN(l$)>4 THEN l$+=" "
+      l$+=w$
+    ENDIF
+  ENDWHILE
+  j%+=1
+ENDWHILE
+IF LEN(l$)>4 THEN PROCcl(l$)
+ENDPROC
+
+DEF PROCcl(t$)
+IF ncl%<MAXCL% THEN cl$(ncl%)=t$ : ncl%+=1
+ENDPROC
+
+REM field N (from 1) of a line of fields separated by "|"
+DEF FNfield(s$,n%)
+LOCAL k%
+WHILE n%>1
+  k%=INSTR(s$,"|") : IF k%=0 THEN =""
+  s$=MID$(s$,k%+1) : n%-=1
+ENDWHILE
+k%=INSTR(s$+"|","|")
+=LEFT$(s$,k%-1)
 
 REM --- the password ------------------------------------------------------
 

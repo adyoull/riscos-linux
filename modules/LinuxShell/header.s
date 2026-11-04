@@ -23,7 +23,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"LinuxShell"
-help:	.asciz	"LinuxShell\t0.02 (30 Oct 2026) Linux commands from RISC OS"
+help:	.asciz	"LinuxShell\t0.03 (03 Nov 2026) Linux commands from RISC OS"
 	.align	2
 commands:
 	.asciz	"Linux"
@@ -38,7 +38,16 @@ commands:
 	.word	0				@ no parameters
 	.word	0
 	.word	pw_help - module_start
+	.asciz	"LinuxUser"
+	.align	2
+	.word	cm_command_2 - module_start
+	.word	0x00FF0001			@ 1 to 255 parameters
 	.word	0
+	.word	user_help - module_start
+	.word	0
+user_help:
+	.asciz	"*LinuxUser runs a Linux command as RISC OS's own Linux user (riscos, not root: no password) and prints what it prints. *IXRun does this in protected RISC OS. Escape stops it.\rSyntax: *LinuxUser <command>\r  e.g. *LinuxUser ls -l /riscos/HardDisc4"
+	.align	2
 pw_help:
 	.asciz	"*LinuxPassword sets Linux's root password, which *Linux and !Updates ask for (it asks for the current one first).\rSyntax: *LinuxPassword"
 	.align	2
@@ -59,3 +68,4 @@ escape_state:
 	.include "cmodule.inc"
 	CM_COMMAND 0
 	CM_COMMAND 1
+	CM_COMMAND 2

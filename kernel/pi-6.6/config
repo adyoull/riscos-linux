@@ -1333,7 +1333,7 @@ CONFIG_PREVENT_FIRMWARE_BUILD=y
 #
 CONFIG_FW_LOADER=y
 CONFIG_EXTRA_FIRMWARE="brcm/brcmfmac43455-sdio.bin brcm/brcmfmac43455-sdio.clm_blob brcm/brcmfmac43455-sdio.txt brcm/brcmfmac43430-sdio.bin brcm/brcmfmac43430-sdio.clm_blob brcm/brcmfmac43430-sdio.txt brcm/brcmfmac43436-sdio.bin brcm/brcmfmac43436-sdio.clm_blob brcm/brcmfmac43436-sdio.txt brcm/brcmfmac43436s-sdio.bin brcm/brcmfmac43436s-sdio.txt regulatory.db regulatory.db.p7s"
-CONFIG_EXTRA_FIRMWARE_DIR="/home/claude/wifi/kfw"
+CONFIG_EXTRA_FIRMWARE_DIR="firmware"
 # CONFIG_FW_LOADER_USER_HELPER is not set
 # CONFIG_FW_LOADER_COMPRESS is not set
 # CONFIG_FW_UPLOAD is not set

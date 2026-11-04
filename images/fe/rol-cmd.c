@@ -28,6 +28,11 @@
  *   79  too many wrong passwords: wait a minute
  * A request of just "@info" runs /usr/lib/riscos/rol-info (what the
  * Updates plug-in shows: versions installed and available) without one.
+ * A request starting "@user" runs its command as RISC OS's own Linux user
+ * (riscos, uid 1000; *LinuxUser, and protected RISC OS's *IXRun): that
+ * can't change the system, so it needs no password. It can't gain
+ * privileges (no_new_privs: setuid programs don't), starts in HardDisc4
+ * and has HOME /riscos. Only RISC OS (and root) can write /riscos/cmd.
  * The password is Linux's own root password (in /etc/shadow, which RISC OS
  * can't read), so RISC OS can set and change the root password this way.
  * Forgotten: put a file called RESETPW on the card's FAT partition; init
@@ -51,6 +56,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <grp.h>
+#include <sys/prctl.h>
 
 #define DIR_PATH "/riscos/cmd"
 #define TOKEN_IDLE 300		/* seconds a token lasts unused */
@@ -58,6 +65,8 @@
 #define RC_AUTH 77
 #define RC_NOPASS 78
 #define RC_WAIT 79
+#define RO_UID 1000		/* RISC OS's own Linux user (init: protected RISC OS) */
+#define RO_GID 1000
 #define MAXJOBS 8
 
 static struct job { pid_t pid; char name[64]; } jobs[MAXJOBS];
@@ -352,12 +361,20 @@ start (const char *file, const char *name)
     n = 0;
   cmd[n] = 0;
   char *run;
-  int arc;
+  int arc, asuser = 0;
   /* "@info" alone: rol-info (installed RISC OS on Linux packages, updates
      apt last found), which tells nothing secret: no password needed */
   static char info[] = "/usr/lib/riscos/rol-info";
   if (!strncmp (cmd, "@info", 5) && (cmd[5] == 0 || cmd[5] == '\n' || cmd[5] == '\r'))
     run = info, arc = 0;
+  else if (!strncmp (cmd, "@user", 5) && (cmd[5] == '\n' || cmd[5] == '\r'))
+    {
+      /* as RISC OS's own user: no password */
+      run = cmd + 6;
+      while (*run == '\n' || *run == '\r')
+	run++;
+      arc = 0, asuser = 1;
+    }
   else
     arc = authorise (cmd, &run, name);
   if (run >= cmd && run < cmd + sizeof cmd)
@@ -390,6 +407,23 @@ start (const char *file, const char *name)
       if (out > 2)
 	close (out);
       clearenv ();
+      if (asuser)
+	{
+	  gid_t g = RO_GID;
+	  if (setgroups (1, &g) || setgid (RO_GID) || setuid (RO_UID) || setuid (0) == 0)
+	    _exit (126);
+	  prctl (PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+	  setenv ("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+	  setenv ("HOME", "/riscos", 1);
+	  setenv ("TERM", "dumb", 1);
+	  setenv ("LANG", "C.UTF-8", 1);
+	  if (chdir ("/riscos/HardDisc4") != 0 && chdir ("/riscos") != 0 && chdir ("/") != 0)
+	    _exit (126);
+	  if (access ("/usr/bin/stdbuf", X_OK) == 0)
+	    execl ("/usr/bin/stdbuf", "stdbuf", "-oL", "-eL", "/bin/sh", "-c", run, (char *) NULL);
+	  execl ("/bin/sh", "sh", "-c", run, (char *) NULL);
+	  _exit (127);
+	}
       setenv ("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
       setenv ("HOME", "/root", 1);
       setenv ("TERM", "dumb", 1);

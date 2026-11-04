@@ -32,7 +32,7 @@ CFLAGS := -O2 -marm -march=armv7-a -mno-unaligned-access -fpie -fvisibility=hidd
 LDFLAGS := -nostdlib -static -Wl,--no-dynamic-linker -Wl,-T,common/module.ld \
            -Wl,--build-id=none -Wl,-z,norelro
 
-all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa $(OUT)/MbufRes,ffa
+all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa $(OUT)/MbufRes,ffa $(OUT)/LinuxOverlay,ffa $(OUT)/SCSILinux,ffa
 
 $(OBJ) $(OUT):
 	mkdir -p $@
@@ -125,6 +125,48 @@ $(OUT)/LinuxAudio,ffa: $(OBJ)/LinuxAudio.elf $(OBJ)/LinuxAudio-at64k.elf common/
 	  0x$$($(NM) $(OBJ)/LinuxAudio.elf | awk '$$3=="__got_start"{print $$1}') \
 	  0x$$($(NM) $(OBJ)/LinuxAudio.elf | awk '$$3=="__got_end"{print $$1}')
 	cp $(OBJ)/la0.bin $@
+
+# --- LinuxOverlay (GraphicsV's overlay calls, for VideoOverlay) -------------
+LO_OBJS := $(OBJ)/lo-header.o $(OBJ)/lo-overlay.o $(OBJ)/ae-cmodule.o
+
+$(OBJ)/lo-header.o: LinuxOverlay/header.s common/cmodule.inc | $(OBJ)
+	$(AS) -I common -o $@ $<
+$(OBJ)/lo-overlay.o: LinuxOverlay/linuxoverlay.c common/cmodule.h | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ)/LinuxOverlay.elf: $(LO_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LO_OBJS) -lgcc
+$(OBJ)/LinuxOverlay-at64k.elf: $(LO_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--defsym=__link_base=0x10000 -o $@ $(LO_OBJS) -lgcc
+
+$(OUT)/LinuxOverlay,ffa: $(OBJ)/LinuxOverlay.elf $(OBJ)/LinuxOverlay-at64k.elf common/check-pic.py | $(OUT)
+	$(OBJCOPY) -O binary $(OBJ)/LinuxOverlay.elf $(OBJ)/lo0.bin
+	$(OBJCOPY) -O binary $(OBJ)/LinuxOverlay-at64k.elf $(OBJ)/lo1.bin
+	python3 -B common/check-pic.py $(OBJ)/lo0.bin $(OBJ)/lo1.bin 0x10000 \
+	  0x$$($(NM) $(OBJ)/LinuxOverlay.elf | awk '$$3=="__got_start"{print $$1}') \
+	  0x$$($(NM) $(OBJ)/LinuxOverlay.elf | awk '$$3=="__got_end"{print $$1}')
+	cp $(OBJ)/lo0.bin $@
+
+# --- SCSILinux (FileCore discs through Linux, for SCSIFS) -------------------
+SL_OBJS := $(OBJ)/sl-header.o $(OBJ)/sl-scsi.o $(OBJ)/ae-cmodule.o
+
+$(OBJ)/sl-header.o: SCSILinux/header.s common/cmodule.inc | $(OBJ)
+	$(AS) -I common -o $@ $<
+$(OBJ)/sl-scsi.o: SCSILinux/scsilinux.c common/cmodule.h | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ)/SCSILinux.elf: $(SL_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SL_OBJS) -lgcc
+$(OBJ)/SCSILinux-at64k.elf: $(SL_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--defsym=__link_base=0x10000 -o $@ $(SL_OBJS) -lgcc
+
+$(OUT)/SCSILinux,ffa: $(OBJ)/SCSILinux.elf $(OBJ)/SCSILinux-at64k.elf common/check-pic.py | $(OUT)
+	$(OBJCOPY) -O binary $(OBJ)/SCSILinux.elf $(OBJ)/sl0.bin
+	$(OBJCOPY) -O binary $(OBJ)/SCSILinux-at64k.elf $(OBJ)/sl1.bin
+	python3 -B common/check-pic.py $(OBJ)/sl0.bin $(OBJ)/sl1.bin 0x10000 \
+	  0x$$($(NM) $(OBJ)/SCSILinux.elf | awk '$$3=="__got_start"{print $$1}') \
+	  0x$$($(NM) $(OBJ)/SCSILinux.elf | awk '$$3=="__got_end"{print $$1}')
+	cp $(OBJ)/sl0.bin $@
 
 # --- LinuxCodec (Linux's V4L2 video decoders for RISC OS programs) ----------
 LC_OBJS := $(OBJ)/lc-header.o $(OBJ)/lc-codec.o $(OBJ)/ae-cmodule.o

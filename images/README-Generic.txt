@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0006 for 64-bit ARM machines (31 October 2026)
+RISC OS on Linux 1.0.0017 for 64-bit ARM machines (4 November 2026)
 ===================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
@@ -74,6 +74,12 @@ file, and the next *Linux or !Updates asks you to choose a new one.
 What it guards against: a RISC OS program quietly running Linux commands
 as root. It can't stop a program that watches what you type (RISC OS
 programs all share one Linux user).
+
+USB discs and SD cards: plug one in and its icon appears on the icon
+bar (after Apps), named by its volume label; click to open it. Linux
+mounts it (FAT, exFAT, NTFS or ext4) and RISC OS sees it through IXFS.
+Its menu has Free and Eject; eject before unplugging, so everything is
+written. Discs are let go cleanly at shutdown too.
 
 USB devices for RISC OS programs: Linux drives the USB
 hardware, so RISC OS's own USB stack can't run; instead the image's

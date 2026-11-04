@@ -9,7 +9,7 @@ OUT ?= ../../out/tests
 UNIXLIB_DIR ?= ../../out/unixlib
 UNIXLIB_A := $(wildcard $(UNIXLIB_DIR)/libunixlib.a)
 UL_LDFLAGS := $(if $(UNIXLIB_A),-L$(abspath $(UNIXLIB_DIR)))
-PROGS := t_exit t_vfpsupport t_cxx t_mmap t_system t_files t_crash t_threads t_vfp_threads t_wimp t_wimp_vfp t_elementary t_vfp_irq t_rool_elementary t_clib t_iconv t_fpconform t_neonint t_fpchain t_fpchain_long t_vfp_errors
+PROGS := t_exit t_vfpsupport t_cxx t_mmap t_system t_files t_crash t_threads t_vfp_threads t_wimp t_wimp_vfp t_elementary t_vfp_irq t_rool_elementary t_clib t_iconv t_fpconform t_neonint t_fpchain t_fpchain_long t_vfp_errors t_select t_sockopt t_accept t_eof t_mimetype t_pollidle
 
 all: $(addprefix $(OUT)/,$(PROGS))
 

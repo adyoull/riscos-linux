@@ -142,7 +142,7 @@ static struct
   unsigned emul_lo[8], emul_hi[8];
   int emul_n;
   /* counts, for *NativeSupport */
-  unsigned cond_skipped, lur_thumb, thumb_returns, squeezed_skipped;
+  unsigned cond_skipped, lur_thumb, thumb_returns, squeezed_skipped, lur_stubbed;
   unsigned cp15_barriers, cp15_rewritten, abtdump_sw;
   unsigned da_low, da_high, da_over;
   int tchk_ok;
@@ -276,6 +276,30 @@ static unsigned *site_hits;
 struct other_trap { unsigned pc, insn, n; };
 #define OTHER_N 32
 static struct other_trap other_traps[OTHER_N];
+/* and traps of instructions whose condition failed (skipped), by pc: some
+   processors trap these, and each costs a signal */
+static struct other_trap skip_traps[OTHER_N];
+static unsigned reset_cs;	/* when the counts started (monotonic cs) */
+static unsigned mono_cs (void);
+
+static void
+trap_count (struct other_trap *t, unsigned pc, unsigned w)
+{
+  int k, e = -1;
+  for (k = 0; k < OTHER_N; k++)
+    if (t[k].pc == pc)
+      break;
+    else if (e < 0 && !t[k].n)
+      e = k;
+  if (k == OTHER_N)
+    k = e;
+  if (k >= 0)
+    {
+      t[k].pc = pc;
+      t[k].insn = w;
+      t[k].n++;
+    }
+}
 static unsigned nsites;
 
 static unsigned
@@ -486,6 +510,71 @@ branch_to (unsigned from, unsigned to, unsigned cond)
   if (off < -0x2000000 || off >= 0x2000000)
     return 0;
   return cond << 28 | 0x0a000000u | (((unsigned) off >> 2) & 0xffffff);
+}
+
+/* LoadUsrRegisters' Thumb fix (see KIND_LUR in ill_body) without a
+   signal: its first instruction (mov r9, lr) becomes a branch to a stub
+   that does the fix in user-mode instructions:
+     tst   r3, #&20			@ returning to Thumb code?
+     bicne r3, r3, #&20		@ then without the T bit,
+     ldrne r9, [r1, #60]		@ and with bit 0 of the pc set
+     orrne r9, r9, #1
+     strne r9, [r1, #60]
+     mov   r9, lr			@ the instruction it replaces
+     b     LoadUsrRegisters + 4
+   (r9 and the flags are free here: the next instruction sets r9 and the
+   routine ends by loading the PSR from r3.) The kernel returns to user
+   mode through it, so it is called very often: as a trapping site it cost
+   a signal each time (2.3 million in a RiscOSM map draw, about 10 s on a
+   Pi 4). The stub goes in the ROM image's unused fill (&FF bytes) near
+   its end, within a branch's reach; if there is none, the trap is used. */
+static void sync_code (unsigned lo, unsigned hi);
+static int rom_writable (unsigned lo, unsigned hi, int on);
+
+static int
+lur_stub (void)
+{
+  unsigned lur = LOADUSRREGISTERS;
+  if (*(volatile unsigned *) lur != 0xe1a0900eu)	/* mov r9, lr */
+    return 0;
+  /* the highest 16 words of fill, below the last 1KB (signatures) */
+  unsigned *slot = NULL;
+  for (unsigned a = ROM_HI - 1024 - 64; a >= ROM_HI - 0x80000u; a -= 64)
+    {
+      unsigned *q = (unsigned *) a;
+      int i = 0;
+      while (i < 16 && q[i] == 0xffffffffu)
+	i++;
+      if (i == 16)
+	{
+	  slot = q;
+	  break;
+	}
+    }
+  if (!slot)
+    return 0;
+  unsigned to = branch_to (lur, (unsigned) slot, 14);
+  unsigned back = branch_to ((unsigned) (slot + 6), lur + 4, 14);
+  if (!to || !back)
+    return 0;
+  if (!rom_writable ((unsigned) slot, (unsigned) (slot + 7), 1))
+    return 0;
+  slot[0] = 0xe3130020u;	/* tst r3, #&20 */
+  slot[1] = 0x13c33020u;	/* bicne r3, r3, #&20 */
+  slot[2] = 0x1591903cu;	/* ldrne r9, [r1, #60] */
+  slot[3] = 0x13899001u;	/* orrne r9, r9, #1 */
+  slot[4] = 0x1581903cu;	/* strne r9, [r1, #60] */
+  slot[5] = 0xe1a0900eu;	/* mov r9, lr */
+  slot[6] = back;
+  rom_writable ((unsigned) slot, (unsigned) (slot + 7), 0);
+  sync_code ((unsigned) slot, (unsigned) (slot + 7));
+  if (!rom_writable (lur, lur + 4, 1))
+    return 0;
+  *(volatile unsigned *) lur = to;
+  rom_writable (lur, lur + 4, 0);
+  sync_code (lur, lur + 4);
+  ns.lur_stubbed = 1;
+  return 1;
 }
 
 static int
@@ -1284,7 +1373,8 @@ ill_body (int sig, void *si, void *uc)
       /* An instruction whose condition fails does nothing. But the
 	 architecture lets a processor raise "undefined instruction" for an
 	 undefined one even when its condition fails, and some do (the
-	 Snapdragon 8cx Gen 3's Cortex-A78C and X1C; the Cortex-A72 doesn't):
+	 Snapdragon 8cx Gen 3's Cortex-A78C and X1C, and a Pi 4's Cortex-A72 for
+	 some, 30 million in a day's use):
 	 for one, the "LDMNE sp!, {..., pc}^" after the C library's
 	 "TEQ pc, pc" (26- or 32-bit?), which on any 32-bit processor is
 	 skipped. Skip it, as a processor that doesn't trap it would. */
@@ -1292,6 +1382,7 @@ ill_body (int sig, void *si, void *uc)
 	{
 	  R[15] = pc + 4;
 	  ns.cond_skipped++;
+	  trap_count (skip_traps, pc, w);
 	  return;
 	}
       /* SETEND LE/BE (ARMv6; trapped by Linux kernels that don't emulate
@@ -1341,22 +1432,7 @@ ill_body (int sig, void *si, void *uc)
 	  site_hits[2 * k + 1] = pc;
 	}
       if (!s)
-	{
-	  int k, e = -1;
-	  for (k = 0; k < OTHER_N; k++)
-	    if (other_traps[k].pc == pc)
-	      break;
-	    else if (e < 0 && !other_traps[k].n)
-	      e = k;
-	  if (k == OTHER_N)
-	    k = e;
-	  if (k >= 0)
-	    {
-	      other_traps[k].pc = pc;
-	      other_traps[k].insn = w;
-	      other_traps[k].n++;
-	    }
-	}
+	trap_count (other_traps, pc, w);
       if (s)
 	{
 	  unsigned orig = s->orig;
@@ -3229,6 +3305,7 @@ mod_init (const char *tail, int instance, void *pw)
 	return ERR (bad_rom);
   }
   sites = rma_claim (SITES_MAX * sizeof *sites);
+  reset_cs = mono_cs ();
   site_hits = rma_claim (SITES_MAX * 8);
   if (site_hits)
     for (unsigned i = 0; i < SITES_MAX * 2; i++)
@@ -3287,7 +3364,8 @@ mod_init (const char *tail, int instance, void *pw)
   (void) pw;
   patch_modules (self);
   patch_cacheflush (0x20800000u, 0x20804000u);	/* the HAL */
-  if (ns.lur_ok && rom_writable (LOADUSRREGISTERS, LOADUSRREGISTERS + 4, 1))
+  if (ns.lur_ok && !lur_stub ()
+      && rom_writable (LOADUSRREGISTERS, LOADUSRREGISTERS + 4, 1))
     {
       site_add ((unsigned *) LOADUSRREGISTERS, KIND_LUR);
       rom_writable (LOADUSRREGISTERS, LOADUSRREGISTERS + 4, 0);
@@ -3439,6 +3517,86 @@ line_out (const char *label, unsigned v)
   newline ();
 }
 
+/* " (Module+offset)" for an address in a module's code */
+static void
+where_out (unsigned pc)
+{
+  regs r = {{ 12, 0, 0 }};
+  for (int n = 0; n < 400 && !swix_regs (0x1E, &r); n++)	/* OS_Module 12 */
+    {
+      unsigned base = r.r[3], len = *(unsigned *) (base - 4);
+      if (pc >= base && pc - base < len && len < 0x400000u)
+	{
+	  const char *t = (const char *) base + *(unsigned *) (base + 16);
+	  char b[40];
+	  int i = 0;
+	  while (i < 31 && t[i] > ' ')
+	    b[i] = t[i], i++;
+	  b[i] = 0;
+	  write0 (" (");
+	  write0 (b);
+	  write0 ("+&");
+	  write_hex8 (pc - base);
+	  write0 (")");
+	  return;
+	}
+      r.r[0] = 12;
+    }
+}
+
+/* the six commonest of a trap table, most first (not cleared) */
+static void
+list_traps (const char *label, struct other_trap *t)
+{
+  int done[6], nd = 0;
+  for (int r = 0; r < 6; r++)
+    {
+      int bi = -1;
+      unsigned best = 0;
+      for (int k = 0; k < OTHER_N; k++)
+	{
+	  int seen = 0;
+	  for (int j = 0; j < nd; j++)
+	    seen |= done[j] == k;
+	  if (!seen && t[k].n > best)
+	    best = t[k].n, bi = k;
+	}
+      if (bi < 0)
+	break;
+      done[nd++] = bi;
+      write0 (label);
+      write_hex8 (t[bi].pc);
+      write0 (" ");
+      write_hex8 (t[bi].insn);
+      write0 (" n ");
+      write_dec (best);
+      where_out (t[bi].pc);
+      newline ();
+    }
+}
+
+static unsigned
+mono_cs (void)
+{
+  regs r = {{ 0 }};
+  swix_regs (0x42, &r);		/* OS_ReadMonotonicTime */
+  return r.r[0];
+}
+
+/* *NativeSupport Reset: start the counts again */
+static void
+counts_reset (void)
+{
+  for (unsigned i = 0; site_hits && i < 2 * nsites; i++)
+    site_hits[i] = 0;
+  for (int k = 0; k < OTHER_N; k++)
+    other_traps[k].n = skip_traps[k].n = 0, other_traps[k].pc = skip_traps[k].pc = 0;
+  ns.cond_skipped = ns.emul_psr = ns.emul_priv = ns.getdents = ns.mem0 = 0;
+  ns.syncs = ns.full_syncs = ns.aborts = ns.ioc = ns.cp15_barriers = 0;
+  ns.patched_sync = ns.imb_full = ns.lur_thumb = ns.thumb_returns = 0;
+  reset_cs = mono_cs ();
+}
+
 /* the busiest sites and other traps, most first */
 static void
 hot_out (void)
@@ -3468,26 +3626,11 @@ hot_out (void)
 	write_dec (sites[bi].kind);
 	write0 (" hits ");
 	write_dec (best);
+	where_out (site_hits[2 * bi + 1]);
 	newline ();
       }
-  for (int r = 0; r < 6; r++)
-    {
-      int bi = -1;
-      unsigned best = 0;
-      for (int k = 0; k < OTHER_N; k++)
-	if (other_traps[k].n > best)
-	  best = other_traps[k].n, bi = k;
-      if (bi < 0)
-	break;
-      write0 ("Other trap: ");
-      write_hex8 (other_traps[bi].pc);
-      write0 (" ");
-      write_hex8 (other_traps[bi].insn);
-      write0 (" n ");
-      write_dec (best);
-      newline ();
-      other_traps[bi].n = 0;	/* (listed: cleared) */
-    }
+  list_traps ("Other trap: ", other_traps);
+  list_traps ("Skipped trap (condition failed): ", skip_traps);
 }
 
 oserror *
@@ -3500,11 +3643,26 @@ mod_command (int index, const char *tail, int argc)
       newline ();
       return NULL;
     }
-  /* *NativeSupport FastSWI On|Off */
+  /* *NativeSupport Reset */
   if (argc)
     {
       while (*tail == ' ')
 	tail++;
+      const char *w = "reset";
+      int i = 0;
+      while (w[i] && (tail[i] | 0x20) == w[i])
+	i++;
+      if (!w[i] && (unsigned char) tail[i] <= ' ')
+	{
+	  counts_reset ();
+	  write0 ("NativeSupport: counts started again");
+	  newline ();
+	  return NULL;
+	}
+    }
+  /* *NativeSupport FastSWI On|Off */
+  if (argc)
+    {
       const char *w = "fastswi ";
       int i = 0;
       while (w[i] && (tail[i] | 0x20) == w[i])
@@ -3527,6 +3685,7 @@ mod_command (int index, const char *tail, int argc)
   write0 ("RISC OS for Linux, native. Processor ");
   write_hex8 (ns.midr);
   newline ();
+  line_out ("Seconds counted (since start-up or *NativeSupport Reset): ", (mono_cs () - reset_cs) / 100);
   write0 ("Fast SWI entry (*NativeSupport FastSWI On|Off): ");
   write0 (ns.fastswi > 0 ? "on" : ns.fastswi ? "not in this Linux kernel" : "off");
   newline ();
@@ -3570,7 +3729,10 @@ mod_command (int index, const char *tail, int argc)
   line_out ("CP15 barriers replaced by ARMv7 ones: ", ns.cp15_rewritten);
   line_out ("Conditional mode instructions patched in veneers: ", veneer_psr);
   line_out ("User-register LDM/STM ^ patched: ", userbank_sites);
-  line_out ("Returns to Thumb code through LoadUsrRegisters: ", ns.lur_thumb);
+  write0 ("Returns to user mode (LoadUsrRegisters): ");
+  write0 (ns.lur_stubbed ? "without a signal (stub)" : "trapped");
+  newline ();
+  line_out ("Returns to Thumb code through LoadUsrRegisters (trapped): ", ns.lur_thumb);
   line_out ("Returns to Thumb code through the mode switch: ", ns.thumb_returns);
   line_out ("Squeezed programs not patched until unsqueezed: ", ns.squeezed_skipped);
   line_out ("Whole-cache synchronisation seen: ", ns.imb_full);

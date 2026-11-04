@@ -75,11 +75,17 @@ cp -a "$extras/!ROLUpdate" "$boot/Resources/Configure/"
 # root certificates for https (PackMan), and PackMan's sources with ours
 cp -a "$extras/!CaCertificates" "$boot/Resources/"
 mkdir -p "$boot/Choices/PackMan" && cp "$extras/Choices/PackMan/Sources,fff" "$boot/Choices/PackMan/"
-# ARMEABISupport: GCCSDK's 1.08 in !System.310.Modules, where PackMan's
-# package puts it (an older copy in !System.500 would hide a newer one)
+# ARMEABISupport: GCCSDK's 1.05 (1.08 isn't stable on RISC OS on Linux) in
+# !System.310.Modules, where PackMan's package puts it (a copy in
+# !System.500 would hide it), and in TestBed.Modules for PreDesk's fallback
 rm -f "$boot/Resources/!System/500/Modules/ARMEABISupport,ffa"
-mkdir -p "$boot/Resources/!System/310/Modules"
-cp "$hd/TestBed/Modules/ARMEABISupport,ffa" "$boot/Resources/!System/310/Modules/"
+mkdir -p "$boot/Resources/!System/310/Modules" "$hd/TestBed/Modules"
+cp "$extras/Modules/ARMEABISupport,ffa" "$boot/Resources/!System/310/Modules/"
+cp "$extras/Modules/ARMEABISupport,ffa" "$hd/TestBed/Modules/"
+# MbufManager: RISC OS Open's 0.30 (MManagerBlob), which every RISC OS 5 ROM
+# has (Omni's LanManFS and Access need it), and MbufRes for its Messages
+# (a ROM's ResourceFS has them); PreDesk loads both if the ROM hasn't it
+cp "$extras/Modules/MManager,ffa" "$extras/Modules/MbufRes,ffa" "$hd/TestBed/Modules/"
 # the licences of what the image contains, and where the source is
 # (riscos-linux's licences/; "." becomes "_" in RISC OS names)
 lic=${LICENCES:-$HERE/../licences}

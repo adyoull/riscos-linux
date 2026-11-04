@@ -1149,6 +1149,75 @@ mod_final (int fatal)
   return 0;
 }
 
+/* The USB devices Linux keeps, from the list the image's rol-usbd writes
+   (/riscos/mediactl/usb: tab-separated lines, R or L, vendor:product,
+   speed in Mb/s, name, drivers, discs; "H", hubs) */
+static void
+linux_devices (void)
+{
+  static char buf[8192];
+  int fd = lsys (NR_open, (unsigned) "/riscos/mediactl/usb", O_CLOEXEC /* O_RDONLY */, 0, 0, 0, 0);
+  if (fd < 0)
+    return;
+  int n = lsys (NR_read, (unsigned) fd, (unsigned) buf, sizeof buf - 1, 0, 0, 0);
+  lclose (fd);
+  if (n <= 0)
+    return;
+  buf[n] = 0;
+  int title = 0;
+  for (char *l = buf; *l; )
+    {
+      char *end = l;
+      while (*end && *end != '\n')
+	end++;
+      char *next = *end ? end + 1 : end;
+      *end = 0;
+      char *f[6] = { 0 };
+      int nf = 0;
+      for (char *c = l; nf < 6; )
+	{
+	  f[nf++] = c;
+	  while (*c && *c != '\t')
+	    c++;
+	  if (!*c)
+	    break;
+	  *c++ = 0;
+	}
+      if (f[0][0] == 'L' && nf >= 5)
+	{
+	  if (!title++)
+	    {
+	      newline ();
+	      write0 ("Linux's USB devices (its drivers have them):");
+	      newline ();
+	    }
+	  write0 ("  ");
+	  write0 (f[3]);
+	  write0 ("  ");
+	  write0 (f[1]);
+	  write0 ("  ");
+	  write0 (f[2]);
+	  write0 (" Mb/s  ");
+	  write0 (f[4][0] ? f[4] : "(no driver yet)");
+	  if (nf >= 6 && f[5][0])
+	    {
+	      newline ();
+	      write0 ("    disc: ");
+	      write0 (f[5]);
+	    }
+	  newline ();
+	}
+      else if (f[0][0] == 'H' && nf >= 2 && f[1][0] != '0')
+	{
+	  write0 ("  (hubs: ");
+	  write0 (f[1]);
+	  write0 (")");
+	  newline ();
+	}
+      l = next;
+    }
+}
+
 oserror *
 mod_command (int index, const char *tail, int argc)
 {
@@ -1244,5 +1313,6 @@ mod_command (int index, const char *tail, int argc)
       write0 ("No USB devices given to RISC OS (Linux keeps those it has drivers for: keyboards, discs, ...)");
       newline ();
     }
+  linux_devices ();
   return 0;
 }

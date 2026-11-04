@@ -1,6 +1,8 @@
 /* rol-kvm: a headless screen for RISC OS for Linux.
  *
  *   rol-kvm [-o DIR] [-g WIDTHxHEIGHT] [-c FIFO] -- COMMAND [ARGS...]
+ *   (-c may also name a regular file, which is followed as it grows: lines
+ *   appended to it act as the FIFO's; tools/native-vm can't share a FIFO)
  *
  * Runs COMMAND (the port's ROM image, or qemu-arm-riscos with it) with a
  * SocketKVM connection, as the port's SDL front end does, but keeps the
@@ -371,22 +373,32 @@ main (int argc, char **argv)
   sock = sv[0];
   send_report (EV_RESIZE, gw, gh, 0);
 
-  int cfd = -1;
+  int cfd = -1, cfile = 0;
   if (fifo)
-    cfd = open (fifo, O_RDWR | O_NONBLOCK | O_CLOEXEC);	/* RDWR: never sees EOF */
+    {
+      /* a FIFO; or a regular file, followed as it grows (a FIFO can't be
+	 shared with tools/native-vm's VM over 9p) */
+      struct stat st;
+      cfile = stat (fifo, &st) == 0 && S_ISREG (st.st_mode);
+      cfd = open (fifo, (cfile ? O_RDONLY : O_RDWR | O_NONBLOCK) | O_CLOEXEC);	/* RDWR: never sees EOF */
+    }
   char cbuf[8192];
   size_t clen = 0;
   int status = 0;
   for (;;)
     {
       struct pollfd p[3] = { { sfd, POLLIN, 0 }, { sock, POLLIN, 0 }, { cfd, POLLIN, 0 } };
-      if (poll (p, cfd >= 0 ? 3 : 2, -1) < 0 && errno != EINTR)
+      if (poll (p, cfd >= 0 && !cfile ? 3 : 2, cfile ? 200 : -1) < 0 && errno != EINTR)
 	break;
+      if (cfile)
+	p[2].revents = POLLIN;
       if (p[1].revents & POLLIN)
 	read_messages ();
       if (cfd >= 0 && (p[2].revents & POLLIN))
 	{
 	  ssize_t n = read (cfd, cbuf + clen, sizeof cbuf - 1 - clen);
+	  if (n == 0 && cfile)
+	    p[2].revents = 0;
 	  if (n > 0)
 	    {
 	      clen += n;

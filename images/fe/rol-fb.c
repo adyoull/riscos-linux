@@ -66,7 +66,14 @@
 enum { R_MOUSE = 0, R_KEYDOWN = 1, R_KEYUP = 2, R_MODE_SYNC = 3,
        R_RESIZE = 4, R_CLOSE = 5, R_VERSION = 6 };
 enum { C_MODE_CHANGE = 0, C_SET_PALETTE = 1, C_POINTER = 2, C_SUSPEND = 3,
-       C_CLOSE_CTL = 4, C_VERSION = 6, C_ACTIVESCREEN = 7, C_STARTSCREEN = 8 };
+       C_CLOSE_CTL = 4, C_VERSION = 6, C_ACTIVESCREEN = 7, C_STARTSCREEN = 8,
+       C_LEDS = 9 };
+/* The protocol version this front end reports: 2 = it sets the keyboard
+   LEDs (C_LEDS), so SocketKVM sends them */
+#define FE_VERSION 2
+/* The keyboard LEDs as RISC OS has them (C_LEDS), -1 until it says */
+static int ro_leds = -1;
+static void set_leds (int fd);
 enum { RO_SELECT = 0x70, RO_MENU = 0x71, RO_ADJUST = 0x72 };
 
 struct report { int32_t reason; uint32_t a, b, c; };
@@ -121,6 +128,12 @@ send_report (int reason, uint32_t a, uint32_t b, uint32_t c)
 #define OV_BUFS 32
 static int ov_listen = -1, ov_client = -1;
 static uint32_t ov_plane, prim_plane, ov_zpos_ok;
+/* Drivers whose primary plane must stay at the bottom (the Pi's vc4: zpos
+   0, fixed; every overlay above it): with a video, the desktop goes on a
+   second overlay plane above the video's, and the primary shows black. */
+static uint32_t desk_plane, blk_fb, blk_handle;
+static int desk_on;
+static int ov_fake;			/* /riscos/overlay-test: no plane, log only */
 static int ov_need, ov_shown = -1;		/* ARGB desktop; index on screen */
 static int ov_x, ov_y, ov_w, ov_h;		/* RISC OS pixels: the key area */
 static struct { uint32_t fb, handle; } ov_buf[OV_BUFS];
@@ -244,6 +257,9 @@ drm_hide_cursor (void)
     fprintf (stderr, "rol-fb: no hardware cursor to hide (%s)\n", strerror (errno));
 }
 
+static void ov_under (void);
+static void blk_free (void);
+
 static int
 drm_setup (const struct drm_mode_modeinfo *mode)
 {
@@ -290,6 +306,16 @@ drm_setup (const struct drm_mode_modeinfo *mode)
       return -1;
     }
   drm_hide_cursor ();
+  if (desk_plane && !ov_need && desk_on)
+    {
+      /* the desktop back on the primary (just set): its plane off */
+      struct drm_mode_set_plane off = { .plane_id = desk_plane, .crtc_id = drm_crtc };
+      ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &off);
+      desk_on = 0;
+      blk_free ();
+    }
+  if (ov_need)
+    ov_under ();
   fb_w = mode->hdisplay;
   fb_h = mode->vdisplay;
   fb_stride = cd.pitch;
@@ -415,7 +441,12 @@ drm_match_mode (int w, int h)
                                        source rectangle in picture pixels)
                                   -> [1] the index shown before (now free) or -1
      4 HIDE                       -> [1] the index shown before or -1
-     5 FORGET                     (all buffers: the decoder's were remade) */
+     5 FORGET                     (all buffers: the decoder's were remade)
+     6 ALLOC index w h fourcc     a buffer made here (a dumb buffer, for
+                                  VideoOverlay through LinuxOverlay)
+                                  -> [1] size, [2..7] pitch/offset of each
+                                     plane (+ its dmabuf fd, to map)
+   SHOW's [10]: bit 0 BT.709 (else 601), bit 1 full range (else video). */
 static int
 prop_id (uint32_t obj, const char *name, uint64_t *value)
 {
@@ -471,7 +502,7 @@ ov_find_planes (void)
   struct drm_mode_get_plane_res pr = { .plane_id_ptr = (uintptr_t) planes, .count_planes = 64 };
   if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr))
     return;
-  ov_plane = prim_plane = 0;
+  ov_plane = prim_plane = desk_plane = 0;
   for (uint32_t i = 0; i < pr.count_planes && i < 64; i++)
     {
       uint32_t fmts[128];
@@ -482,14 +513,22 @@ ov_find_planes (void)
       prop_id (planes[i], "type", &type);
       if (type == 1 /* primary */ && !prim_plane)
 	prim_plane = planes[i];
-      if (type != 0 /* overlay */ || ov_plane)
+      if (type != 0 /* overlay */)
 	continue;
+      int yuv = 0, argb = 0;
       for (uint32_t f = 0; f < gp.count_format_types && f < 128; f++)
-	if (fmts[f] == DRM_FORMAT_YUV420)
-	  ov_plane = planes[i];
+	{
+	  yuv |= fmts[f] == DRM_FORMAT_YUV420;
+	  argb |= fmts[f] == DRM_FORMAT_ARGB8888;
+	}
+      if (yuv && !ov_plane)
+	ov_plane = planes[i];
+      else if (argb && !desk_plane)
+	desk_plane = planes[i];
     }
   if (ov_plane)
-    fprintf (stderr, "rol-fb: video overlay plane %u (primary %u)\n", ov_plane, prim_plane);
+    fprintf (stderr, "rol-fb: video overlay plane %u (primary %u, desktop over video %u)\n",
+	     ov_plane, prim_plane, desk_plane);
 }
 
 static void
@@ -498,6 +537,34 @@ ov_reply (int32_t a, int32_t b, int32_t c)
   int32_t m[16] = { a, b, c };
   if (ov_client >= 0)
     send (ov_client, m, sizeof m, MSG_NOSIGNAL);
+}
+
+/* A reply carrying a file descriptor */
+static void
+ov_reply_fd (const int32_t *m, int fd)
+{
+  union { char buf[CMSG_SPACE (sizeof (int))]; struct cmsghdr align; } ctl;
+  struct iovec iov = { (void *) m, 16 * sizeof (int32_t) };
+  struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = ctl.buf, .msg_controllen = sizeof ctl.buf };
+  struct cmsghdr *c = CMSG_FIRSTHDR (&msg);
+  c->cmsg_level = SOL_SOCKET;
+  c->cmsg_type = SCM_RIGHTS;
+  c->cmsg_len = CMSG_LEN (sizeof (int));
+  memcpy (CMSG_DATA (c), &fd, sizeof fd);
+  if (ov_client >= 0)
+    sendmsg (ov_client, &msg, MSG_NOSIGNAL);
+}
+
+/* The colours of what's on the overlay: BT.601/709, video/full range */
+static void
+ov_colours (int flags)
+{
+  static int now = -1;
+  if (flags == now || !ov_plane)
+    return;
+  now = flags;
+  set_prop (ov_plane, "COLOR_ENCODING", flags & 1 ? 1 : 0);
+  set_prop (ov_plane, "COLOR_RANGE", flags & 2 ? 1 : 0);
 }
 
 static void
@@ -530,6 +597,78 @@ ov_hide (void)
   return prev;
 }
 
+/* The desktop on desk_plane, over the video, with a black primary under
+   both (drm_setup has just set the CRTC with the desktop's framebuffer). */
+static void
+blk_free (void)
+{
+  if (blk_fb)
+    ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &blk_fb);
+  if (blk_handle)
+    {
+      struct drm_mode_destroy_dumb d = { .handle = blk_handle };
+      ioctl (drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+    }
+  blk_fb = blk_handle = 0;
+}
+
+static int
+desk_setup (void)
+{
+  desk_on = 0;
+  blk_free ();
+  if (!desk_plane || !have_cur_mode)
+    return -1;
+  struct drm_mode_create_dumb cd = { .width = cur_mode.hdisplay, .height = cur_mode.vdisplay, .bpp = 32 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd))
+    return -1;
+  blk_handle = cd.handle;		/* (dumb buffers start zeroed: black) */
+  struct drm_mode_fb_cmd fc = { .width = cd.width, .height = cd.height, .pitch = cd.pitch,
+				.bpp = 32, .depth = 24, .handle = cd.handle };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB, &fc))
+    return -1;
+  blk_fb = fc.fb_id;
+  if (set_prop (ov_plane, "zpos", 1) || set_prop (desk_plane, "zpos", 2))
+    return -1;
+  struct drm_mode_set_plane sp = { .plane_id = desk_plane, .crtc_id = drm_crtc, .fb_id = drm_fb,
+				   .crtc_w = cur_mode.hdisplay, .crtc_h = cur_mode.vdisplay,
+				   .src_w = (uint32_t) cur_mode.hdisplay << 16,
+				   .src_h = (uint32_t) cur_mode.vdisplay << 16 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp))
+    {
+      fprintf (stderr, "rol-fb: desktop plane: %s\n", strerror (errno));
+      return -1;
+    }
+  struct drm_mode_crtc cr = { .crtc_id = drm_crtc, .fb_id = blk_fb,
+			      .set_connectors_ptr = (uintptr_t) &drm_conn, .count_connectors = 1,
+			      .mode = cur_mode, .mode_valid = 1 };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_SETCRTC, &cr))
+    {
+      /* back to the desktop on the primary */
+      struct drm_mode_set_plane off = { .plane_id = desk_plane, .crtc_id = drm_crtc };
+      ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &off);
+      return -1;
+    }
+  desk_on = 1;
+  return 0;
+}
+
+/* Under the desktop if the driver allows it: the primary over the video,
+   else (vc4) the desktop on its own plane over the video's */
+static void
+ov_under (void)
+{
+  ov_zpos_ok = 0;
+  if (!ov_plane)
+    return;
+  if (prim_plane && set_prop (ov_plane, "zpos", 0) == 0 && set_prop (prim_plane, "zpos", 1) == 0)
+    ov_zpos_ok = 1;
+  else
+    ov_zpos_ok = desk_setup () == 0;
+  fprintf (stderr, "rol-fb: video %s the desktop%s\n", ov_zpos_ok ? "under" : "over",
+	   desk_on ? " (the desktop on its own plane)" : "");
+}
+
 /* The desktop's plane needs an alpha channel for the key: remake it */
 static void
 ov_want_alpha (int on)
@@ -539,8 +678,6 @@ ov_want_alpha (int on)
   ov_need = on;
   if (have_cur_mode)
     drm_setup (&cur_mode);
-  if (on && ov_plane && prim_plane)
-    ov_zpos_ok = set_prop (ov_plane, "zpos", 0) == 0 && set_prop (prim_plane, "zpos", 1) == 0;
   map_valid = 0;
 }
 
@@ -572,6 +709,13 @@ ov_message (void)
   switch (m[0])
     {
     case 1:				/* OPEN */
+      ov_fake = (drm_fd < 0 || !ov_plane) && access ("/riscos/overlay-test", F_OK) == 0;
+      if (ov_fake)
+	{
+	  fprintf (stderr, "rol-fb: overlay test: OPEN\n");
+	  ov_reply (0, (int32_t) OV_KEY, 1);
+	  break;
+	}
       if (drm_fd < 0 || !ov_plane)
 	{
 	  ov_reply (-ENODEV, 0, 0);
@@ -610,9 +754,109 @@ ov_message (void)
 	ov_reply (r ? -errno : 0, 0, 0);
 	break;
       }
+    case 6:				/* ALLOC */
+      {
+	int i = m[1], w = m[2], h = m[3];
+	uint32_t fourcc = (uint32_t) m[4];
+	int32_t r[16];
+	memset (r, 0, sizeof r);
+	if (ov_fake)
+	  {
+	    /* (memory only: what a dumb buffer's layout would be) */
+	    uint32_t yp = ((uint32_t) w + 63) & ~63u, ch = (uint32_t) (h + 1) / 2;
+	    r[1] = (int32_t) (yp * ((uint32_t) h + ch));
+	    r[2] = (int32_t) yp;
+	    r[4] = (int32_t) (fourcc == DRM_FORMAT_NV12 ? yp : yp / 2);
+	    r[5] = (int32_t) (yp * (uint32_t) h);
+	    r[6] = fourcc == DRM_FORMAT_NV12 ? 0 : (int32_t) (yp / 2);
+	    r[7] = fourcc == DRM_FORMAT_NV12 ? 0 : (int32_t) (yp * (uint32_t) h + yp / 2 * ch);
+	    int mf = (int) syscall (SYS_memfd_create, "rol-fb-overlay-test", 1u);
+	    if (mf < 0 || ftruncate (mf, r[1]) < 0)
+	      {
+		ov_reply (-ENOMEM, 0, 0);
+		if (mf >= 0)
+		  close (mf);
+		break;
+	      }
+	    fprintf (stderr, "rol-fb: overlay test: ALLOC %d %dx%d %.4s size %d\n", i, w, h, (char *) &fourcc, r[1]);
+	    ov_reply_fd (r, mf);
+	    close (mf);
+	    break;
+	  }
+	if (drm_fd < 0 || i < 0 || i >= OV_BUFS || w <= 0 || h <= 0 || w > 8192 || h > 8192
+	    || (fourcc != DRM_FORMAT_YUV420 && fourcc != DRM_FORMAT_NV12))
+	  {
+	    ov_reply (-EINVAL, 0, 0);
+	    break;
+	  }
+	if (ov_shown == i)
+	  ov_hide ();
+	if (ov_buf[i].fb)
+	  ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &ov_buf[i].fb);
+	if (ov_buf[i].handle)
+	  {
+	    struct drm_gem_close gc = { .handle = ov_buf[i].handle };
+	    ioctl (drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
+	  }
+	ov_buf[i].fb = ov_buf[i].handle = 0;
+	/* one 8-bit buffer: Y rows, then the chroma (each chroma row of the
+	   two 4:2:0 planes is half a Y row) */
+	uint32_t ch = (uint32_t) (h + 1) / 2;
+	struct drm_mode_create_dumb cd = { .width = ((uint32_t) w + 63) & ~63u, .height = (uint32_t) h + ch, .bpp = 8 };
+	if (ioctl (drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd))
+	  {
+	    ov_reply (-errno, 0, 0);
+	    break;
+	  }
+	uint32_t yp = cd.pitch & ~1u;
+	struct drm_mode_fb_cmd2 fc = { .width = (uint32_t) w, .height = (uint32_t) h, .pixel_format = fourcc };
+	fc.handles[0] = fc.handles[1] = cd.handle;
+	fc.pitches[0] = yp;
+	fc.offsets[1] = yp * (uint32_t) h;
+	if (fourcc == DRM_FORMAT_NV12)
+	  fc.pitches[1] = yp;
+	else
+	  {
+	    fc.handles[2] = cd.handle;
+	    fc.pitches[1] = fc.pitches[2] = yp / 2;
+	    fc.offsets[2] = fc.offsets[1] + yp / 2 * ch;
+	  }
+	struct drm_prime_handle ph = { .handle = cd.handle, .flags = DRM_CLOEXEC | DRM_RDWR, .fd = -1 };
+	if (ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB2, &fc) || ioctl (drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ph))
+	  {
+	    int e = errno;
+	    if (fc.fb_id)
+	      ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &fc.fb_id);
+	    struct drm_gem_close gc = { .handle = cd.handle };
+	    ioctl (drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
+	    ov_reply (-e, 0, 0);
+	    break;
+	  }
+	ov_buf[i].handle = cd.handle;
+	ov_buf[i].fb = fc.fb_id;
+	r[1] = (int32_t) cd.size;
+	for (int p = 0; p < 3; p++)
+	  {
+	    r[2 + p * 2] = (int32_t) fc.pitches[p];
+	    r[3 + p * 2] = (int32_t) fc.offsets[p];
+	  }
+	ov_reply_fd (r, ph.fd);
+	close (ph.fd);
+	break;
+      }
     case 3:				/* SHOW */
       {
 	int i = m[1];
+	if (ov_fake)
+	  {
+	    static int nshow;
+	    if (nshow++ < 40 || nshow % 100 == 0)
+	      fprintf (stderr, "rol-fb: overlay test: SHOW %d (#%d) at %d,%d %dx%d from %d,%d %dx%d colours %d\n",
+		       i, nshow, m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]);
+	    ov_reply (0, -1, 0);
+	    break;
+	  }
+	ov_colours (m[10]);
 	if (i < 0 || i >= OV_BUFS || !ov_buf[i].fb || width <= 0 || height <= 0)
 	  {
 	    ov_reply (-EINVAL, -1, 0);
@@ -645,6 +889,8 @@ ov_message (void)
 	break;
       }
     case 4:				/* HIDE */
+      if (ov_fake)
+	fprintf (stderr, "rol-fb: overlay test: HIDE\n");
       ov_reply (0, ov_hide (), 0);
       map_valid = 0;
       break;
@@ -682,7 +928,7 @@ ov_start (void)
   if (drm_fd < 0)
     return;
   ov_find_planes ();
-  if (!ov_plane)
+  if (!ov_plane && access ("/riscos/overlay-test", F_OK) != 0)
     return;
   ov_listen = socket (AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
   struct sockaddr_un a = { .sun_family = AF_UNIX };
@@ -1159,7 +1405,7 @@ read_messages (void)
 	  for (int k = 0; k < 256; k++)
 	    if (key_down[k])
 	      send_report (R_KEYDOWN, k, 0, 0);
-	  send_report (R_VERSION, 1, 0, 0);
+	  send_report (R_VERSION, FE_VERSION, 0, 0);
 	  break;
 	case C_ACTIVESCREEN:
 	  active_addr = c.w[1];
@@ -1169,6 +1415,11 @@ read_messages (void)
 	  start_addr = c.w[1];
 	  have_start = 1;
 	  break;
+	case C_LEDS:			/* bit 0 Caps Lock, 1 Num Lock, 2 Scroll Lock */
+	  ro_leds = (int) (c.w[1] & 7);
+	  for (int i = 0; i < ninputs; i++)
+	    set_leds (inputs[i].fd);
+	  break;
 	default:
 	  break;
 	}
@@ -1176,6 +1427,32 @@ read_messages (void)
 }
 
 /* --- input ------------------------------------------------------------- */
+
+/* Set a device's LEDs to RISC OS's (a device without LEDs ignores it) */
+static void
+set_leds (int fd)
+{
+  if (ro_leds < 0 || fd < 0)
+    return;
+  struct input_event ev[4];
+  memset (ev, 0, sizeof ev);
+  static const unsigned short led[3] = { LED_CAPSL, LED_NUML, LED_SCROLLL };
+  for (int i = 0; i < 3; i++)
+    {
+      ev[i].type = EV_LED;
+      ev[i].code = led[i];
+      ev[i].value = (ro_leds >> i) & 1;
+    }
+  ev[3].type = EV_SYN;
+  ev[3].code = SYN_REPORT;
+  if (write (fd, ev, sizeof ev) < 0 && errno != EBADF && errno != EINVAL)
+    {
+      static int said;
+      if (!said++)
+	perror ("rol-fb: keyboard LEDs");
+    }
+}
+
 static void
 scan_inputs (void)
 {
@@ -1194,7 +1471,10 @@ scan_inputs (void)
 	continue;
       char path[300];
       snprintf (path, sizeof path, "/dev/input/%s", e->d_name);
-      int fd = open (path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+      /* read and write: writing EV_LED events sets a keyboard's LEDs */
+      int fd = open (path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+      if (fd < 0)
+	fd = open (path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
       if (fd < 0)
 	continue;
       struct input_absinfo ax = { 0 }, ay = { 0 };
@@ -1208,6 +1488,7 @@ scan_inputs (void)
       char nm[128] = "";
       ioctl (fd, EVIOCGNAME (sizeof nm), nm);
       fprintf (stderr, "rol-fb: input %s: %s\n", e->d_name, nm);
+      set_leds (fd);			/* a keyboard plugged in: RISC OS's LEDs */
       ninputs++;
     }
   closedir (d);
@@ -1493,7 +1774,9 @@ confine (void)
   char p[256];
   if (unshare (CLONE_NEWNS))
     return -1;
-  mount (NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+  /* slave, not private: the only shared mount, /riscos/media (init), then
+     passes on the USB discs rol-usbd mounts there later */
+  mount (NULL, "/", NULL, MS_REC | MS_SLAVE, NULL);
   mkdir (R, 0755);
   if (mount ("tmpfs", R, "tmpfs", MS_NOSUID | MS_NODEV, "mode=755"))
     return -1;
