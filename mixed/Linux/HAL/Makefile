@@ -16,7 +16,7 @@
 
 COMPONENT = HAL_Linux
 TARGET = HAL_Linux
-OBJS = o.Top o.Main o.PVOps o.Tests
+OBJS = o.Top o.Main o.PVOps o.Tests o.GPIO
 
 include Makefiles:StdTools
 include Makefiles:StdRules

@@ -6,6 +6,22 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-17 (not yet built)
+
+- **GPIO HAL devices on a Raspberry Pi 3 or 4**, as RISC OS's own BCM2835
+  HAL has them (HALDeviceComms_GPIO, HALDeviceID_GPIO_BCM2835, API 1.0:
+  pins 0-31 and 32-53): Linux's /dev/gpiomem maps the board's GPIO
+  registers, which are each device's Address, and the functions (data,
+  direction, modes, pulls, edges, Enumerate) work on them as the BCM2835
+  HAL's do. Only the pins the board brings out can be changed (the 40-pin
+  header's GPIO 0-27; all of them on a Compute Module 3, GPIO 2-27 on a
+  CM4), so Linux's own (the SD card's, Wi-Fi's) are left alone. Programs
+  that look for the Pi's GPIO device find it: the Raspberry Pi edition of
+  ROOL's DDE (cc, objasm) checks for it and refused to run. Needs the Pi
+  kernel with /dev/gpiomem (riscos-kernel-pi 6.6.78-5) and, protected,
+  riscos-support 1.0.0025-1. Elsewhere there are no GPIO devices, as
+  before.
+
 ## 5.31-16 (4 November 2026)
 
 - **IXFS has a disc name, ROL, as FileCore's discs do.** Full (canonical)

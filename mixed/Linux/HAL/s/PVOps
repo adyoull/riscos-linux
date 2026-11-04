@@ -70,6 +70,7 @@
         IMPORT  test_vectors
         IMPORT  image_start
         IMPORT  __HAL_get_env
+        IMPORT  GPIO_Device
 
 PVirt   SETA    PVSys
 
@@ -462,13 +463,28 @@ Device_Sleep
         myBX    lr
 
 HAL_InitDevices
+        STMFD   sp!, {r4, r5, r6, lr}
         LDR     r2, =image_start + OSROM_HALSize
         LDR     r1, [r2, #OSHdr_Entries]
-        ADD     r2, r2, r1
-        LDR     r3, [r2, #OS_AddDevice * 4]
+        ADD     r4, r2, r1              ; the OS entry table
+        LDR     r3, [r4, #OS_AddDevice * 4]
         MOV     r0, #0
         ADR     r1, Device_PSR
-        ADD     pc, r3, r2
+        MOV     lr, pc
+        ADD     pc, r3, r4
+        ; the GPIO devices (c.GPIO: a Raspberry Pi 3 or 4's, through Linux's
+        ; /dev/gpiomem), GPIO_Device(n) for n = 0, 1, ... until it gives 0
+        MOV     r5, #0
+10      MOV     r0, r5
+        BL      GPIO_Device
+        MOVS    r1, r0
+        LDMEQFD sp!, {r4, r5, r6, pc}
+        LDR     r3, [r4, #OS_AddDevice * 4]
+        MOV     r0, #0
+        MOV     lr, pc
+        ADD     pc, r3, r4
+        ADD     r5, r5, #1
+        B       %BT10
 
         DCD     __HAL_get_env
 Device_PSR

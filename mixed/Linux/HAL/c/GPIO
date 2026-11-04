@@ -1,0 +1,426 @@
+/*
+ * Copyright (c) 2026, Andrew Youll
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/*
+ * The GPIO HAL devices (HALDeviceComms_GPIO, HALDeviceID_GPIO_BCM2835, API
+ * 1.0) on a Raspberry Pi 3 or 4, as RISC OS's own BCM2835 HAL has them:
+ * Linux's /dev/gpiomem maps the board's GPIO registers, and each device's
+ * Address is that mapping, so programs that use the registers or the
+ * device's functions work as on RISC OS on the Pi. Two devices, pins 0-31
+ * and 32-53. Only the pins the board brings out (the 40-pin header; all of
+ * them on a Compute Module) can be changed. Elsewhere (no /dev/gpiomem:
+ * other machines, QEMU, a Pi 5) there are no GPIO devices.
+ *
+ * The functions, the per-board pins and the pin descriptions (Enumerate's
+ * tables) follow the BCM2835 HAL of RISC OS 5.30 (RISC OS Open, Apache
+ * licence).
+ */
+
+#define ix_SYSCALL_branch 1
+#include "ix/syscalls.h"
+
+#include <stdbool.h>
+
+extern void HAL_CounterDelay(unsigned int microseconds);
+
+struct gpio_device {
+  /* struct device */
+  uint16_t type, id;
+  uint32_t location, version;
+  const char *description;
+  volatile uint32_t *address;
+  uint32_t reserved1[3];
+  int (*activate)(struct gpio_device *);
+  void (*deactivate)(struct gpio_device *);
+  void (*reset)(struct gpio_device *);
+  int (*sleep)(struct gpio_device *, int);
+  int devicenumber;
+  int (*testirq)(struct gpio_device *);
+  void (*clearirq)(struct gpio_device *);
+  uint32_t reserved2;
+  /* API 1 */
+  int ports, number;
+  const uint32_t *(*enumerate)(struct gpio_device *, int *);
+  uint32_t (*setdatabits)(struct gpio_device *, uint32_t);
+  uint32_t (*cleardatabits)(struct gpio_device *, uint32_t);
+  void (*toggledatabits)(struct gpio_device *, uint32_t);
+  uint32_t (*readdatabits)(struct gpio_device *);
+  uint32_t (*datadirection)(struct gpio_device *, uint32_t, uint32_t);
+  int (*readmode)(struct gpio_device *, int);
+  int (*writemode)(struct gpio_device *, int, int);
+  uint32_t (*pullcontrol)(struct gpio_device *, uint32_t, uint32_t);
+  uint32_t (*pulldirection)(struct gpio_device *, uint32_t, uint32_t);
+  void (*edgecontrol)(struct gpio_device *, uint32_t, uint32_t *, uint32_t *, uint32_t *);
+  uint32_t (*edgepollstatus)(struct gpio_device *, uint32_t);
+  /* private: the pins that can be changed, the pulls (which can't be read
+     back), the pin descriptions */
+  uint32_t usable, pull_on, pull_up;
+  const uint32_t *pins;
+};
+
+#define GPFSEL   0x00
+#define GPSET    0x1C
+#define GPCLR    0x28
+#define GPLEV    0x34
+#define GPEDS    0x40
+#define GPREN    0x4C
+#define GPFEN    0x58
+#define GPHEN    0x64
+#define GPLEN    0x70
+#define GPPUD    0x94      /* BCM2835-7 */
+#define GPPUDCLK 0x98
+#define GPPUPPDN 0xE4      /* BCM2711 */
+
+#define REG(d, off) ((d)->address[(off) / 4])
+
+static bool bcm2711;
+
+/* Enumerate's pin descriptions (BCM2835 HAL): per pin, a count n, the
+   description returned (its flags, its capabilities and n words, the last -1) */
+static const uint32_t pins_bcm2837_0[] = {
+  0x2, 0x60, 0x11, 0x0, 0x10400, 0xffffffff, 0x2, 0x61,
+  0x11, 0x1, 0x10400, 0xffffffff, 0x2, 0x62, 0x11, 0x2,
+  0x10401, 0xffffffff, 0x2, 0x63, 0x11, 0x3, 0x10401, 0xffffffff,
+  0x2, 0x64, 0x11, 0x4, 0x20400, 0xffffffff, 0x2, 0x65,
+  0x11, 0x5, 0x20401, 0xffffffff, 0x2, 0x66, 0x11, 0x6,
+  0x20402, 0xffffffff, 0x2, 0x67, 0x11, 0x7, 0x30400, 0xffffffff,
+  0x2, 0x68, 0x11, 0x8, 0x30400, 0xffffffff, 0x2, 0x69,
+  0x11, 0x9, 0x30400, 0xffffffff, 0x2, 0x6a, 0x11, 0xa,
+  0x30400, 0xffffffff, 0x2, 0x6b, 0x11, 0xb, 0x30400, 0xffffffff,
+  0x2, 0x6c, 0x11, 0xc, 0x40400, 0xffffffff, 0x2, 0x6d,
+  0x11, 0xd, 0x40401, 0xffffffff, 0x3, 0x6e, 0x15, 0xe,
+  0x50400, 0x50201, 0xffffffff, 0x3, 0x6f, 0x15, 0xf, 0x50400,
+  0x50201, 0xffffffff, 0x4, 0x70, 0x1d, 0x10, 0x50400, 0x30301,
+  0x50201, 0xffffffff, 0x4, 0x71, 0x1d, 0x11, 0x50400, 0x30301,
+  0x50201, 0xffffffff, 0x5, 0x72, 0x9d, 0x12, 0x60400, 0x70700,
+  0x30301, 0x40200, 0xffffffff, 0x5, 0x73, 0x9d, 0x13, 0x60400,
+  0x70700, 0x30301, 0x40201, 0xffffffff, 0x5, 0x74, 0x9d, 0x14,
+  0x60400, 0x70700, 0x30301, 0x20200, 0xffffffff, 0x5, 0x75, 0x9d,
+  0x15, 0x60400, 0x70700, 0x30301, 0x20200, 0xffffffff, 0x1, 0x76,
+  0x1, 0x16, 0xffffffff, 0x1, 0x77, 0x1, 0x17, 0xffffffff,
+  0x1, 0x78, 0x1, 0x18, 0xffffffff, 0x1, 0x79, 0x1,
+  0x19, 0xffffffff, 0x1, 0x7a, 0x1, 0x1a, 0xffffffff, 0x1,
+  0x7b, 0x1, 0x1b, 0xffffffff, 0x3, 0x7c, 0x51, 0x1c,
+  0x10400, 0x60600, 0xffffffff, 0x3, 0x7d, 0x51, 0x1d, 0x10400,
+  0x60600, 0xffffffff, 0x2, 0x7e, 0x41, 0x1e, 0x60600, 0xffffffff,
+  0x2, 0x7f, 0x41, 0x1f, 0x60600, 0xffffffff, 0xffffffff,
+};
+static const uint32_t pins_bcm2711_0[] = {
+  0x5, 0x60, 0x9d, 0x0, 0x10400, 0x30703, 0x50302, 0x10206,
+  0xffffffff, 0x5, 0x61, 0x9d, 0x1, 0x10400, 0x30703, 0x50302,
+  0x10206, 0xffffffff, 0x5, 0x62, 0x9d, 0x2, 0x10401, 0x30703,
+  0x50302, 0x10203, 0xffffffff, 0x5, 0x63, 0x9d, 0x3, 0x10401,
+  0x30703, 0x50302, 0x10203, 0xffffffff, 0x5, 0x64, 0x9d, 0x4,
+  0x20400, 0x30704, 0x50303, 0x10203, 0xffffffff, 0x5, 0x65, 0x9d,
+  0x5, 0x20401, 0x30704, 0x50303, 0x10203, 0xffffffff, 0x5, 0x66,
+  0x9d, 0x6, 0x20402, 0x30704, 0x50303, 0x10204, 0xffffffff, 0x5,
+  0x67, 0x9d, 0x7, 0x30400, 0x30704, 0x50303, 0x10204, 0xffffffff,
+  0x4, 0x68, 0x1d, 0x8, 0x30400, 0x50304, 0x10204, 0xffffffff,
+  0x4, 0x69, 0x1d, 0x9, 0x30400, 0x50304, 0x10204, 0xffffffff,
+  0x4, 0x6a, 0x1d, 0xa, 0x30400, 0x50304, 0x10205, 0xffffffff,
+  0x4, 0x6b, 0x1d, 0xb, 0x30400, 0x50304, 0x10205, 0xffffffff,
+  0x5, 0x6c, 0x9d, 0xc, 0x40400, 0x30705, 0x50305, 0x10205,
+  0xffffffff, 0x5, 0x6d, 0x9d, 0xd, 0x40401, 0x30705, 0x50305,
+  0x10205, 0xffffffff, 0x5, 0x6e, 0x9d, 0xe, 0x50400, 0x30705,
+  0x50305, 0x50201, 0xffffffff, 0x5, 0x6f, 0x9d, 0xf, 0x50400,
+  0x30705, 0x50305, 0x50201, 0xffffffff, 0x4, 0x70, 0x1d, 0x10,
+  0x50400, 0x30301, 0x50201, 0xffffffff, 0x4, 0x71, 0x1d, 0x11,
+  0x50400, 0x30301, 0x50201, 0xffffffff, 0x5, 0x72, 0x9d, 0x12,
+  0x60400, 0x30706, 0x30301, 0x40200, 0xffffffff, 0x5, 0x73, 0x9d,
+  0x13, 0x60400, 0x30705, 0x30301, 0x40201, 0xffffffff, 0x5, 0x74,
+  0x9d, 0x14, 0x60400, 0x30705, 0x30301, 0x20200, 0xffffffff, 0x5,
+  0x75, 0x9d, 0x15, 0x60400, 0x30705, 0x30301, 0x20200, 0xffffffff,
+  0x2, 0x76, 0x5, 0x16, 0x10206, 0xffffffff, 0x2, 0x77,
+  0x5, 0x17, 0x10206, 0xffffffff, 0x2, 0x78, 0x5, 0x18,
+  0x30203, 0xffffffff, 0x2, 0x79, 0x5, 0x19, 0x30204, 0xffffffff,
+  0x2, 0x7a, 0x5, 0x1a, 0x30205, 0xffffffff, 0x2, 0x7b,
+  0x5, 0x1b, 0x30206, 0xffffffff, 0x3, 0x7c, 0x51, 0x1c,
+  0x10400, 0x60600, 0xffffffff, 0x3, 0x7d, 0x51, 0x1d, 0x10400,
+  0x60600, 0xffffffff, 0x2, 0x7e, 0x41, 0x1e, 0x60600, 0xffffffff,
+  0x2, 0x7f, 0x41, 0x1f, 0x60600, 0xffffffff, 0xffffffff,
+};
+static const uint32_t pins_1[] = {
+  0x4, 0x60, 0x95, 0x20, 0x20400, 0x50700, 0x50200, 0xffffffff,
+  0x3, 0x61, 0x85, 0x21, 0x50700, 0x50200, 0xffffffff, 0x2,
+  0x62, 0x11, 0x22, 0x20400, 0xffffffff, 0x2, 0x63, 0x11,
+  0x23, 0x30400, 0xffffffff, 0x3, 0x64, 0x51, 0x24, 0x30400,
+  0x50600, 0xffffffff, 0x3, 0x65, 0x51, 0x25, 0x30400, 0x50600,
+  0xffffffff, 0x3, 0x66, 0x51, 0x26, 0x30400, 0x50600, 0xffffffff,
+  0x3, 0x67, 0x51, 0x27, 0x30400, 0x50600, 0xffffffff, 0x4,
+  0x68, 0x1d, 0x28, 0x40400, 0x30302, 0x50201, 0xffffffff, 0x4,
+  0x69, 0x1d, 0x29, 0x40401, 0x30302, 0x50201, 0xffffffff, 0x4,
+  0x6a, 0x1d, 0x2a, 0x20401, 0x30302, 0x50201, 0xffffffff, 0x4,
+  0x6b, 0x1d, 0x2b, 0x20402, 0x30302, 0x50201, 0xffffffff, 0x5,
+  0x6c, 0x79, 0x2c, 0x20401, 0x10500, 0x10601, 0x30302, 0xffffffff,
+  0x5, 0x6d, 0x79, 0x2d, 0x40401, 0x10500, 0x10601, 0x30302,
+  0xffffffff, 0x1, 0x6e, 0x1, 0x2e, 0xffffffff, 0x1, 0x6f,
+  0x1, 0x2f, 0xffffffff, 0x1, 0x70, 0x1, 0x30, 0xffffffff,
+  0x1, 0x71, 0x1, 0x31, 0xffffffff, 0x1, 0x72, 0x1,
+  0x32, 0xffffffff, 0x1, 0x73, 0x1, 0x33, 0xffffffff, 0x1,
+  0x74, 0x1, 0x34, 0xffffffff, 0x1, 0x75, 0x1, 0x35,
+  0xffffffff, 0xffffffff,
+};
+
+/* the register for 32 pins: this device's (the next word for device 1) */
+static uint32_t bank_reg(struct gpio_device *d, unsigned off, bool write, uint32_t bits) {
+  volatile uint32_t *r = &d->address[off / 4 + d->number];
+  uint32_t v = *r & (d->number ? 0x003FFFFFu : 0xFFFFFFFFu);
+  if (write) *r = bits & d->usable;
+  return v;
+}
+
+static uint32_t gpio_set(struct gpio_device *d, uint32_t bits) { return bank_reg(d, GPSET, true, bits); }
+static uint32_t gpio_clear(struct gpio_device *d, uint32_t bits) { return bank_reg(d, GPCLR, true, bits); }
+static uint32_t gpio_read(struct gpio_device *d) { return bank_reg(d, GPLEV, false, 0); }
+static uint32_t gpio_edgepoll(struct gpio_device *d, uint32_t collect) { return bank_reg(d, GPEDS, true, collect); }
+
+static void gpio_toggle(struct gpio_device *d, uint32_t bits) {
+  if (!bits) return;
+  uint32_t now = gpio_read(d);
+  if (bits & now) gpio_clear(d, bits & now);
+  if (bits & ~now) gpio_set(d, bits & ~now);
+}
+
+/* A pin's function (GPFSEL, 3 bits: 0 input, 1 output, 4-7 and 3, 2 its
+   alternatives): returns it, -1 for a pin that can't be used; sets it
+   unless mode is -1 */
+static int pin_mode(struct gpio_device *d, int pin, int mode) {
+  if (pin < 0 || pin > 31 || !(d->usable & (1u << pin))) return -1;
+  unsigned n = d->number * 32 + pin;
+  volatile uint32_t *r = &d->address[GPFSEL / 4 + n / 10];
+  unsigned shift = (n % 10) * 3;
+  uint32_t v = *r;
+  if (mode != -1) *r = (v & ~(7u << shift)) | ((uint32_t)(mode & 7) << shift);
+  return (v >> shift) & 7;
+}
+
+static int gpio_readmode(struct gpio_device *d, int pin) { return pin_mode(d, pin, -1); }
+static int gpio_writemode(struct gpio_device *d, int pin, int mode) { return pin_mode(d, pin, mode); }
+
+/* pins: those to change; dir: 1 input, 0 output. Returns the pins that
+   were inputs. */
+static uint32_t gpio_datadirection(struct gpio_device *d, uint32_t pins, uint32_t dir) {
+  uint32_t was = 0;
+  for (int pin = 0; pin < 32; pin++) {
+    int mode = (pins >> pin) & 1 ? ((dir >> pin) & 1 ? 0 : 1) : -1;
+    if (pin_mode(d, pin, mode) == 0) was |= 1u << pin;
+  }
+  return was;
+}
+
+/* Pulls: on (pull_on) pins pull up (pull_up) or down; off, none */
+static void pulls_2835(struct gpio_device *d, uint32_t pins, unsigned what) {
+  REG(d, GPPUD) = what;
+  HAL_CounterDelay(50);
+  d->address[GPPUDCLK / 4 + d->number] = pins;
+  HAL_CounterDelay(50);
+}
+
+/* Only the usable pins are changed: Linux sets the others (the SD card's,
+   Wi-Fi's) */
+static void set_pulls(struct gpio_device *d, uint32_t on, uint32_t up) {
+  uint32_t u = d->usable;
+  if (!u) return;
+  if (!bcm2711) {
+    if (~on & u) pulls_2835(d, ~on & u, 0);
+    if (on & ~up & u) pulls_2835(d, on & ~up & u, 1);
+    if (on & up & u) pulls_2835(d, on & up & u, 2);
+    REG(d, GPPUD) = 0;
+    d->address[GPPUDCLK / 4 + d->number] = 0;
+    return;
+  }
+  /* BCM2711: 2 bits a pin, 16 pins a word: 0 none, 1 up, 2 down */
+  for (int w = 0; w < 2; w++) {
+    volatile uint32_t *r = &d->address[GPPUPPDN / 4 + d->number * 2 + w];
+    uint32_t v = *r;
+    for (int i = 0; i < 16; i++) {
+      uint32_t bit = 1u << (w * 16 + i);
+      if (!(u & bit)) continue;
+      unsigned p = 0;
+      if (on & bit) p = up & bit ? 1 : 2;
+      v = (v & ~(3u << (i * 2))) | (p << (i * 2));
+    }
+    *r = v;
+  }
+}
+
+static uint32_t gpio_pullcontrol(struct gpio_device *d, uint32_t pins, uint32_t enable) {
+  uint32_t old = d->pull_on, now = (old & ~pins) | (enable & pins);
+  d->pull_on = now;
+  if (now != old) set_pulls(d, now, d->pull_up);
+  return old;
+}
+
+static uint32_t gpio_pulldirection(struct gpio_device *d, uint32_t pins, uint32_t up) {
+  uint32_t old = d->pull_up, now = (old & ~pins) | (up & pins);
+  d->pull_up = now;
+  if ((now & d->pull_on) != (old & d->pull_on)) set_pulls(d, d->pull_on, now);
+  return old;
+}
+
+/* Edge and level detection: enable, edge (1 edge, 0 level) and risehigh
+   (1 rising or high, 0 falling or low) for pins; each returns the setting
+   before */
+static void gpio_edgecontrol(struct gpio_device *d, uint32_t pins, uint32_t *enable, uint32_t *edge, uint32_t *risehigh) {
+  volatile uint32_t *a = d->address + d->number;
+  uint32_t en = *enable, ed = *edge, rh = *risehigh;
+  uint32_t ren = a[GPREN / 4], fen = a[GPFEN / 4], hen = a[GPHEN / 4], len = a[GPLEN / 4];
+  *enable = ren | fen | hen | len;
+  *edge = ren | fen;
+  *risehigh = ren | hen;
+  if (!pins) return;
+  pins &= d->usable;
+  a[GPREN / 4] = (ren & ~pins) | (pins & en & ed & rh);
+  a[GPFEN / 4] = (fen & ~pins) | (pins & en & ed & ~rh);
+  a[GPHEN / 4] = (hen & ~pins) | (pins & en & ~ed & rh);
+  a[GPLEN / 4] = (len & ~pins) | (pins & en & ~ed & ~rh);
+}
+
+/* The description of pin *carryon (0: the first usable one), and the next
+   usable one in *carryon (-1 after the last) */
+static const uint32_t *gpio_enumerate(struct gpio_device *d, int *carryon) {
+  uint32_t usable = d->usable;
+  int pin = *carryon;
+  if (pin < 0 || pin > 31) goto none;
+  if (pin == 0) {
+    if (!usable) goto none;
+    while (!(usable & (1u << pin))) pin++;
+  }
+  if (!(usable & (1u << pin))) goto none;
+  const uint32_t *p = d->pins;
+  for (int i = 0; ; i++) {
+    if (p[0] == 0xFFFFFFFFu) goto none;
+    if (i == pin) break;
+    p += 4 + p[0];
+  }
+  int next = pin + 1;
+  while (next < 32 && !(usable & (1u << next))) next++;
+  *carryon = next < 32 ? next : -1;
+  return p + 1;
+none:
+  *carryon = -1;
+  return 0;
+}
+
+static int dev_activate(struct gpio_device *d) { (void)d; return 1; }
+static void dev_nothing(struct gpio_device *d) { (void)d; }
+static int dev_sleep(struct gpio_device *d, int state) { (void)d; (void)state; return 0; }
+
+static struct gpio_device gpio[2];
+
+/* /proc/cpuinfo: the board's revision code ("Revision"), 0 if none, and
+   whether the processor is a Cortex-A72 (a Pi 4's BCM2711) */
+static char cpuinfo[4096];
+
+static unsigned hexval(const char *s) {
+  unsigned v = 0;
+  while (*s == ' ' || *s == '\t' || *s == ':') s++;
+  if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+  for (;;) {
+    char c = *s++;
+    if (c >= '0' && c <= '9') v = v * 16 + (c - '0');
+    else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') v = v * 16 + (c - 'A' + 10);
+    else return v;
+  }
+}
+
+static const char *field(const char *name) {
+  const char *s = cpuinfo;
+  while (*s) {
+    const char *n = name, *t = s;
+    while (*n && *t == *n) n++, t++;
+    if (!*n && (*t == ' ' || *t == '\t' || *t == ':')) return t;
+    while (*s && *s != '\n') s++;
+    if (*s) s++;
+  }
+  return 0;
+}
+
+static int gpio_init(void) {
+  int fd = ix_open("/dev/gpiomem", ix_O_RDWR | ix_O_SYNC | ix_O_CLOEXEC, 0);
+  if (fd < 0) return 0;
+  volatile uint32_t *regs = ix_mmap(0, 4096, ix_PROT_READ | ix_PROT_WRITE, ix_MAP_SHARED, fd, 0);
+  ix_close(fd);
+  if ((intptr_t)regs < 0 && (intptr_t)regs > -4096) return 0;
+
+  unsigned revision = 0, part = 0;
+  fd = ix_open("/proc/cpuinfo", ix_O_RDONLY | ix_O_CLOEXEC, 0);
+  if (fd >= 0) {
+    int got = 0, r;
+    while (got < (int)sizeof cpuinfo - 1 && (r = ix_read(fd, cpuinfo + got, sizeof cpuinfo - 1 - got)) > 0) got += r;
+    cpuinfo[got > 0 ? got : 0] = 0;
+    ix_close(fd);
+    const char *f = field("Revision");
+    if (f) revision = hexval(f);
+    f = field("CPU part");
+    if (f) part = hexval(f);
+  }
+  bcm2711 = part == 0xD08;
+
+  /* the pins the board brings out (BCM2835 HAL's table, new-style codes):
+     the 40-pin header's GPIO 0-27; a Compute Module 3 or 3+ all of them;
+     a Compute Module 4 GPIO 2-27 */
+  uint32_t usable0 = 0x0FFFFFFFu, usable1 = 0;
+  if (revision & (1u << 23)) {
+    unsigned type = (revision >> 4) & 0xFF;
+    if (type == 0x0A || type == 0x10) usable0 = 0xFFFFFFFFu, usable1 = 0x3FFFu;
+    else if (type == 0x14) usable0 = 0x0FFFFFFCu;
+  }
+
+  for (int i = 0; i < 2; i++) {
+    struct gpio_device *d = &gpio[i];
+    d->type = 0x0403;                 /* HALDeviceType_Comms | HALDeviceComms_GPIO */
+    d->id = 2;                        /* HALDeviceID_GPIO_BCM2835 */
+    d->location = 0x10000000;
+    d->version = 0x10000;             /* API 1.0 */
+    d->description = i ? "Raspberry Pi GPIO interface pins 32-63" : "Raspberry Pi GPIO interface pins 0-31";
+    d->address = regs;
+    d->activate = dev_activate;
+    d->deactivate = dev_nothing;
+    d->reset = dev_nothing;
+    d->sleep = dev_sleep;
+    d->devicenumber = -1;
+    d->ports = 2;
+    d->number = i;
+    d->enumerate = gpio_enumerate;
+    d->setdatabits = gpio_set;
+    d->cleardatabits = gpio_clear;
+    d->toggledatabits = gpio_toggle;
+    d->readdatabits = gpio_read;
+    d->datadirection = gpio_datadirection;
+    d->readmode = gpio_readmode;
+    d->writemode = gpio_writemode;
+    d->pullcontrol = gpio_pullcontrol;
+    d->pulldirection = gpio_pulldirection;
+    d->edgecontrol = gpio_edgecontrol;
+    d->edgepollstatus = gpio_edgepoll;
+    d->usable = i ? usable1 : usable0;
+    /* the pulls at reset (BCM2835 HAL's: they can't be read back) */
+    d->pull_on = i ? 0x03FFCFFFu : (bcm2711 ? 0xFFFFFFFFu : 0xCFFFFFFFu);
+    d->pull_up = i ? 0x03FFC01Cu : (bcm2711 ? 0x100001FFu : 0x000001FFu);
+    d->pins = i ? pins_1 : (bcm2711 ? pins_bcm2711_0 : pins_bcm2837_0);
+  }
+  return 2;
+}
+
+/* HAL_InitDevices adds GPIO_Device(0), GPIO_Device(1), ... up to the first
+   0: the GPIO devices, none where there's no /dev/gpiomem */
+struct gpio_device *GPIO_Device(int i) {
+  static int n = -1;
+  if (n < 0) n = gpio_init();
+  return i >= 0 && i < n ? &gpio[i] : 0;
+}
