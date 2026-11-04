@@ -6,6 +6,16 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-16 (not yet built)
+
+- **IXFS has a disc name, ROL, as FileCore's discs do.** Full (canonical)
+  names are now `IXFS::ROL.$.path`, like `SDFS::RISCOSpi.$.path`, where
+  they were `IXFS:$.path`. Some programs take a name with `.$.` in it as
+  the sign of a full path: StrongEd 4.70 refused to save anywhere on IXFS
+  (HardDisc4, USB discs and SD cards included) with "Don't know where to
+  save", shown in its own window. A disc name given (`IXFS::Other.$.x`)
+  is ignored as before, and `IXFS:$.path` still works everywhere.
+
 ## 5.31-15 (4 November 2026)
 
 - **The HAL counter reloads at each centisecond tick, as on hardware.**

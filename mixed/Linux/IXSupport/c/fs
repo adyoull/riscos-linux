@@ -728,8 +728,25 @@ _kernel_oserror *FSEntry_Func_handler(_kernel_swi_regs *regs, void *pw) {
         regs->r[1] = 4;
         regs->r[3] = len;
       }
-      regs->r[2] = 0;
-      regs->r[4] = 0;
+      /* The disc name: always "ROL" (a disc name given is ignored:
+         pd_convert_filename skips it), so canonical names are
+         IXFS::ROL.$.path, as FileCore's discs' are SDFS::Disc.$.path.
+         Programs that take a full path to have ".$." (StrongEd 4.70)
+         refused IXFS:$.path. */
+      {
+        static const char disc[] = "ROL";
+        int dlen = sizeof disc;            // with its terminator
+        if (regs->r[4]) {
+          int copy_size = dlen;
+          if (regs->r[6] < copy_size) copy_size = regs->r[6];
+          if (copy_size > 0) memcpy((char *)regs->r[4], disc, copy_size);
+          regs->r[2] = regs->r[4];
+          regs->r[4] = dlen - copy_size;
+        } else {
+          regs->r[2] = 4;                  // non-zero: there is a disc name
+          regs->r[4] = dlen - 1;           // FileSwitch adds the terminator
+        }
+      }
       break;
     }
     case fsfunc_ReadFreeSpace: {
