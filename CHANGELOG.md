@@ -7,7 +7,7 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
-### Native: the fast FPA entry (5 Nov 2026; not yet packaged)
+### Native: the fast FPA entry (5 Nov 2026; riscos-support 1.0.0028-1, riscos-kernel-pi 6.6.78-6, riscos-kernel-generic 7.2.0-4)
 
 - **FPA instructions (coprocessors 1 and 2: FPEmulator's) go to RISC OS's
   undefined instruction vector straight from Linux's trap**, instead of
@@ -31,8 +31,10 @@ CHANGELOG lists each package).
   awkward values) gives the same sum (&A4907357, as QEMU's own FPA
   emulation does) with the fast entry off and on, twice each; 500,000
   FPA instructions took 150 and 153 cs off, 60 and 65 cs on (2.4 times
-  as fast; the gain on a Pi depends on what a signal costs there). The
-  Pi 6.6 patch is compiled, not yet run.
+  as fast under QEMU's emulation). On a Raspberry Pi 4 (6.6.78-6): the
+  same sum, 27 cs off and 6 cs on, 4.5 times as fast (FPEmulator emulates
+  a run of FPA instructions per trap: about 5 µs a trap through the
+  signal, 1 µs through the fast entry).
 
 ### QEMU: cheaper TB lookups (4 Nov 2026)
 
