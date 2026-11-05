@@ -1,19 +1,20 @@
-RISC OS on Linux 1.0.0017 for 64-bit ARM machines (4 November 2026)
+RISC OS on Linux 1.0.0018 for 64-bit ARM machines (5 November 2026)
 ===================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
     (the Pi's own firmware starts kernel8.img);
   - 64-bit ARM machines that boot from UEFI: the firmware starts
     EFI/BOOT/BOOTAA64.EFI from this partition. That covers virtual
-    machines (UTM, QEMU, Parallels) and ARM boards and servers with
+    machines (UTM, QEMU, Parallels: on an Apple Silicon Mac the ready-made
+    "RISC OS 1.0.0018.utm" is easier) and ARM boards and servers with
     standard UEFI firmware (ACPI, or a device tree from the firmware).
     The Windows Dev Kit 2023 needs its own device tree: use its own image
     (riscos-wdk2023) instead;
   - Pine64's Pinebook (Allwinner A64) and Pinebook Pro (Rockchip RK3399),
     with U-Boot (below) starting EFI/BOOT/BOOTAA64.EFI.
 
-Version 1.0, build 0006: RISC OS 5.31 (RISC OS Open's
-sources of 29 October 2026 merged into Timothy Baldwin's Linux port) with
+Version 1.0, build 0018: RISC OS 5.31 (5.31-17: RISC OS Open's
+sources merged into Timothy Baldwin's Linux port) with
 RISC OS Open's HardDisc4 5.30, on Debian 13 (the slim base
 Debian's own container images use, about 100 MB: no Linux desktop, no
 systemd; it still starts straight into RISC OS).
@@ -184,6 +185,12 @@ The disc: at each start, if the card or disc (or a VM's disc) is bigger
 than the image, the Linux partition and its file system are enlarged to
 fill it, so HardDisc4 gets all the space. An empty file called NOGROW on
 the FAT partition stops that.
+
+Programs that come with it, besides RISC OS's own: NetSurf (web
+browser) and RDPServer (remote desktop) in Apps.Network, and Folio (PDF
+and ebook reader) in Apps.Document, installed as PackMan installs them,
+so PackMan upgrades them. PDF files open in Folio when double-clicked
+(delete !Boot.Choices.Boot.Tasks.FolioPDF to choose another viewer).
 
 Starting up: a start-up screen says what's happening (the disc being
 enlarged on the first start, the network, the clock, RISC OS starting),
