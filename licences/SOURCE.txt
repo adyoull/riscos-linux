@@ -17,6 +17,11 @@ from the date of this image, for the parts under the GPL or LGPL):
   https://github.com/adyoull/riscos-rdpserver
       !RDPServer (HardDisc4.Apps.Network, where PackMan installs it),
       built with xrdp and Mbed TLS (Apache-2.0; the app's Licences file).
+  https://github.com/adyoull/riscos-folio
+      !Folio (HardDisc4.Apps.Document, where PackMan installs it), the
+      PDF and ebook reader: AGPL-3.0-or-later (as MuPDF requires; the
+      AGPL-3.0 file), built with MuPDF 1.28.5 and the libraries its
+      licence files in !Folio name.
   https://www.netsurf-browser.org/downloads/source/ (netsurf-all-3.11)
       !NetSurf 3.11 (HardDisc4.Apps.Network), unchanged from NetSurf's
       RISC OS release: GPL-2.0, its other licences in its about:licence
