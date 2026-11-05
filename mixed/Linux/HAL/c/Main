@@ -510,6 +510,18 @@ static void irq_signal_handler(int signal, ix_siginfo_t *info, struct ix_ucontex
 
   if (vcpu->cpsr & PSR_I_BIT) goto exit; // IRQs disabled, so return.
 
+  // In __PVirt_GetVCPU (LDR pc, =0xFFFF0FE0) or the kuser get_tls helper
+  // it jumps to: lr is live, the return address of a BL to GetVCPU. If
+  // the IRQ were taken here from IRQ mode (Sound's Level1 fill runs voice
+  // code in IRQ mode with IRQs enabled), the handler's return to IRQ mode
+  // leaves lr = pc, so get_tls returns to itself for ever: the desktop
+  // stops as the Wimp starts (its first sounds). GetVCPU only sets r0, and
+  // every BL to it has lr dead after the return, so finish the call here
+  // and take the IRQ (or not) at the return address.
+  if ((r[15] == (uint32_t)&__PVirt_GetVCPU || r[15] == 0xFFFF0FE0 || r[15] == 0xFFFF0FE4) && !(r[14] & 1)) {
+    r[0] = (uint32_t)vcpu;
+    r[15] = r[14];
+  }
 
   // In kuser helper called from SetCPSR_c etc, so just return.
   if (r[15] >= 0xFFFF0000 && r[15] < 0xFFFF1000 && r[14] >= (uint32_t)&SetCPSR_Start && r[14] < (uint32_t)&SetCPSR_End) goto exit;

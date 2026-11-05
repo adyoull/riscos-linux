@@ -71,6 +71,7 @@ typedef void (*RISCOS_Start_t)(unsigned int flags, OSHdr *riscos_header, void *h
 extern uint8_t __PVirt_VModeOffsets[];
 extern struct vcpu init_vcpu;
 extern uint32_t SetCPSR_Start, SetCPSR_Restart, SetCPSR_End;
+extern uint32_t __PVirt_GetVCPU;
 extern uint32_t HAL_Header;
 
 extern void signal_exit(void);

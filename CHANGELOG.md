@@ -6,6 +6,20 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-18 (to be built)
+
+- **The desktop no longer stops now and then as it starts** (the RISC OS 5
+  banner stays, usually under QEMU/UTM, more rarely natively). Sound's
+  Level1 fill runs voice code in IRQ mode with IRQs enabled; its mode
+  changes go through SetCPSR_c_unstack, which calls __PVirt_GetVCPU (LDR
+  pc, =&FFFF0FE0) with IRQ mode's lr holding the return address. An IRQ
+  landing on GetVCPU's instruction (the kuser helper itself was already
+  protected, GetVCPU wasn't) was taken from IRQ mode, and its return left
+  lr = pc, so get_tls returned to itself for ever. The IRQ handler now
+  finishes a GetVCPU/get_tls call it lands in (r0 = vcpu, pc = lr; every
+  BL to GetVCPU has lr dead afterwards) and takes the IRQ, or defers it
+  inside SetCPSR as before, at the return address.
+
 ## 5.31-17 (4 November 2026)
 
 - **GPIO HAL devices on a Raspberry Pi 3 or 4**, as RISC OS's own BCM2835
