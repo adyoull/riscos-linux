@@ -7,6 +7,33 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### Native: the fast FPA entry (5 Nov 2026; not yet packaged)
+
+- **FPA instructions (coprocessors 1 and 2: FPEmulator's) go to RISC OS's
+  undefined instruction vector straight from Linux's trap**, instead of
+  through a SIGILL, NativeSupport's and the port's handlers and a
+  sigreturn. The kernel side, `kernel/*/0201-riscos-fast-fpa.patch` (on
+  top of 0200): prctl PR_RISCOS_UND (0x524f5302) names the handler; the
+  kernel skips an instruction whose condition fails, otherwise writes a
+  SIGILL-shaped frame (siginfo, r0-r14, pc, CPSR) on the signal stack,
+  sets the I bit of RISC OS's virtual CPU (the TLS block's byte 13, the
+  old byte in si_errno) and jumps to the handler. Setting the I bit, as a
+  real undefined instruction exception does, means an interrupt signal
+  arriving in the handler is deferred by the port, as one in its SWI
+  handler is (taken there, the RISC OS IRQ code's SWIs could overwrite
+  the frame). The RISC OS side is NativeSupport 0.19's `ns_und_fast`
+  fast entry` (riscos-linux-testbed): the port's ENTER_EXCEPTION(UND)
+  done in place, then vectors[0]. `*NativeSupport FastFPA On|Off`,
+  `NativeSupport$NoFastFPA`; other kernels and ROMs: the usual path.
+- Tested natively (QEMU's Cortex-A76, the generic 7.2 kernel, the
+  1.0.0018 image): testbed `tests/programs/fpa.bas` (FPA arithmetic,
+  conversions, compares, conditions passing and failing, SFM/LFM, on 16
+  awkward values) gives the same sum (&A4907357, as QEMU's own FPA
+  emulation does) with the fast entry off and on, twice each; 500,000
+  FPA instructions took 150 and 153 cs off, 60 and 65 cs on (2.4 times
+  as fast; the gain on a Pi depends on what a signal costs there). The
+  Pi 6.6 patch is compiled, not yet run.
+
 ### QEMU: cheaper TB lookups (4 Nov 2026)
 
 - The VFP state the translated code depends on (short-vector length and

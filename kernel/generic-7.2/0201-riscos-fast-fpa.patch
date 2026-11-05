@@ -1,0 +1,155 @@
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index 172243f6..76027e9b 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -206,6 +206,8 @@ struct thread_struct {
+ 	/* RISC OS on Linux's fast SWI entry (PR_RISCOS_SWI): 0 = off */
+ 	u32			riscos_swi_handler;
+ 	u32			riscos_swi_gateway;
++	/* and its fast FPA entry (PR_RISCOS_UND): 0 = off */
++	u32			riscos_und_handler;
+ #endif
+ };
+ 
+diff --git a/arch/arm64/kernel/process.c b/arch/arm64/kernel/process.c
+index e1b59ca6..237cf176 100644
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -336,6 +336,7 @@ void flush_thread(void)
+ #ifdef CONFIG_COMPAT
+ 	current->thread.riscos_swi_handler = 0;
+ 	current->thread.riscos_swi_gateway = 0;
++	current->thread.riscos_und_handler = 0;
+ #endif
+ 	fpsimd_flush_thread();
+ 	tls_thread_flush();
+diff --git a/arch/arm64/kernel/traps.c b/arch/arm64/kernel/traps.c
+index 91428201..1cdbfc45 100644
+--- a/arch/arm64/kernel/traps.c
++++ b/arch/arm64/kernel/traps.c
+@@ -452,6 +452,89 @@ void arm64_notify_segfault(unsigned long addr)
+ 	force_signal_inject(SIGSEGV, code, addr, 0);
+ }
+ 
++#ifdef CONFIG_COMPAT
++/*
++ * RISC OS on Linux's fast FPA entry (PR_RISCOS_UND, as its fast SWI entry
++ * in syscall.c). Old RISC OS programs use the FPA's floating point
++ * instructions (coprocessors 1 and 2), which no ARMv8 processor has: each
++ * is an undefined instruction that RISC OS's FPEmulator carries out. A
++ * task can ask for these to go straight to a handler of its own, with the
++ * registers written on its signal stack as for a SIGILL (r1 a siginfo, r2
++ * a ucontext with r0-r15 and the CPSR from +32), but without the signal
++ * delivery, the FP state and the sigreturn. One whose condition fails is
++ * skipped here (some processors trap those too). Other undefined
++ * instructions, and Thumb ones, are signalled as before. exec forgets it.
++ */
++static bool riscos_und(struct pt_regs *regs, u32 insn)
++{
++	struct thread_struct *t = &current->thread;
++	u32 pc = regs->pc, cp = (insn >> 8) & 15, f[29];
++	unsigned long sp, vcpu;
++	u8 vc = 0;
++	int i;
++
++	if (!compat_user_mode(regs) || compat_thumb_mode(regs))
++		return false;
++	/* LDC/STC (cond 110x), CDP/MRC/MCR (cond 1110) to coprocessor 1 or 2 */
++	if ((insn >> 28) == 15 || (insn & 0x0c000000) != 0x0c000000 ||
++	    (insn & 0x0f000000) == 0x0f000000 || (cp != 1 && cp != 2))
++		return false;
++	if (!aarch32_opcode_cond_checks[insn >> 28](regs->pstate)) {
++		arm64_skip_faulting_instruction(regs, 4);
++		return true;
++	}
++	/* RISC OS's virtual CPU (its block is the TLS value; byte 13 is the
++	   virtual CPSR's control byte): IRQs off, as an undefined instruction
++	   exception does, before the handler runs, so an interrupt signal
++	   reaching it is deferred by the port's handler instead of being taken
++	   while the handler still needs this frame and the mode's banked r13
++	   and r14. The old byte goes to the handler (si_errno). */
++	vcpu = (u32)t->uw.tp_value;
++	if (vcpu && get_user(vc, (u8 __user *)(vcpu + 13))) {
++		force_sig(SIGSEGV);
++		return true;
++	}
++	sp = regs->compat_sp;
++	if (current->sas_ss_size && !on_sig_stack(sp))
++		sp = current->sas_ss_sp + current->sas_ss_size;
++	sp = (sp - sizeof(f)) & ~7UL;
++	memset(f, 0, sizeof(f));
++	f[0] = SIGILL;				/* siginfo: si_signo */
++	f[1] = vc;				/* si_errno: the old CPSR byte */
++	f[2] = ILL_ILLOPC;			/* si_code */
++	f[3] = pc;				/* si_addr */
++	for (i = 0; i < 15; i++)		/* ucontext (+16): r0-r14 */
++		f[12 + i] = regs->regs[i];
++	f[27] = pc;
++	f[28] = pstate_to_compat_psr(regs->pstate);
++	if (copy_to_user((void __user *)sp, f, sizeof(f))) {
++		force_sig(SIGSEGV);
++		return true;
++	}
++	if (vcpu && put_user(vc | 0x80, (u8 __user *)(vcpu + 13))) {
++		force_sig(SIGSEGV);
++		return true;
++	}
++	regs->regs[0] = SIGILL;
++	regs->regs[1] = sp;
++	regs->regs[2] = sp + 16;
++	regs->compat_sp = sp;
++	regs->pc = t->riscos_und_handler;
++	regs->pstate &= ~(PSR_AA32_T_BIT | PSR_AA32_IT_MASK);
++	return true;
++}
++
++long riscos_und_prctl(unsigned long handler);
++
++long riscos_und_prctl(unsigned long handler)
++{
++	if (!is_compat_task() || handler >> 32 || handler & 3)
++		return -EINVAL;
++	current->thread.riscos_und_handler = handler;
++	return 0;
++}
++#endif
++
+ void do_el0_undef(struct pt_regs *regs, unsigned long esr)
+ {
+ 	u32 insn;
+@@ -463,6 +546,11 @@ void do_el0_undef(struct pt_regs *regs, unsigned long esr)
+ 	if (user_insn_read(regs, &insn))
+ 		goto out_err;
+ 
++#ifdef CONFIG_COMPAT
++	if (unlikely(current->thread.riscos_und_handler) && riscos_und(regs, insn))
++		return;
++#endif
++
+ 	if (try_emulate_mrs(regs, insn))
+ 		return;
+ 
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 26f61503..a305061e 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -140,6 +140,9 @@
+ /* RISC OS on Linux: its SWIs straight to its handler (arch/arm64/kernel/syscall.c) */
+ #define PR_RISCOS_SWI	0x524f5301
+ long riscos_swi_prctl(unsigned long handler, unsigned long gateway);
++/* and its FPA instructions (arch/arm64/kernel/traps.c) */
++#define PR_RISCOS_UND	0x524f5302
++long riscos_und_prctl(unsigned long handler);
+ 
+ #ifndef SET_TAGGED_ADDR_CTRL
+ # define SET_TAGGED_ADDR_CTRL(a)	(-EINVAL)
+@@ -2774,6 +2777,9 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
+ 	case PR_RISCOS_SWI:
+ 		error = riscos_swi_prctl(arg2, arg3);
+ 		break;
++	case PR_RISCOS_UND:
++		error = riscos_und_prctl(arg2);
++		break;
+ #endif
+ 	case PR_SET_TAGGED_ADDR_CTRL:
+ 		if (arg3 || arg4 || arg5)
