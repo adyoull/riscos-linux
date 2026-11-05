@@ -79,11 +79,12 @@ cp -a "$extras/!ROLUpdate" "$boot/Resources/Configure/"
 cp -a "$extras/!CaCertificates" "$boot/Resources/"
 mkdir -p "$boot/Choices/PackMan" && cp "$extras/Choices/PackMan/Sources,fff" "$boot/Choices/PackMan/"
 # ARMEABISupport: GCCSDK's 1.05 (1.08 isn't stable on RISC OS on Linux) in
-# !System.310.Modules, where PackMan's package puts it (a copy in
-# !System.500 would hide it), and in TestBed.Modules for PreDesk's fallback
-rm -f "$boot/Resources/!System/500/Modules/ARMEABISupport,ffa"
-mkdir -p "$boot/Resources/!System/310/Modules" "$hd/TestBed/Modules"
-cp "$extras/Modules/ARMEABISupport,ffa" "$boot/Resources/!System/310/Modules/"
+# !System.400.Modules, where PackMan's package puts it (riscos-harddisc's
+# place-armeabisupport keeps it there on installed systems; a copy in 500
+# or 310 would hide it or be hidden)
+rm -f "$boot/Resources/!System/500/Modules/ARMEABISupport,ffa" "$boot/Resources/!System/310/Modules/ARMEABISupport,ffa"
+mkdir -p "$boot/Resources/!System/400/Modules" "$hd/TestBed/Modules"
+cp "$extras/Modules/ARMEABISupport,ffa" "$boot/Resources/!System/400/Modules/"
 cp "$extras/Modules/ARMEABISupport,ffa" "$hd/TestBed/Modules/"
 # MbufManager: RISC OS Open's 0.30 (MManagerBlob), which every RISC OS 5 ROM
 # has (Omni's LanManFS and Access need it), and MbufRes for its Messages
