@@ -442,7 +442,10 @@ job$="u"+RIGHT$("0000000"+STR$~t%,8)
 SYS "XOS_File",8,LEFT$(dir$,LEN(dir$)-1)
 f%=OPENOUT(dir$+job$+"/new")
 IF f%=0 THEN ERROR 1,"Can't write to "+dir$
-BPUT#f%,h$+cmd$
+REM in two parts: the header and the command together can be longer than
+REM a string can hold (255 characters: the install command is 241)
+IF h$<>"" THEN BPUT#f%,h$;
+BPUT#f%,cmd$
 CLOSE#f%
 h$=STRING$(LEN(h$)," ")
 OSCLI "Rename "+dir$+job$+"/new "+dir$+job$+"/req"
