@@ -83,9 +83,71 @@ media_umount_all (void)
 static void fat_logs_stop (void);
 static void fat_umount_all (void);
 
+/* How each session ended, so that one that ended unexpectedly can be told
+   from one that didn't, afterwards: /riscos/session.txt says "running"
+   while RISC OS runs, and how it ended when Linux switches off or
+   restarts. At the next start (previous_session) that goes in
+   /riscos/previous-end.txt, and the last session's logs are kept as
+   log.prev.txt and kernel-log.prev.txt (all copied to the FAT partition's
+   LOGS too): still "running" means the machine stopped without Linux
+   seeing it (the power, a reset of the board, a hang). */
+static const char *end_reason;
+
+static void
+session_write (const char *text)
+{
+  int fd = open ("/riscos/session.txt", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+  if (fd < 0)
+    return;
+  char buf[256];
+  struct timespec up;
+  clock_gettime (CLOCK_BOOTTIME, &up);
+  time_t now = time (NULL);
+  struct tm tm;
+  gmtime_r (&now, &tm);
+  int n = snprintf (buf, sizeof buf, "%s (%04d-%02d-%02d %02d:%02d:%02d UTC, %ld s after the start)\n",
+		    text, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+		    tm.tm_min, tm.tm_sec, (long) up.tv_sec);
+  if (write (fd, buf, n) < 0) { }
+  fsync (fd);
+  close (fd);
+}
+
+static void
+previous_session (void)
+{
+  char old[256] = "";
+  int fd = open ("/riscos/session.txt", O_RDONLY | O_CLOEXEC);
+  if (fd >= 0)
+    {
+      ssize_t n = read (fd, old, sizeof old - 1);
+      old[n > 0 ? n : 0] = 0;
+      close (fd);
+    }
+  if (old[0])
+    {
+      int out = open ("/riscos/previous-end.txt", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+      if (out >= 0)
+	{
+	  const char *why = !strncmp (old, "running", 7)
+	    ? "The last session ended without Linux switching off or restarting"
+	      " (the power went or dipped, the board was reset, or it hung):\n"
+	    : "The last session ended normally:\n";
+	  if (write (out, why, strlen (why)) < 0 || write (out, old, strlen (old)) < 0) { }
+	  close (out);
+	}
+    }
+  rename ("/riscos/log.txt", "/riscos/log.prev.txt");
+  rename ("/riscos/kernel-log.txt", "/riscos/kernel-log.prev.txt");
+  session_write ("running");
+}
+
 static void
 machine_off (int how)
 {
+  session_write (end_reason ? end_reason
+		 : how == RB_AUTOBOOT ? "ended: Linux restarted the machine"
+		 : "ended: Linux switched the machine off");
   fat_logs_stop ();
   sync ();
   kill (-1, SIGTERM);
@@ -1071,6 +1133,9 @@ fat_logs_once (void)
       mkdir ("/run/fatlog/LOGS", 0755);
       copy_file ("/riscos/log.txt", "/run/fatlog/LOGS/riscos-log.txt");
       copy_file ("/riscos/kernel-log.txt", "/run/fatlog/LOGS/kernel-log.txt");
+      copy_file ("/riscos/log.prev.txt", "/run/fatlog/LOGS/riscos-log.prev.txt");
+      copy_file ("/riscos/kernel-log.prev.txt", "/run/fatlog/LOGS/kernel-log.prev.txt");
+      copy_file ("/riscos/previous-end.txt", "/run/fatlog/LOGS/previous-end.txt");
       if (umount ("/run/fatlog"))
 	umount2 ("/run/fatlog", MNT_DETACH);
     }
@@ -1518,6 +1583,7 @@ main (void)
   mount ("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
   mount ("tmpfs", "/run", "tmpfs", 0, "mode=755");
   mount (NULL, "/", NULL, MS_REMOUNT, NULL);
+  previous_session ();
   kernel_log ();
   splash_start ();
   reset_root_password ();
@@ -1748,6 +1814,7 @@ main (void)
       fat_logs_once ();
       say ("RISC OS is restarting the machine.\n", "");
       sync ();
+      end_reason = "ended: RISC OS asked for a restart (Ctrl+Break, Restart, *Reset, or a reset after an error)";
       machine_off (RB_AUTOBOOT);
     }
   int quick = time (NULL) - t0 < 20;
@@ -1769,6 +1836,12 @@ main (void)
     }
   else
     say ("RISC OS has ended: powering off.\n", "");
+  {
+    static char why[96];
+    snprintf (why, sizeof why, "ended: RISC OS ended (status %d)%s, then Linux switched off",
+	      status, quick ? " straight after starting" : "");
+    end_reason = why;
+  }
   sync ();
   machine_off (RB_POWER_OFF);
   return 0;
