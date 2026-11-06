@@ -17,6 +17,13 @@ CHANGELOG lists each package).
   too, but only while that program is running (the current active object
   is &8000): under BASIC, &8000 can still hold the last program's header.
   0.20's rule for the rest of application space stays (the DDE's buffers).
+- **NativeSupport 0.22: code BASIC assembles is patched again.** 0.20 left
+  every synchronisation in application space that didn't start a program
+  (for the DDE's buffers), so Iris's AlignExOff (OS_EnterOS, MRC,
+  `MSR CPSR_c,#&10` in a DIM block) stayed in SVC mode and Iris 1.0.29
+  stopped at its banner (Chris's Pi 5). Now only FileSwitch's are left (a
+  file loaded with OS_File's code flag: the DDE's case); the SWI vector
+  notes who called OS_SynchroniseCodeAreas.
 - **SPSR_svc is kept across interrupts.** The kernel's IRQ entry (the
   Linux build, 5.31-18) keeps SPSR_svc as it kept r14_svc: interrupt
   code's SWIs (CallEvery routines, ScreenBlanker's ticker) wrote it, so

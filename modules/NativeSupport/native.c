@@ -144,7 +144,7 @@ static struct
   int emul_n;
   /* counts, for *NativeSupport */
   unsigned cond_skipped, lur_thumb, thumb_returns, squeezed_skipped, lur_stubbed;
-  unsigned sync_app_data, sync_own, sync_big, sync_too_big;
+  unsigned sync_app_data, sync_app_code, sync_own, sync_big, sync_too_big;
   unsigned cp15_barriers, cp15_rewritten, abtdump_sw;
   unsigned da_low, da_high, da_over;
   int tchk_ok;
@@ -2180,6 +2180,24 @@ aif_end (void)
   return 0x8000u + ro + rw;
 }
 
+/* OS_SynchroniseCodeAreas's caller (header.s's SWI vector: its return
+   address), and whether that is in FileSwitch's code */
+extern unsigned ns_sync_caller;
+static int
+in_fileswitch (unsigned a)
+{
+  static unsigned fs_lo, fs_hi;
+  if (!fs_lo)
+    {
+      regs m = {{ 18, (unsigned) "FileSwitch" }};
+      if (swix_regs (0x1E, &m))			/* OS_Module 18 */
+	return 0;
+      fs_lo = m.r[3];
+      fs_hi = fs_lo + *(volatile unsigned *) (fs_lo - 4);
+    }
+  return a >= fs_lo && a < fs_hi;
+}
+
 /* The current active object: &8000 while a program loaded there runs,
    a module's address while a module (BASIC, say) is the application */
 static unsigned
@@ -2228,20 +2246,26 @@ sync_patch (unsigned lo, unsigned hi)
      the traps. */
   if (hi <= 0x20000000u && !(lo <= 0x8000u && hi > 0x8014u))
     {
-      /* a part of the program's own image, which it synchronises itself
-	 (a big program's, say, after relocating it): that's its code. Only
-	 while that program is the one running (the current active object
-	 is &8000): when a module such as BASIC runs in application space,
-	 &8000 still holds the last program's header, and what's under it
-	 is the module's workspace, which can hold anything (BASIC's SYS
-	 veneers, a module file loaded into a DIM block) */
-      unsigned end = aif_end ();
-      if (!(end && lo >= 0x8000u && hi <= end && cao () == 0x8000u))
+      /* Elsewhere in application space: what a program or BASIC wrote
+	 and synchronises itself is code (BASIC's assembler: Iris's
+	 AlignExOff assembles SWI OS_EnterOS, MRC and MSR CPSR_c, #&10
+	 into a DIM block; left unpatched (0.20, 0.21), the MSR did nothing
+	 natively, the task stayed in SVC mode and Iris stopped as it
+	 started). Only FileSwitch's are left: a file loaded with OS_File's
+	 "this is code" flag (R3 bit 31) into a buffer, which may be written
+	 out again as data (the DDE's ROM build). A part of the program's
+	 own image is always patched. */
+      unsigned caller = ns_sync_caller, end = aif_end ();
+      ns_sync_caller = 0;		/* (one SWI's: not a later sync's) */
+      if (end && lo >= 0x8000u && hi <= end && cao () == 0x8000u)
+	ns.sync_own++;
+      else if (in_fileswitch (caller))
 	{
 	  ns.sync_app_data++;
 	  return;
 	}
-      ns.sync_own++;
+      else
+	ns.sync_app_code++;
     }
   /* Memory from GCCSDK ARMEABISupport's mmap (its mmap#N areas) is
      never a program's or library's code (SOManager's libraries are in
@@ -3888,7 +3912,8 @@ mod_command (int index, const char *tail, int argc)
   line_out ("PMP operations: ", ns.kpmp_ops);
   line_out ("Reporter SWIs ignored: ", ns.reports);
   line_out ("Synchronisations in mmap areas (JIT) left: ", ns.sync_jit);
-  line_out ("Synchronisations in application space, not a program, left: ", ns.sync_app_data);
+  line_out ("Synchronisations in application space of files loaded as code (FileSwitch), left: ", ns.sync_app_data);
+  line_out ("Synchronisations in application space of code written there (BASIC, programs), patched: ", ns.sync_app_code);
   line_out ("Synchronisations of a part of the program, patched: ", ns.sync_own);
   line_out ("Programs over 64 MB patched: ", ns.sync_big);
   line_out ("Synchronisations over 64 MB, not a program, left: ", ns.sync_too_big);

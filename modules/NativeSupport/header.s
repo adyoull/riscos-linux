@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"NativeSupport"
-help:	.asciz	"NativeSupport\t0.21 (06 Nov 2026) RISC OS for Linux, native"
+help:	.asciz	"NativeSupport\t0.22 (06 Nov 2026) RISC OS for Linux, native"
 	.align	2
 commands:
 	.asciz	"NativeSupport"
@@ -122,6 +122,8 @@ ns_swi_vector:
 	moveq	r2, r10
 	bic	r2, r2, #0xff000000
 	bic	r2, r2, #0x20000
+	teq	r2, #0x6e			@ OS_SynchroniseCodeAreas: who asks
+	streq	lr, ns_sync_caller		@ (sync_patch: FileSwitch's are left)
 	teq	r2, #0x68
 	teqne	r2, #0x66
 	teqne	r2, #0x58			@ OS_ReadSysInfo (9, 7: the platform name)
@@ -211,6 +213,9 @@ aeabi_len:
 aeabi_clamp:
 	.word	0
 ns_svc_base:
+	.word	0
+	.global	ns_sync_caller
+ns_sync_caller:
 	.word	0
 ns_old_swi_vector:
 	.word	0
