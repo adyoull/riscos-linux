@@ -8,6 +8,18 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
 
 ## 5.31-18 (to be built)
 
+- **An interrupt no longer changes SPSR_svc under the code it interrupts.**
+  The kernel's IRQ entry, in the Linux build, already kept r14_svc across
+  the interrupt's handlers; it now keeps SPSR_svc too. Their SWIs
+  (CallEvery routines' OS_AddCallBack, ScreenBlanker's ticker, TickerV
+  claimants) write it, and the kernel's tick code doesn't keep it, so SVC
+  mode code between setting SPSR_svc and its MOVS pc came back in SVC mode
+  with IRQs off. On a real ARM that's a two-instruction window; natively
+  each instruction is a trap, and 0.2% of MSR SPSR, MOVS pc pairs run with
+  IRQs on went wrong (UnixLib's mode changes, the web browser's test
+  program: a SWI then loops). Checked with a binary-patched 5.31-17.1:
+  none in 20,000 (31-66 before).
+
 - **The desktop no longer stops now and then as it starts** (the RISC OS 5
   banner stays, usually under QEMU/UTM, more rarely natively). Sound's
   Level1 fill runs voice code in IRQ mode with IRQs enabled; its mode

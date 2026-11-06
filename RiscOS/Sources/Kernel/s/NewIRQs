@@ -50,6 +50,13 @@ Initial_IRQ_Code ROUT
   [ PVSys > 1
         LDR     r1, [r0, #vcpu_r14_svc]
         Push    r1
+        ; SPSR_svc too: interrupt code's SWIs (TickerV, CallEvery routines'
+        ; OS_AddCallBack...) write it, and the code interrupted may be in SVC
+        ; mode between setting SPSR_svc and its MOVS pc. Natively each of
+        ; those is a trap, so the gap is long enough to be hit (0.2% of
+        ; MSR SPSR, MOVS pc pairs run with IRQs on came back in SVC mode).
+        LDR     r1, [r0, #vcpu_spsr_svc]
+        Push    r1
   ]
         MOV     lr, pc
         LDR     pc, [r12, #IRQ1V]
@@ -70,6 +77,8 @@ Initial_IRQ_Code ROUT
 
   [ PVSys > 1
         BL      __PVirt_GetVCPU
+        Pull    r11
+        STR     r11, [r0, #vcpu_spsr_svc]
         Pull    r11
         STR     r11, [r0, #vcpu_r14_svc]
   ]
