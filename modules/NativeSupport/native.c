@@ -133,6 +133,7 @@ static struct
   unsigned sys_entry;		/* __PVirt_LinuxSyscall */
   unsigned swi_handler;		/* the ROM's SIGSYS handler */
   int fastswi;			/* 1: on; 0: off; -1: not in this kernel */
+  int fastfpa;			/* the same, for the fast FPA entry */
   int psr_ok, lur_ok, abtdump_ok, daaddr_ok;		/* the ROM's routines are where expected */
   struct ksigaction old_ill, old_segv, old_bus;
   unsigned midr;
@@ -143,6 +144,7 @@ static struct
   int emul_n;
   /* counts, for *NativeSupport */
   unsigned cond_skipped, lur_thumb, thumb_returns, squeezed_skipped, lur_stubbed;
+  unsigned sync_app_data, sync_own, sync_big, sync_too_big;
   unsigned cp15_barriers, cp15_rewritten, abtdump_sw;
   unsigned da_low, da_high, da_over;
   int tchk_ok;
@@ -291,14 +293,21 @@ trap_count (struct other_trap *t, unsigned pc, unsigned w)
       break;
     else if (e < 0 && !t[k].n)
       e = k;
-  if (k == OTHER_N)
+  if (k == OTHER_N && e >= 0)
     k = e;
-  if (k >= 0)
+  else if (k == OTHER_N)
     {
-      t[k].pc = pc;
-      t[k].insn = w;
-      t[k].n++;
+      /* full: the new place takes the least-counted one's slot and count
+	 (the "space-saving" count: a busy place always gets in, its count
+	 at most that much over) */
+      k = 0;
+      for (int j = 1; j < OTHER_N; j++)
+	if (t[j].n < t[k].n)
+	  k = j;
     }
+  t[k].pc = pc;
+  t[k].insn = w;
+  t[k].n++;
 }
 static unsigned nsites;
 
@@ -2149,7 +2158,7 @@ sq_check (void)
   sq_pending = 0;
   unsigned ro = *(volatile unsigned *) 0x8014u, rw = *(volatile unsigned *) 0x8018u;
   if (*(volatile unsigned *) 0x8010u != 0xef000011u
-      || ro + rw < 0x20u || ro + rw > 0x4000000u)
+      || ro + rw < 0x20u || ro + rw > 0x20000000u - 0x8000u)
     return;
   dbg ("fault-sq-late", 0x8000u, 0x8000u + ro + rw, 0);
   ns.patched_sync += patch_range (0x8000u, 0x8000u + ro + rw);
@@ -2157,13 +2166,50 @@ sq_check (void)
 
 static int in_pmp_area (unsigned lo, unsigned hi);
 
+/* The end of the program at &8000 as its AIF header gives it (read-only
+   and read-write areas), once it's unsqueezed; 0 if &8000 isn't an AIF
+   program */
+static unsigned
+aif_end (void)
+{
+  unsigned ro = *(volatile unsigned *) 0x8014u, rw = *(volatile unsigned *) 0x8018u;
+  if (*(volatile unsigned *) 0x8010u != 0xef000011u || aif_squeezed ()
+      || ro < 0x20u || ro > 0x20000000u - 0x8000u
+      || rw > 0x20000000u - 0x8000u - ro)
+    return 0;
+  return 0x8000u + ro + rw;
+}
+
+/* The current active object: &8000 while a program loaded there runs,
+   a module's address while a module (BASIC, say) is the application */
+static unsigned
+cao (void)
+{
+  regs r = {{ 15, 0, 0, 0 }};
+  if (swix_regs (0x40, &r))			/* OS_ChangeEnvironment */
+    return 0;
+  return r.r[1];
+}
+
 static void
 sync_patch (unsigned lo, unsigned hi)
 {
   /* a range synchronised is code: in application space, the RMA or a
      dynamic area (SOManager's shared libraries are) */
-  if (hi <= lo || hi - lo > 0x4000000u)
+  if (hi <= lo)
     return;
+  /* Up to 64 MB, but in application space a program's image, which can
+     be bigger (the web browser's is 105 MB, 64.4 MB of it code): left
+     unpatched, its UnixLib's MSR CPSR_c back to USR mode did nothing,
+     and its callback handler went on in SVC mode until a SWI looped */
+  if (hi - lo > 0x4000000u && !(hi <= 0x20000000u && lo <= 0x8000u && aif_end ()))
+    {
+      static int nlog;
+      ns.sync_too_big++;
+      if (nlog++ < 20)
+	dbg ("fault-sync-big", lo, hi, *(volatile unsigned *) 0x8000u);
+      return;
+    }
   if (overlaps (lo, hi, ROM_LO, ROM_HI - ROM_LO)	/* the port's own */
       || overlaps (lo, hi, self_lo, self_hi - self_lo)	/* this module, */
       || overlaps (lo, hi, (unsigned) sites, SITES_MAX * sizeof *sites)
@@ -2172,6 +2218,31 @@ sync_patch (unsigned lo, unsigned hi)
     return;
   if (nosyncpatch)
     return;
+  /* In application space, only a program starting (its image at &8000):
+     FileSwitch also synchronises any file loaded with OS_File's "this is
+     code" flag (R3 bit 31), and a program that loads module files that
+     way into a buffer and writes them out again (the DDE's ROM build)
+     wrote out this module's patches: a 5.31-18 ROM built on RISC OS on
+     Linux had 123 of them in 15 modules, and under QEMU it stopped at
+     once. Code in a buffer that is run after all still works, through
+     the traps. */
+  if (hi <= 0x20000000u && !(lo <= 0x8000u && hi > 0x8014u))
+    {
+      /* a part of the program's own image, which it synchronises itself
+	 (a big program's, say, after relocating it): that's its code. Only
+	 while that program is the one running (the current active object
+	 is &8000): when a module such as BASIC runs in application space,
+	 &8000 still holds the last program's header, and what's under it
+	 is the module's workspace, which can hold anything (BASIC's SYS
+	 veneers, a module file loaded into a DIM block) */
+      unsigned end = aif_end ();
+      if (!(end && lo >= 0x8000u && hi <= end && cao () == 0x8000u))
+	{
+	  ns.sync_app_data++;
+	  return;
+	}
+      ns.sync_own++;
+    }
   /* Memory from GCCSDK ARMEABISupport's mmap (its mmap#N areas) is
      never a program's or library's code (SOManager's libraries are in
      its other pools): that's
@@ -2206,6 +2277,16 @@ sync_patch (unsigned lo, unsigned hi)
   /* the unsqueezed program's own synchronisation covers it */
   if (sq_pending && lo <= 0x8000u && hi > 0x8014u && !aif_squeezed ())
     sq_pending = 0;
+  /* a program starting: its image only, not the rest of application
+     space after it (a whole-slot synchronisation would scan its heap) */
+  if (hi <= 0x20000000u && lo <= 0x8000u && hi > 0x8014u)
+    {
+      unsigned end = aif_end ();
+      if (end && hi > end)
+	hi = end;
+      if (hi - lo > 0x4000000u)
+	ns.sync_big++;
+    }
   ns.patched_sync += patch_range (lo, hi);
 }
 
@@ -3213,6 +3294,63 @@ read_pi_model (void)
    Other kernels refuse it, and SWIs go the usual way. */
 #define PR_RISCOS_SWI	0x524f5301u
 
+/* The fast FPA entry (prctl PR_RISCOS_UND): FPA instructions go to
+   ns_und_fast (header.s) straight from Linux's undefined instruction
+   trap, instead of through a SIGILL, this module's SIGILL handler and the
+   port's, and a sigreturn. ns_und_fast needs the ROM's table of the vcpu's
+   mode banks, found in its SWI_handler ("ADD lr, lr, #table - . - 12;
+   LDRB lr, [pc, lr]") and checked. -1: not in this kernel or this ROM. */
+#define PR_RISCOS_UND	0x524f5302u
+extern char ns_und_fast[];
+extern unsigned ns_vmode_offsets;
+
+static unsigned
+arm_imm (unsigned w)
+{
+  unsigned r = ((w >> 8) & 15) * 2, v = w & 255;
+  return r ? (v >> r) | (v << (32 - r)) : v;
+}
+
+static int
+find_vmode_offsets (void)
+{
+  unsigned h = ns.swi_handler;
+  if (!h)
+    return 0;
+  for (unsigned i = 0; i < 12; i++)
+    {
+      unsigned a = h + i * 4;
+      if ((RD (a) & 0xfffff000u) == 0xe28ee000u && RD (a + 4) == 0xe7dfe00eu)
+	{
+	  const volatile uint8_t *t = (const volatile uint8_t *) (a + 4 + 8 + arm_imm (RD (a)));
+	  /* usr, svc, und, abt: the vcpu's banks at 28, 16, 64, 76 */
+	  if (t[0x10] == 28 && t[0x13] == 16 && t[0x1b] == 64 && t[0x17] == 76)
+	    {
+	      ns_vmode_offsets = (unsigned) t;
+	      return 1;
+	    }
+	  return 0;
+	}
+    }
+  return 0;
+}
+
+static void
+fastfpa_set (int on)
+{
+  if (ns.fastfpa < 0)
+    return;
+  if (on && !ns_vmode_offsets && !find_vmode_offsets ())
+    {
+      ns.fastfpa = -1;
+      return;
+    }
+  if (lsys (SYS_prctl, PR_RISCOS_UND, on ? (unsigned) ns_und_fast : 0, 0, 0, 0, 0) == 0)
+    ns.fastfpa = on;
+  else if (on)
+    ns.fastfpa = -1;
+}
+
 static void
 fastswi_set (int on)
 {
@@ -3396,6 +3534,13 @@ mod_init (const char *tail, int instance, void *pw)
     swix_regs (OS_ReadVarVal, &v);
     if (!v.r[2])
       fastswi_set (1);
+  }
+  /* (NativeSupport$NoFastFPA: FPA instructions through SIGILL) */
+  {
+    regs v = {{ (unsigned) "NativeSupport$NoFastFPA", 0, -1, 0, 0 }};
+    swix_regs (OS_ReadVarVal, &v);
+    if (!v.r[2])
+      fastfpa_set (1);
   }
   return NULL;
 }
@@ -3660,27 +3805,49 @@ mod_command (int index, const char *tail, int argc)
 	  return NULL;
 	}
     }
-  /* *NativeSupport FastSWI On|Off */
+  /* *NativeSupport FastSWI On|Off, *NativeSupport FastFPA On|Off */
   if (argc)
     {
-      const char *w = "fastswi ";
-      int i = 0;
-      while (w[i] && (tail[i] | 0x20) == w[i])
-	i++;
-      if (!w[i] || (w[i] == ' ' && !tail[i]))
+      /* characters, not pointers: a table of pointers isn't relocated in
+	 this module (with three words GCC made one, and nothing matched) */
+      static const char words[3][10] = { "fastswi", "fastfpa", "syncpatch" };
+      for (int k = 0; k < 3; k++)
 	{
+	  const char *w = words[k];
+	  int i = 0;
+	  while (w[i] && (tail[i] | 0x20) == w[i])
+	    i++;
+	  if (w[i] || (unsigned char) tail[i] > ' ')
+	    continue;
 	  const char *o = tail + i;
 	  while (*o == ' ')
 	    o++;
-	  if ((o[0] | 0x20) == 'o' && (o[1] | 0x20) == 'n')
-	    fastswi_set (1);
-	  else if ((o[0] | 0x20) == 'o' && (o[1] | 0x20) == 'f')
-	    fastswi_set (0);
+	  int on = (o[0] | 0x20) == 'o' && (o[1] | 0x20) == 'n';
+	  int off = (o[0] | 0x20) == 'o' && (o[1] | 0x20) == 'f';
+	  if (k == 0)
+	    {
+	      if (on || off)
+		fastswi_set (on);
+	      write0 ("Fast SWI entry: ");
+	      write0 (ns.fastswi > 0 ? "on" : ns.fastswi ? "not in this Linux kernel" : "off");
+	    }
+	  else if (k == 2)
+	    {
+	      if (on || off)
+		nosyncpatch = off;
+	      write0 ("Patching new code: ");
+	      write0 (nosyncpatch ? "off" : "on");
+	    }
+	  else
+	    {
+	      if (on || off)
+		fastfpa_set (on);
+	      write0 ("Fast FPA entry: ");
+	      write0 (ns.fastfpa > 0 ? "on" : ns.fastfpa ? "not in this Linux kernel or ROM" : "off");
+	    }
+	  newline ();
+	  return NULL;
 	}
-      write0 ("Fast SWI entry: ");
-      write0 (ns.fastswi > 0 ? "on" : ns.fastswi ? "not in this Linux kernel" : "off");
-      newline ();
-      return NULL;
     }
   write0 ("RISC OS for Linux, native. Processor ");
   write_hex8 (ns.midr);
@@ -3688,6 +3855,9 @@ mod_command (int index, const char *tail, int argc)
   line_out ("Seconds counted (since start-up or *NativeSupport Reset): ", (mono_cs () - reset_cs) / 100);
   write0 ("Fast SWI entry (*NativeSupport FastSWI On|Off): ");
   write0 (ns.fastswi > 0 ? "on" : ns.fastswi ? "not in this Linux kernel" : "off");
+  newline ();
+  write0 ("Fast FPA entry (*NativeSupport FastFPA On|Off): ");
+  write0 (ns.fastfpa > 0 ? "on" : ns.fastfpa ? "not in this Linux kernel or ROM" : "off");
   newline ();
   {
     unsigned fl, gl, fa;
@@ -3718,6 +3888,13 @@ mod_command (int index, const char *tail, int argc)
   line_out ("PMP operations: ", ns.kpmp_ops);
   line_out ("Reporter SWIs ignored: ", ns.reports);
   line_out ("Synchronisations in mmap areas (JIT) left: ", ns.sync_jit);
+  line_out ("Synchronisations in application space, not a program, left: ", ns.sync_app_data);
+  line_out ("Synchronisations of a part of the program, patched: ", ns.sync_own);
+  line_out ("Programs over 64 MB patched: ", ns.sync_big);
+  line_out ("Synchronisations over 64 MB, not a program, left: ", ns.sync_too_big);
+  write0 ("Patching new code (*NativeSupport SyncPatch On|Off): ");
+  write0 (nosyncpatch ? "off" : "on");
+  newline ();
   line_out ("ARMEABISupport 1.05 mmaps over 100MB allowed: ", ns.aeabi105);
   line_out ("Aborts passed to handlers: ", ns.aborts);
   line_out ("IOC timer reads: ", ns.ioc);

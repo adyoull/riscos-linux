@@ -7,6 +7,34 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### 6 Nov 2026: riscos-rom 5.31-18, riscos-support 1.0.0029-1, riscos-harddisc 1.0.0035-1, riscos-kernel-wdk2023 7.2.0-4
+
+- **NativeSupport 0.21: programs over 64 MB are patched.** A program's own
+  image (its AIF read-only and read-write areas) is patched whatever its
+  size, not only up to 64 MB: the web browser (105 MB) wasn't, so
+  UnixLib's `MSR CPSR_c` back to user mode did nothing and the desktop
+  stopped. A synchronisation of part of the program's own image is patched
+  too, but only while that program is running (the current active object
+  is &8000): under BASIC, &8000 can still hold the last program's header.
+  0.20's rule for the rest of application space stays (the DDE's buffers).
+- **SPSR_svc is kept across interrupts.** The kernel's IRQ entry (the
+  Linux build, 5.31-18) keeps SPSR_svc as it kept r14_svc: interrupt
+  code's SWIs (CallEvery routines, ScreenBlanker's ticker) wrote it, so
+  SVC mode code between setting SPSR_svc and `MOVS pc` came back in SVC
+  mode with IRQs off; natively each of those instructions is a trap, and
+  0.2% of such pairs made with IRQs on went wrong (UnixLib's mode changes).
+  LinuxAudio's, USBDriver's and SCSILinux's ticker routines also keep it
+  themselves (for older ROMs). Code should still keep IRQs off between the
+  two, as RISC OS's own does.
+- **rol-fb: Configure → Screen shows the monitor and the mode.** With a
+  real monitor (`-n`), a monitor definition file from Linux's modes and
+  the EDID's name (Monitors.Linux.Screen); each start writes the start-up
+  mode file the way Configure does (a plain `LoadModeFile` and `WimpMode`
+  with the frame rate), only while it's rol-fb's own, never once Configure
+  has saved one.
+- **riscos-rom 5.31-18** also stops the occasional stall on the start-up
+  screen (an IRQ landing in `__PVirt_GetVCPU`).
+
 ### Native: the fast FPA entry (5 Nov 2026; riscos-support 1.0.0028-1, riscos-kernel-pi 6.6.78-6, riscos-kernel-generic 7.2.0-4)
 
 - **FPA instructions (coprocessors 1 and 2: FPEmulator's) go to RISC OS's

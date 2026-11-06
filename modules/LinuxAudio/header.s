@@ -68,9 +68,11 @@ la_ticker:
 	msr	cpsr_c, r1
 	mov	r2, sp
 	bic	sp, sp, #7			@ 8-byte aligned stack for C
-	stmfd	sp!, {r2, r3, r4, lr}
-	bl	la_tick_irq			@ C: decides whether to ask
-	ldmfd	sp!, {r2, r3, r4, lr}
+	mrs	r12, spsr			@ SPSR_svc: la_tick_irq's SWI writes
+	stmfd	sp!, {r2, r3, r12, lr}		@ it, and what this interrupted may
+	bl	la_tick_irq			@ be about to return with it (the
+	ldmfd	sp!, {r2, r3, r12, lr}		@ kernel doesn't keep it for
+	msr	spsr_cxsf, r12			@ ticker routines)
 	mov	sp, r2
 	msr	cpsr_c, r3
 	ldmfd	sp!, {r0-r3, r12, pc}

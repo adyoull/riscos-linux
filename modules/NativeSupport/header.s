@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"NativeSupport"
-help:	.asciz	"NativeSupport\t0.18 (03 Nov 2026) RISC OS for Linux, native"
+help:	.asciz	"NativeSupport\t0.21 (06 Nov 2026) RISC OS for Linux, native"
 	.align	2
 commands:
 	.asciz	"NativeSupport"
@@ -35,7 +35,7 @@ commands:
 	.word	cmd_help - module_start
 	.word	0
 cmd_help:
-	.asciz	"*NativeSupport shows what NativeSupport does for RISC OS running natively on Linux: the privileged instructions patched and emulated, and the other calls it handles. *NativeSupport FastSWI On|Off turns the fast SWI entry (riscos-linux kernels) on or off. *NativeSupport Reset starts the counts again.\rSyntax: *NativeSupport [FastSWI On|Off|Reset]"
+	.asciz	"*NativeSupport shows what NativeSupport does for RISC OS running natively on Linux: the privileged instructions patched and emulated, and the other calls it handles. *NativeSupport FastSWI On|Off turns the fast SWI entry (riscos-linux kernels) on or off, *NativeSupport FastFPA On|Off the fast FPA entry (FPEmulator's instructions). *NativeSupport Reset starts the counts again.\rSyntax: *NativeSupport [FastSWI On|Off|FastFPA On|Off|Reset]"
 	.align	2
 flags:	.word	1				@ 32-bit compatible
 
@@ -243,4 +243,52 @@ probe_recover:
 	mov	r0, #0
 	ldmfd	sp!, {r4-r11, pc}
 probe_sp:
+	.word	0
+
+@ The fast FPA entry (riscos-linux's kernels, prctl PR_RISCOS_UND): an FPA
+@ instruction (coprocessor 1 or 2) comes here straight from Linux's
+@ undefined instruction trap, with r1 a siginfo and r2 a ucontext (r0-r15,
+@ the CPSR) on the signal stack, as for a SIGILL but without the signal.
+@ This does what the port's undefined_signal_handler does (its
+@ ENTER_EXCEPTION(UND, 0, 4)), then goes to RISC OS's undefined
+@ instruction vector (FPEmulator) itself, as the port's SWI_handler does
+@ for the SVC vector, instead of returning through sigreturn:
+@   the current mode's r13, r14 into its bank; UND's SPSR = the flags and
+@   the vcpu's mode; the vcpu in UND mode, IRQs off; r13 = UND's, r14 =
+@   the instruction + 4, r0-r12 as they were; pc = vectors[0].
+@ The kernel has already set the vcpu's I bit (and passes the old CPSR
+@ byte as si_errno), so an interrupt signal arriving here is deferred by
+@ the port's handler, as one arriving in its SWI_handler is: taken here, the
+@ RISC OS IRQ code's SWIs could overwrite this frame before it is read.
+@ ns_vmode_offsets: the ROM's __PVirt_VModeOffsets (from its SWI_handler).
+@ The vcpu's layout: +8 vectors, +13 cpsr, +16 SVC, ... +64 UND
+@ {r13, r14, spsr}.
+	.global	ns_und_fast, ns_vmode_offsets
+ns_und_fast:
+	mrc	p15, 0, r0, c13, c0, 3		@ TPIDRURO: the vcpu
+	ldr	r6, [r1, #4]			@ vcpu->cpsr before the trap (its mode;
+						@ the kernel has set its I bit)
+	and	lr, r6, #31
+	ldr	r3, ns_vmode_offsets
+	ldrb	lr, [r3, lr]
+	add	lr, lr, r0			@ the current mode's bank
+	add	r3, r2, #32 + 12 * 4		@ &uc r12
+	ldmia	r3, {r2, r4, r5, r7, r8}	@ r12, r13, r14, pc, CPSR
+	stmia	lr, {r4, r5}			@ bank r13, r14 (before reading UND's)
+	bic	r8, r8, #0xDF
+	orr	r8, r8, r6
+	str	r8, [r0, #64 + 8]		@ UND's SPSR
+	ldr	r12, [r0, #64]			@ UND's r13
+	mov	r1, #0x9B			@ UND32_mode + I32_bit
+	strb	r1, [r0, #13]
+	ldr	r1, [r0, #8]			@ vcpu->vectors
+	ldr	r4, [r1]			@ the undefined instruction vector
+						@ (vectors[0], as the port's handler)
+	stmfd	r12!, {r2, r4}
+	add	lr, r7, #4			@ r14_und = the instruction + 4
+	sub	r3, r3, #12 * 4
+	ldmia	r3, {r0-r11}
+	mov	sp, r12
+	ldmfd	sp!, {r12, pc}
+ns_vmode_offsets:
 	.word	0

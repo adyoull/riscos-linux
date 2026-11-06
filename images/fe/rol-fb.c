@@ -103,6 +103,7 @@ static int pcmouse, realmonitor;
 static int fb_fd = -1, fb_w, fb_h, fb_bpp, fb_stride;
 static int drm_fd = -1;
 static uint32_t drm_conn, drm_crtc, drm_fb, drm_handle;
+static unsigned host_hz;	/* the display mode's frame rate (DRM) */
 static size_t fb_size;
 static unsigned char *fb;
 static uint32_t *back;				/* fb_w x fb_h, 0x00RRGGBB */
@@ -352,6 +353,7 @@ drm_open (void)
 	{
 	  host_w = mode.hdisplay;
 	  host_h = mode.vdisplay;
+	  host_hz = mode.vrefresh;
 	}
     }
   if (drm_fd < 0)
@@ -1850,6 +1852,230 @@ confine (void)
   return 0;
 }
 
+/* --- the monitor's own modes for RISC OS (-n: a real monitor) ---
+   A monitor definition file for Configure, Screen (ScreenModes): the
+   monitor's name from its EDID and the modes Linux's display driver lists
+   for it, with their timings, at
+   HardDisc4.!Boot.Resources.Configure.Monitors.Linux.Screen. The image's
+   start-up mode file loads it if it's there (else Monitors.Other.UTM, for
+   a window that takes any size). Written at each start, and removed when
+   there's no monitor to describe, so a disc moved to another machine
+   doesn't keep the last one's. */
+#define MDF_DIR "/riscos/HardDisc4/!Boot/Resources/Configure/Monitors/Linux"
+#define MDF_PATH MDF_DIR "/Screen,fff"
+
+/* The monitor's name (EDID descriptor &FC), or its maker's three letters
+   and product code, from the connector's EDID property; 0 if none. */
+static int
+edid_name (uint32_t conn_id, char *out, size_t len)
+{
+  struct drm_mode_get_connector c = { .connector_id = conn_id };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) || !c.count_props)
+    return 0;
+  uint32_t ids[64];
+  uint64_t vals[64];
+  if (c.count_props > 64)
+    c.count_props = 64;
+  c.count_modes = 0;
+  c.count_encoders = 0;
+  c.props_ptr = (uintptr_t) ids;
+  c.prop_values_ptr = (uintptr_t) vals;
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c))
+    return 0;
+  for (uint32_t i = 0; i < c.count_props; i++)
+    {
+      struct drm_mode_get_property p = { .prop_id = ids[i] };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPROPERTY, &p) || strcmp (p.name, "EDID") || !vals[i])
+	continue;
+      uint8_t e[256];
+      struct drm_mode_get_blob b = { .blob_id = (uint32_t) vals[i] };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPROPBLOB, &b) || b.length < 128)
+	return 0;
+      if (b.length > sizeof e)
+	b.length = sizeof e;
+      b.data = (uintptr_t) e;
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPROPBLOB, &b))
+	return 0;
+      for (int d = 54; d <= 108; d += 18)
+	if (!e[d] && !e[d + 1] && !e[d + 2] && e[d + 3] == 0xFC)
+	  {
+	    size_t n = 0;
+	    for (int k = d + 5; k < d + 18 && e[k] != 0x0A && e[k] && n + 1 < len; k++)
+	      out[n++] = e[k] >= ' ' && e[k] < 127 ? e[k] : ' ';
+	    while (n && out[n - 1] == ' ')
+	      n--;
+	    out[n] = 0;
+	    if (n)
+	      return 1;
+	  }
+      unsigned m = e[8] << 8 | e[9];
+      snprintf (out, len, "%c%c%c %04X", '@' + (m >> 10 & 31), '@' + (m >> 5 & 31),
+		'@' + (m & 31), e[10] | e[11] << 8);
+      return 1;
+    }
+  return 0;
+}
+
+/* the sizes and rates written in it (write_mdf), for the start-up mode */
+static unsigned mdf_modes[64][3];
+static int mdf_count;
+
+static int
+mdf_has (int w, int h)
+{
+  for (int i = 0; i < mdf_count; i++)
+    if ((int) mdf_modes[i][0] == w && (int) mdf_modes[i][1] == h)
+      return 1;
+  return 0;
+}
+
+static void
+write_mdf (void)
+{
+  struct drm_mode_get_connector c = { .connector_id = drm_conn };
+  struct drm_mode_modeinfo modes[64];
+  if (drm_fd < 0 || !drm_conn || ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) || !c.count_modes)
+    {
+      unlink (MDF_PATH);
+      return;
+    }
+  if (c.count_modes > 64)
+    c.count_modes = 64;
+  c.modes_ptr = (uintptr_t) modes;
+  c.count_props = 0;
+  c.count_encoders = 0;
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c))
+    return;
+  char name[48];
+  if (!edid_name (drm_conn, name, sizeof name))
+    snprintf (name, sizeof name, "Monitor");
+  char buf[24576];
+  size_t n = snprintf (buf, sizeof buf,
+    "# Monitor definition file written by rol-fb (RISC OS for Linux) for the\n"
+    "# monitor connected at start-up: the modes Linux's display driver lists\n"
+    "# for it. Written again at each start; edits here are lost.\n\n"
+    "file_format:1\nmonitor_title:%s\nDPMS_state:0\n", name);
+  int written = 0;
+  unsigned (*done)[3] = mdf_modes;
+  /* the preferred mode first, then the rest in Linux's order */
+  for (int pass = 0; pass < 2; pass++)
+    for (uint32_t i = 0; i < c.count_modes && n < sizeof buf - 512; i++)
+      {
+	struct drm_mode_modeinfo *m = &modes[i];
+	if ((!(m->type & DRM_MODE_TYPE_PREFERRED)) != pass)
+	  continue;
+	if (m->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN | DRM_MODE_FLAG_DBLCLK))
+	  continue;
+	/* up to 16MB of screen memory (2560 x 1600 in 16 million colours) */
+	if ((size_t) m->hdisplay * m->vdisplay * 4 > 16u << 20 || !m->clock)
+	  continue;
+	/* once each size and frame rate */
+	int dup = 0;
+	for (int j = 0; j < written && !dup; j++)
+	  dup = done[j][0] == m->hdisplay && done[j][1] == m->vdisplay && done[j][2] == m->vrefresh;
+	if (dup)
+	  continue;
+	done[written][0] = m->hdisplay;
+	done[written][1] = m->vdisplay;
+	done[written][2] = m->vrefresh;
+	n += snprintf (buf + n, sizeof buf - n,
+	  "\n# %u x %u, %u Hz%s\nstartmode\nmode_name:%u x %u\nx_res:%u\ny_res:%u\n"
+	  "pixel_rate:%u\nh_timings:%u,%u,0,%u,0,%u\nv_timings:%u,%u,0,%u,0,%u\n"
+	  "sync_pol:%u\nendmode\n",
+	  m->hdisplay, m->vdisplay, m->vrefresh,
+	  m->type & DRM_MODE_TYPE_PREFERRED ? " (the monitor's own)" : "",
+	  m->hdisplay, m->vdisplay, m->hdisplay, m->vdisplay, m->clock,
+	  m->hsync_end - m->hsync_start, m->htotal - m->hsync_end, m->hdisplay,
+	  m->hsync_start - m->hdisplay,
+	  m->vsync_end - m->vsync_start, m->vtotal - m->vsync_end, m->vdisplay,
+	  m->vsync_start - m->vdisplay,
+	  (m->flags & DRM_MODE_FLAG_NHSYNC ? 1 : 0) | (m->flags & DRM_MODE_FLAG_NVSYNC ? 2 : 0));
+	written++;
+      }
+  mdf_count = written;
+  if (!written)
+    {
+      unlink (MDF_PATH);
+      return;
+    }
+  /* only if it changed (the SD card is written as little as can be) */
+  char old[sizeof buf];
+  int fd = open (MDF_PATH, O_RDONLY | O_CLOEXEC);
+  if (fd >= 0)
+    {
+      ssize_t r = read (fd, old, sizeof old);
+      close (fd);
+      if (r == (ssize_t) n && !memcmp (old, buf, n))
+	return;
+    }
+  mkdir (MDF_DIR, 0755);
+  if (chown (MDF_DIR, 1000, 1000)) { }
+  fd = open (MDF_DIR "/Screen,fff.new", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0)
+    return;
+  int ok = write (fd, buf, n) == (ssize_t) n;
+  if (fchown (fd, 1000, 1000)) { }
+  close (fd);
+  if (ok && rename (MDF_DIR "/Screen,fff.new", MDF_PATH) == 0)
+    fprintf (stderr, "rol-fb: monitor definition for \"%s\": %d modes\n", name, written);
+  else
+    unlink (MDF_DIR "/Screen,fff.new");
+}
+
+/* The start-up mode file, Choices:Boot.PreDesk.Configure.Monitor, as
+   Configure, Screen writes one: a LoadModeFile line and a plain WimpMode
+   line, so that Configure shows the monitor, resolution, colours and
+   frame rate (it doesn't follow an alias or variables: images up to
+   1.0.0018 set the mode with ROL$ScreenWidth/Height in an alias, and
+   Configure showed "Unknown"). Written at each start while it is rol-fb's
+   (or that older one), never once Configure has saved its own. */
+#define MONITOR_CHOICE "/riscos/HardDisc4/!Boot/Choices/Boot/PreDesk/Configure/Monitor,feb"
+
+static void
+write_monitor_choice (int w, int h, unsigned hz, int own_mdf)
+{
+  char old[4096];
+  ssize_t r = -1;
+  int fd = open (MONITOR_CHOICE, O_RDONLY | O_CLOEXEC);
+  if (fd >= 0)
+    {
+      r = read (fd, old, sizeof old - 1);
+      close (fd);
+      if (r < 0)
+	return;
+      old[r] = 0;
+      if (!strstr (old, "| Written by rol-fb") && !strstr (old, "Alias$ROLScreenMode"))
+	return;			/* Configure's: leave it */
+    }
+  char buf[1024], f[16] = "";
+  if (hz)
+    snprintf (f, sizeof f, " F%u", hz);
+  int n = snprintf (buf, sizeof buf,
+    "| The screen mode at start. rol-fb writes this at each start: the\n"
+    "| monitor (Monitors.Linux.Screen is the one connected, from Linux;\n"
+    "| Monitors.Other.UTM is a window that takes any size) and the screen's\n"
+    "| size. Choosing a mode in Configure, Screen and clicking Set replaces\n"
+    "| this file, and rol-fb leaves that one alone (delete it to have this\n"
+    "| one back).\n"
+    "| Written by rol-fb\n"
+    "LoadModeFile BootResources:Configure.Monitors.%s\n"
+    "WimpMode X%d Y%d C16M%s\n",
+    own_mdf ? "Linux.Screen" : "Other.UTM", w, h, f);
+  if (r == n && !memcmp (old, buf, n))
+    return;
+  fd = open (MONITOR_CHOICE ".new", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0)
+    return;
+  int ok = write (fd, buf, n) == n;
+  if (fchown (fd, 1000, 1000)) { }
+  close (fd);
+  if (ok && rename (MONITOR_CHOICE ".new", MONITOR_CHOICE) == 0)
+    fprintf (stderr, "rol-fb: start-up mode %dx%d%s (%s)\n", w, h, f,
+	     own_mdf ? "Monitors.Linux.Screen" : "Monitors.Other.UTM");
+  else
+    unlink (MONITOR_CHOICE ".new");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1870,6 +2096,21 @@ main (int argc, char **argv)
     }
   if (fb_open ())
     return 1;
+  if (realmonitor)
+    write_mdf ();
+  /* the start-up mode: the screen's size, halved until it fits the port's
+     16 MB screen in 16M colours (as ROL$ScreenWidth/Height, below) */
+  {
+    int w = host_w ? host_w : fb_w, h = host_h ? host_h : fb_h, halved = 0;
+    while ((long) w * h * 4 > 16L * 1024 * 1024)
+      w /= 2, h /= 2, halved = 1;
+    struct stat st;
+    int own = realmonitor && stat (MDF_PATH, &st) == 0 && mdf_has (w, h);
+    /* the frame rate where it's the monitor's own mode; none for UTM's
+       window (any size: as the earlier file, which gave none) */
+    if (w >= 320 && h >= 200)
+      write_monitor_choice (w, h, own && !halved ? host_hz : 0, own);
+  }
   pixels = mmap (NULL, SCREEN_MAX, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (pixels == MAP_FAILED)
     {

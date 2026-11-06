@@ -86,7 +86,11 @@ call_bufman:
 @ the ticker (OS_CallEvery): asks for a callback, once
 	.global	ticker_entry
 ticker_entry:
-	stmfd	sp!, {r0-r1, lr}
+	stmfd	sp!, {r0-r2, lr}
+	mrs	r2, spsr			@ SPSR_svc: the SWI below writes it, and
+					@ the code interrupted may be about to
+					@ return with it (the kernel doesn't
+					@ keep it for ticker routines)
 	ldr	r0, [r12, #0]			@ r12 -> our state: +0 callback pending
 	teq	r0, #0
 	bne	2f
@@ -95,7 +99,8 @@ ticker_entry:
 	adr	r0, callback_entry
 	mov	r1, r12
 	swi	0x20054				@ XOS_AddCallBack
-2:	ldmfd	sp!, {r0-r1, pc}
+2:	msr	spsr_cxsf, r2
+	ldmfd	sp!, {r0-r2, pc}
 
 @ the callback: c_poll() with everything kept
 	.global	callback_entry
