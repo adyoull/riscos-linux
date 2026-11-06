@@ -399,8 +399,13 @@ REM cut mid-line), and apt reports its progress ("pmstatus:", "dlstatus:"
 REM lines, APT::Status-Fd), shown as it goes
 DEF FNapt="stdbuf -oL -eL apt-get -o APT::Status-Fd=1 "
 
+REM A package list cut short (a power cut or a reset while apt wrote it)
+REM stops every check ("LZ4F: ... Unexpected end of file", "The package
+REM lists ... could not be parsed"), and apt doesn't fetch it again while
+REM its InRelease hasn't changed. Only when apt can't read its lists: they
+REM all go and are fetched again (a failure to reach a server leaves them)
 DEF PROCcheck
-PROCrun(FNapt+"update --error-on=any && /usr/lib/riscos/rol-info --fetch",1)
+PROCrun(FNapt+"update --error-on=any || { ! apt-cache stats >/dev/null && find /var/lib/apt/lists -type f -delete && apt-get update --error-on=any; } && /usr/lib/riscos/rol-info --fetch",1)
 ENDPROC
 
 DEF PROCinstall
