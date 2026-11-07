@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"NativeSupport"
-help:	.asciz	"NativeSupport\t0.22 (06 Nov 2026) RISC OS for Linux, native"
+help:	.asciz	"NativeSupport\t0.30 (07 Nov 2026) RISC OS for Linux, native"
 	.align	2
 commands:
 	.asciz	"NativeSupport"
@@ -127,6 +127,9 @@ ns_swi_vector:
 	teq	r2, #0x68
 	teqne	r2, #0x66
 	teqne	r2, #0x58			@ OS_ReadSysInfo (9, 7: the platform name)
+	teqne	r2, #0x0C			@ OS_GBPB, OS_File: writes of a program's
+	teqne	r2, #0x08			@ patched words copied as data
+	teqne	r2, #0x3A			@ OS_ValidateAddress (PMP areas, as OS_Memory 24)
 	beq	1f
 	sub	r3, r2, #0xC0000
 	teq	r3, #2

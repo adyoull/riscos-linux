@@ -125,7 +125,12 @@ typedef void sighandler (int, void *, void *);
 #define UC_REGS(uc)	((unsigned *) ((char *) (uc) + 32))
 #define UC_ERROR(uc)	(((unsigned *) (uc))[6])
 #define CPSR_V		0x10000000u
+#define CPSR_C		0x20000000u
 #define CPSR_T		0x20u
+/* ITSTATE (Thumb-2 IT blocks): bits 26:25 and 15:10 */
+#define CPSR_IT		0x0600fc00u
+/* what MSR CPSR_fs sets: N Z C V Q, GE */
+#define CPSR_APSR	0xf80f0000u
 
 static struct
 {
@@ -144,11 +149,12 @@ static struct
   int emul_n;
   /* counts, for *NativeSupport */
   unsigned cond_skipped, lur_thumb, thumb_returns, squeezed_skipped, lur_stubbed;
-  unsigned sync_app_data, sync_app_code, sync_own, sync_big, sync_too_big;
+  unsigned it_returns;		/* Thumb returns inside an IT block (full) */
+  unsigned sync_app_data, sync_app_prog, sync_app_code, unpatched_words, unpatched_writes, sync_own, sync_big, sync_too_big;
   unsigned cp15_barriers, cp15_rewritten, abtdump_sw;
   unsigned da_low, da_high, da_over;
   int tchk_ok;
-  unsigned patched, patched_rom, patched_sync, syncs, full_syncs, flush_sites, stubbed, full, probe_faults, in_full, imb_full, emul_psr, emul_priv, getdents, mem0,
+  unsigned patched, patched_rom, patched_sync, syncs, full_syncs, flush_sites, stubbed, full, probe_faults, in_full, imb_full, emul_psr, emul_priv, getdents, mem0, mem24,
     pmp_swis, ioc, aborts, kpmp_ops, reports, sync_jit, aeabi105;
 } ns;
 
@@ -341,6 +347,13 @@ site_at (unsigned pc, unsigned w)
 /* (Sites aren't reused: application space's belong to tasks that may be
    paged out. 16384 of them is far more than a desktop's.) */
 static int debug, debug_faults;
+/* who synchronised application space (sync_patch, *NativeSupport) */
+struct syncwho { unsigned caller, cao, lo, hi, n, sites, s_addr, s_orig; char what; };
+#define SYNCWHO_MAX 48
+static struct syncwho syncwho[SYNCWHO_MAX];
+static unsigned nsyncwho, syncwho_lost, syncwho_logged;
+static int syncwho_cur = -1;	/* the row whose sync is being patched */
+static unsigned app_sites;	/* sites made in application space (ever) */
 static void dbg (const char *what, unsigned a, unsigned b, unsigned c);
 static int
 site_add (unsigned *p, unsigned kind)
@@ -360,6 +373,14 @@ site_add (unsigned *p, unsigned kind)
 	dbg ("fault-site", (unsigned) p, *p, kind);
       }
   }
+  if ((unsigned) p < 0x20000000u)
+    app_sites++;
+  if (syncwho_cur >= 0 && (unsigned) p < 0x20000000u)
+    {
+      struct syncwho *w = &syncwho[syncwho_cur];
+      if (!w->sites++)
+	w->s_addr = (unsigned) p, w->s_orig = *p;
+    }
   sites[i].addr = (unsigned) p;
   sites[i].orig = *p;
   sites[i].kind = kind;
@@ -441,6 +462,17 @@ psr_insn (const unsigned *p, const unsigned *lo, const unsigned *hi)
     return cpsr || spsr;
   if (!cpsr)
     return 0;
+  /* Thumb-2 code read as ARM words: a 32-bit branch (B<c>.W, B.W, BL:
+     first halfword F000-F7FF, second with its top bit set) is a
+     conditional MSR CPSR, Rm to the rules below when its offset is
+     right. Iris's JavaScriptCore has two in its interpreter (LLInt, in
+     the shared library): "beq.w" after a call's slow path, F000 812D,
+     is MSRHI CPSR_fsc, r0. Patched to a UDF, the Thumb code ran two
+     other instructions instead and went to "throw" with no exception
+     pending: the web process aborted (bbc.co.uk). Real ARM code doesn't
+     write the CPSR under HI, LS, GE, LT or LE. */
+  if ((w & 0xf800u) == 0xf000u && (w >> 31))
+    return 0;
   for (int d = -2; d <= 2; d++)
     if (d && p + d >= lo && p + d < hi && (p[d] >> 28) == 14)
       return 1;
@@ -462,7 +494,10 @@ psr_insn (const unsigned *p, const unsigned *lo, const unsigned *hi)
   for (int d = -2; d <= 2; d++)
     if (d && p + d >= lo && p + d < hi && (p[d] >> 28) == cond
 	&& ((p[d] & 0x0fff0fffu) == 0x010f0000u
-	    || (p[d] & 0x0ff0fff0u) == 0x0120f000u
+	    /* (an MSR that sets the control field, as such a veneer's
+	       does: a table in Iris's libwebkit2gtk .rodata has
+	       &0128F006, &012FF007 side by side) */
+	    || ((p[d] & 0x0ff0fff0u) == 0x0120f000u && (p[d] & 0x10000u))
 	    || stub_branch (p + d)))
       {
 	veneer_psr++;
@@ -563,20 +598,26 @@ lur_stub (void)
   if (!slot)
     return 0;
   unsigned to = branch_to (lur, (unsigned) slot, 14);
-  unsigned back = branch_to ((unsigned) (slot + 6), lur + 4, 14);
+  unsigned back = branch_to ((unsigned) (slot + 9), lur + 4, 14);
   if (!to || !back)
     return 0;
-  if (!rom_writable ((unsigned) slot, (unsigned) (slot + 7), 1))
+  if (!rom_writable ((unsigned) slot, (unsigned) (slot + 10), 1))
     return 0;
-  slot[0] = 0xe3130020u;	/* tst r3, #&20 */
-  slot[1] = 0x13c33020u;	/* bicne r3, r3, #&20 */
-  slot[2] = 0x1591903cu;	/* ldrne r9, [r1, #60] */
-  slot[3] = 0x13899001u;	/* orrne r9, r9, #1 */
-  slot[4] = 0x1581903cu;	/* strne r9, [r1, #60] */
-  slot[5] = 0xe1a0900eu;	/* mov r9, lr */
-  slot[6] = back;
-  rom_writable ((unsigned) slot, (unsigned) (slot + 7), 0);
-  sync_code ((unsigned) slot, (unsigned) (slot + 7));
+  /* Inside an IT block (ITSTATE in r3) the T bit stays: the mode
+     switch's T check then stops in fault_body, which returns through the
+     signal frame (only that can set ITSTATE) */
+  slot[0] = 0xe3130406u;	/* tst r3, #&06000000 */
+  slot[1] = 0x03130cfcu;	/* tsteq r3, #&FC00 */
+  slot[2] = 0x1a000004u;	/* bne slot+8 */
+  slot[3] = 0xe3130020u;	/* tst r3, #&20 */
+  slot[4] = 0x13c33020u;	/* bicne r3, r3, #&20 */
+  slot[5] = 0x1591903cu;	/* ldrne r9, [r1, #60] */
+  slot[6] = 0x13899001u;	/* orrne r9, r9, #1 */
+  slot[7] = 0x1581903cu;	/* strne r9, [r1, #60] */
+  slot[8] = 0xe1a0900eu;	/* mov r9, lr */
+  slot[9] = back;
+  rom_writable ((unsigned) slot, (unsigned) (slot + 10), 0);
+  sync_code ((unsigned) slot, (unsigned) (slot + 10));
   if (!rom_writable (lur, lur + 4, 1))
     return 0;
   *(volatile unsigned *) lur = to;
@@ -719,7 +760,13 @@ patch_range (unsigned lo, unsigned hi)
       n += site_add (p, KIND_PSR);
     else if (psr_insn (p, a, b))
       {
-	if ((*p & 0x0fff0fffu) == 0x010f0000u && mrs_stub (p))
+	/* MRS rd, CPSR: a branch to a stub (no signal), but not in
+	   application space: a program's image may be copied out as data
+	   (CMHG's veneer templates in the DDE's ROM build), and a copy of
+	   the branch can't be told from any other branch there; a UDF can,
+	   and is put back as it's written to a file (unpatch_copies) */
+	if ((*p & 0x0fff0fffu) == 0x010f0000u && (unsigned) p >= 0x20000000u
+	    && mrs_stub (p))
 	  n++;
 	else if (site_add (p, KIND_PSR))
 	  n++;
@@ -860,14 +907,20 @@ exception_return (unsigned *R, unsigned vcpu, unsigned vmode,
   unsigned *k = (unsigned *) blk;
   for (int i = 0; i < 13; i++)
     k[i] = r[i];
-  if (spsr & 0x20)
-    newpc |= 1;		/* back to Thumb code: an interworking load */
+  /* back to Thumb code: an interworking load; but into the middle of an
+     IT block (ARMEABISupport's abort handler mapping a thread's stack
+     under a Thumb-2 load or store) the T bit stays, for the mode switch's
+     T check: fault_body then returns through the signal frame, which
+     puts ITSTATE back */
+  int it = (spsr & 0x20) && (spsr & CPSR_IT);
+  if ((spsr & 0x20) && !it)
+    newpc |= 1;
   k[13] = usr13;
   k[14] = usr14;
   k[15] = newpc;
   R[1] = blk;
   R[2] = r[13];
-  R[3] = spsr & ~0x20u;
+  R[3] = it ? spsr : spsr & ~0x20u;
   R[14] = r[14];
   R[13] = blk;
   R[9] = r[14];			/* its first instruction (patched): mov r9, lr */
@@ -1165,6 +1218,27 @@ p_swp (void *a)
   return 1;
 }
 
+/* Work done inside the SIGILL handler that calls RISC OS SWIs (a
+   synchronisation's sync_patch: cao (), in_fileswitch (); da_place): the
+   port's handlers don't have SA_NODEFER, so SIGILL is blocked here, and a
+   patched instruction met inside such a SWI - another module on the SWI
+   vector (EDTCore's swi_entry starts with MRS r0, SPSR, a UDF site) -
+   made Linux end RISC OS with SIGILL. Let SIGILL, SIGSEGV and SIGBUS in
+   around it, as fault_dump does for SIGSEGV and SIGBUS. */
+static int
+traps_in (unsigned old[2])
+{
+  unsigned set[2] = { 1u << (SIGILL_ - 1) | 1u << (SIGSEGV_ - 1) | 1u << (SIGBUS_ - 1), 0 };
+  return lsys (SYS_rt_sigprocmask, 1, (unsigned) set, (unsigned) old, 8, 0, 0) == 0;
+}
+
+static void
+traps_back (int masked, unsigned old[2])
+{
+  if (masked)
+    lsys (SYS_rt_sigprocmask, 2, (unsigned) old, 0, 8, 0, 0);
+}
+
 static int
 probe (int (*fn) (void *), unsigned *R, unsigned insn)
 {
@@ -1455,6 +1529,8 @@ ill_body (int sig, void *si, void *uc)
 	      /* new code: every OS_SynchroniseCodeAreas, module load and
 		 program start comes here, one area at a time (but not a
 		 whole-cache synchronisation: everything, data too) */
+	      unsigned old[2];
+	      int masked = traps_in (old);
 	      if (!ns.in_full)
 		{
 		  struct pargs a = { R, 0, R[0], R[1] };
@@ -1466,13 +1542,17 @@ ill_body (int sig, void *si, void *uc)
 		  probe_call (p_sync_rma, 0);
 		  ns.full_syncs++;
 		}
+	      traps_back (masked, old);
 	      R[0] = lsys (R[7], R[0], R[1], R[2], 0, 0, 0);
 	      R[15] = pc + 4;
 	      return;
 	    }
 	  if (s->kind == KIND_DAADDR)
 	    {
+	      unsigned old[2];
+	      int masked = traps_in (old);
 	      unsigned a = da_place (R);
+	      traps_back (masked, old);
 	      if (debug_faults)
 		{
 		  unsigned w0 = 0;
@@ -1515,7 +1595,7 @@ ill_body (int sig, void *si, void *uc)
 		 an interworking load: an interrupted Thumb program's (Iris's
 		 JavaScript), passed back by UnixLib's callback handler, goes
 		 back with bit 0 of its pc set instead. Then "mov r9, lr". */
-	      if (R[3] & CPSR_T)
+	      if ((R[3] & CPSR_T) && !(R[3] & CPSR_IT))
 		{
 		  R[3] &= ~CPSR_T;
 		  *(volatile unsigned *) (R[1] + 60) |= 1;
@@ -1621,7 +1701,7 @@ ill_body (int sig, void *si, void *uc)
    Area 22 (as qemu/ patch item 5) */
 #define PMP_MAX 16
 #define ABH_MAX 16
-static struct { int da, fd; unsigned base, pages; } pmp[PMP_MAX];
+static struct { int da, fd; unsigned base, pages; unsigned char *map; } pmp[PMP_MAX];	/* map: per page, 1 if mapped (OS_Memory 24) */
 static struct { unsigned routine, r12; } abh[ABH_MAX];
 static unsigned abh_regs, abh_return, abh_fault, abh_saved[17];
 static int abh_active = -1, abh_sig, abh_code;
@@ -1647,7 +1727,11 @@ pmp_unmap (int i, unsigned l, unsigned n)
   if (l >= pmp[i].pages || n > pmp[i].pages - l)
     return -22;
   unsigned a = pmp[i].base + (l << 12);
-  return map_fixed (a, n << 12, 0, 0x32, -1, 0) == a ? 0 : -22;
+  if (map_fixed (a, n << 12, 0, 0x32, -1, 0) != a)
+    return -22;
+  if (pmp[i].map)
+    memset (pmp[i].map + l, 0, n);
+  return 0;
 }
 
 static int
@@ -1657,7 +1741,11 @@ pmp_map (int i, unsigned l, unsigned ph, unsigned n)
       || n > pmp[i].pages - ph)
     return -22;
   unsigned a = pmp[i].base + (l << 12);
-  return map_fixed (a, n << 12, 7, 0x11, pmp[i].fd, ph) == a ? 0 : -12;
+  if (map_fixed (a, n << 12, 7, 0x11, pmp[i].fd, ph) != a)
+    return -12;
+  if (pmp[i].map)
+    memset (pmp[i].map + l, 1, n);
+  return 0;
 }
 
 static int
@@ -1685,6 +1773,9 @@ pmp_op (unsigned *r)
 	    pmp[i].fd = fd;
 	    pmp[i].base = r[2];
 	    pmp[i].pages = r[3];
+	    pmp[i].map = rma_claim (r[3]);
+	    if (pmp[i].map)
+	      memset (pmp[i].map, 0, r[3]);
 	    return 0;
 	  }
       return -28;
@@ -1694,6 +1785,8 @@ pmp_op (unsigned *r)
       pmp_unmap (i, 0, pmp[i].pages);
       lsys3 (SYS_close, pmp[i].fd, 0, 0);
       pmp[i].fd = 0;
+      rma_free (pmp[i].map);
+      pmp[i].map = 0;
       return 0;
     case 2:
       return (i = pmp_find (r[1])) < 0 ? -2 : pmp_map (i, r[2], r[3], r[4]);
@@ -1797,8 +1890,20 @@ abh_return_swi (unsigned *r, unsigned *spsr)
   /* back to Thumb code (an abort in it: Iris's JavaScript): as the port
      does, the T bit isn't put in the SPSR - its mode switch refuses it -
      but the return address's bit 0 says Thumb (an interworking load) */
-  r[13] = abh_saved[15] | ((abh_saved[16] & CPSR_T) ? 1 : 0);
-  *spsr = (abh_saved[16] & ~0xffu & ~CPSR_T) | (abh_vmode & 0xdf);
+  /* Inside an IT block, though, the T bit stays in the SPSR: the mode
+     switch stops at its T check, and fault_body returns through the
+     signal frame, which puts ITSTATE back (an interworking load can't:
+     the rest of the block would run unconditionally) */
+  if ((abh_saved[16] & CPSR_T) && (abh_saved[16] & CPSR_IT))
+    {
+      r[13] = abh_saved[15] & ~1u;
+      *spsr = (abh_saved[16] & ~0xffu) | (abh_vmode & 0xdf) | CPSR_T;
+    }
+  else
+    {
+      r[13] = abh_saved[15] | ((abh_saved[16] & CPSR_T) ? 1 : 0);
+      *spsr = (abh_saved[16] & ~0xffu & ~CPSR_T) | (abh_vmode & 0xdf);
+    }
   {
     unsigned *usr = (unsigned *) (get_tls () + 28);
     usr[0] = abh_saved[13];
@@ -2165,6 +2270,8 @@ sq_check (void)
 }
 
 static int in_pmp_area (unsigned lo, unsigned hi);
+static int kpmp_access (unsigned lo, unsigned hi);
+static int rom_pmp_dirty = 1;	/* set when a dynamic area is made */
 
 /* The end of the program at &8000 as its AIF header gives it (read-only
    and read-write areas), once it's unsqueezed; 0 if &8000 isn't an AIF
@@ -2198,6 +2305,58 @@ in_fileswitch (unsigned a)
   return a >= fs_lo && a < fs_hi;
 }
 
+/* Who synchronised application space, and what was done: 'o' part of
+   the program (patched), 'f' FileSwitch's (left), 'd' a program's own
+   data outside its image (left), 'p' anything else (patched: BASIC's
+   assembler, the C library's stubs and program loads). Shown by
+   *NativeSupport; with NativeDebug the first 200 are logged as
+   ns-syncwho lines. */
+static void
+syncwho_log (char what, unsigned caller, unsigned cao, unsigned lo, unsigned hi)
+{
+  char buf[96];
+  const char *h = "ns-syncwho ";
+  int n = 0;
+  while (*h)
+    buf[n++] = *h++;
+  buf[n++] = what;
+  unsigned v[4] = { lo, hi, caller, cao };
+  for (int k = 0; k < 4; k++)
+    {
+      buf[n++] = ' ';
+      for (int i = 28; i >= 0; i -= 4)
+	buf[n++] = "0123456789abcdef"[(v[k] >> i) & 15];
+    }
+  buf[n++] = '\n';
+  lsys3 (4, 2, (unsigned) buf, n);
+}
+static void
+syncwho_note (char what, unsigned caller, unsigned cao, unsigned lo, unsigned hi)
+{
+  if (debug_faults && syncwho_logged < 200)
+    {
+      syncwho_logged++;
+      syncwho_log (what, caller, cao, lo, hi);
+    }
+  for (unsigned i = 0; i < nsyncwho; i++)
+    if (syncwho[i].caller == caller && syncwho[i].what == what)
+      {
+	syncwho[i].n++;
+	syncwho[i].lo = lo, syncwho[i].hi = hi, syncwho[i].cao = cao;
+	syncwho_cur = (int) i;
+	return;
+      }
+  if (nsyncwho == SYNCWHO_MAX)
+    {
+      syncwho_lost++;
+      return;
+    }
+  struct syncwho *w = &syncwho[nsyncwho];
+  w->caller = caller, w->cao = cao, w->lo = lo, w->hi = hi, w->n = 1, w->what = what;
+  w->sites = w->s_addr = w->s_orig = 0;
+  syncwho_cur = (int) nsyncwho++;
+}
+
 /* The current active object: &8000 while a program loaded there runs,
    a module's address while a module (BASIC, say) is the application */
 static unsigned
@@ -2214,6 +2373,7 @@ sync_patch (unsigned lo, unsigned hi)
 {
   /* a range synchronised is code: in application space, the RMA or a
      dynamic area (SOManager's shared libraries are) */
+  syncwho_cur = -1;
   if (hi <= lo)
     return;
   /* Up to 64 MB, but in application space a program's image, which can
@@ -2251,21 +2411,42 @@ sync_patch (unsigned lo, unsigned hi)
 	 AlignExOff assembles SWI OS_EnterOS, MRC and MSR CPSR_c, #&10
 	 into a DIM block; left unpatched (0.20, 0.21), the MSR did nothing
 	 natively, the task stayed in SVC mode and Iris stopped as it
-	 started). Only FileSwitch's are left: a file loaded with OS_File's
-	 "this is code" flag (R3 bit 31) into a buffer, which may be written
-	 out again as data (the DDE's ROM build). A part of the program's
-	 own image is always patched. */
+	 started). Left: FileSwitch's (a file loaded with OS_File's
+	 "this is code" flag, R3 bit 31, into a buffer) and a program's own
+	 for memory outside its image: both may be data written out again
+	 (the DDE's ROM build, whose tools ask themselves). A part of the
+	 program's own image is always patched. */
       unsigned caller = ns_sync_caller, end = aif_end ();
       ns_sync_caller = 0;		/* (one SWI's: not a later sync's) */
-      if (end && lo >= 0x8000u && hi <= end && cao () == 0x8000u)
-	ns.sync_own++;
+      unsigned c = cao ();
+      if (end && lo >= 0x8000u && hi <= end && c == 0x8000u)
+	{
+	  ns.sync_own++;
+	  syncwho_note ('o', caller, c, lo, hi);
+	}
       else if (in_fileswitch (caller))
 	{
 	  ns.sync_app_data++;
+	  syncwho_note ('f', caller, c, lo, hi);
+	  return;
+	}
+      else if (caller >= 0x8000u && caller < 0x20000000u)
+	{
+	  /* the program itself asked, for memory outside its image: its
+	     own data (the DDE's ROM build: its tools put module code in
+	     buffers and synchronise them; patched, a ROM built on RISC
+	     OS on Linux had 123 of these patches in 30 modules' entry
+	     veneers). Code there that is run after all works through the
+	     traps, as in 0.20. */
+	  ns.sync_app_prog++;
+	  syncwho_note ('d', caller, c, lo, hi);
 	  return;
 	}
       else
-	ns.sync_app_code++;
+	{
+	  ns.sync_app_code++;
+	  syncwho_note ('p', caller, c, lo, hi);
+	}
     }
   /* Memory from GCCSDK ARMEABISupport's mmap (its mmap#N areas) is
      never a program's or library's code (SOManager's libraries are in
@@ -2310,8 +2491,96 @@ sync_patch (unsigned lo, unsigned hi)
 	hi = end;
       if (hi - lo > 0x4000000u)
 	ns.sync_big++;
+      {
+	unsigned caller = ns_sync_caller;
+	ns_sync_caller = 0;
+	syncwho_note ('s', caller, cao (), lo, hi);
+      }
     }
   ns.patched_sync += patch_range (lo, hi);
+  syncwho_cur = -1;
+}
+
+/* A program's patched instructions written to a file. Copied out of its
+   image as data (CMHG's veneer templates: in the DDE's ROM build every C
+   module CMHG made had 4 of them), or code saved from where it is
+   (BASIC's assembler, then *Save): when a program writes [lo, lo+len) to
+   a file (OS_GBPB 1/2, OS_File 0/10), a word there that is UDF #n for a
+   live site in application space gets the original word back. A copy
+   keeps it; the site itself is put back only while the write is done
+   (unpatch_copies returns those, repatch makes them sites again). Only a
+   site still patched counts, so other data hardly ever matches. */
+#define LIVE_MAX 256
+static unsigned live_idx[LIVE_MAX];
+static unsigned
+unpatch_copies (unsigned lo, unsigned len)
+{
+  if (!app_sites || !len || lo < 0x8000u || lo >= 0x20000000u
+      || len > 0x4000000u || 0x20000000u - lo < len)
+    return 0;
+  regs e = {{ 0 }};
+  if (swix_regs (0x10, &e))			/* OS_GetEnv: r1 = the limit */
+    return 0;
+  unsigned hi = lo + len, nlive = 0;
+  if (hi > e.r[1])
+    return 0;
+  int any = 0;
+  for (unsigned a = (lo + 3) & ~3u; a + 4 <= hi; a += 4)
+    {
+      unsigned w = *(volatile unsigned *) a;
+      if ((w & 0xfff000f0u) != 0xe7f000f0u)
+	continue;
+      int imm = udf_imm (w);
+      if (imm < UDF_BASE || (unsigned) (imm - UDF_BASE) >= nsites)
+	continue;
+      struct site *t = &sites[imm - UDF_BASE];
+      if (t->addr < 0x8000u || t->addr >= 0x20000000u
+	  || *(volatile unsigned *) t->addr != w)
+	continue;
+      if (t->addr == a)
+	{
+	  if (nlive == LIVE_MAX)
+	    continue;
+	  live_idx[nlive++] = imm - UDF_BASE;
+	}
+      *(volatile unsigned *) a = t->orig;
+      ns.unpatched_words++;
+      any = 1;
+    }
+  if (any)
+    ns.unpatched_writes++;
+  return nlive;
+}
+
+static void
+repatch (unsigned nlive)
+{
+  for (unsigned k = 0; k < nlive; k++)
+    *(volatile unsigned *) sites[live_idx[k]].addr = udf (UDF_BASE + live_idx[k]);
+}
+
+/* The write, done here with the sites put back (and patched again after) */
+static int
+write_unpatched (unsigned swi, unsigned *r, unsigned nlive, unsigned vcpu,
+		 unsigned *spsr)
+{
+  regs v;
+  for (int k = 0; k < 10; k++)
+    v.r[k] = r[k];
+  unsigned saved = *(volatile unsigned *) (vcpu + 24);
+  oserror *err = swix_regs (swi, &v);	/* (back through this vector) */
+  *(volatile unsigned *) (vcpu + 24) = saved;
+  repatch (nlive);
+  for (int k = 0; k < 10; k++)
+    r[k] = v.r[k];
+  if (err)
+    {
+      r[0] = (unsigned) err;
+      *spsr |= CPSR_V;
+    }
+  else
+    *spsr &= ~CPSR_V;
+  return 1;
 }
 
 /* The few SWIs answered here, from the SWI vector (ns_swi_vector,
@@ -2330,6 +2599,33 @@ ns_swi_c (unsigned *r)
     swi = r[10];
   switch (swi & 0xfdffff)
     {
+    case 0x0C:			/* OS_GBPB 1, 2: write bytes */
+    case 0x08:			/* OS_File 0, 10: save a block */
+      {
+	unsigned lo, len, n, saved;
+	if ((swi & 0xfdffff) == 0x0C)
+	  {
+	    if (r[0] != 1 && r[0] != 2)
+	      return 0;
+	    lo = r[2], len = r[3];
+	  }
+	else
+	  {
+	    if ((r[0] != 0 && r[0] != 10) || r[5] <= r[4])
+	      return 0;
+	    lo = r[4], len = r[5] - r[4];
+	  }
+	if (!app_sites)
+	  return 0;
+	/* (unpatch_copies' OS_GetEnv would leave its own SPSR_svc in the
+	   vcpu, and the write would go back in the wrong mode) */
+	saved = *(volatile unsigned *) (vcpu + 24);
+	n = unpatch_copies (lo, len);
+	*(volatile unsigned *) (vcpu + 24) = saved;
+	if (n)
+	  return write_unpatched (swi & 0xfdffff, r, n, vcpu, spsr);
+	return 0;
+      }
     case 0xC0002:
       r[0] = pmp_op (r);
       ns.pmp_swis++;
@@ -2344,9 +2640,42 @@ ns_swi_c (unsigned *r)
       r[0] = (unsigned) pi_model;
       break;
     case 0x68:			/* OS_Memory */
+      if ((r[0] & 0xff) == 24)
+	{
+	  /* CheckMemoryAccess in a PMP area: answered from what is mapped
+	     there (the kernel's page tables don't know: kpmp_logop) */
+	  int f = kpmp_access (r[1], r[2]);
+	  if (f < 0)
+	    return 0;
+	  r[1] = (unsigned) f;
+	  ns.mem24++;
+	  break;
+	}
       if (!os_memory0 (r))
 	return 0;
       ns.mem0++;
+      break;
+    case 0x3A:			/* OS_ValidateAddress, the same way */
+      {
+	/* as s.ArthurSWIs ValidateAddress_Code: valid if any "completely"
+	   access flag is set, else if Service_ValidateAddress is claimed */
+	int f = kpmp_access (r[0], r[1]);
+	if (f < 0)
+	  return 0;
+	int ok = (f & 0xf) != 0;
+	if (!ok)
+	  {
+	    unsigned saved = *(volatile unsigned *) (vcpu + 24);
+	    regs v = {{ 0, 0x6D, r[0], r[1] }};
+	    ok = !swix_regs (0x30, &v) && v.r[1] == 0;	/* OS_ServiceCall */
+	    *(volatile unsigned *) (vcpu + 24) = saved;
+	  }
+	if (ok)
+	  *spsr &= ~CPSR_C;
+	else
+	  *spsr |= CPSR_C;
+	ns.mem24++;
+      }
       break;
     case 0x54C80: case 0x54C81: case 0x54C82: case 0x54C83:
     case 0x54C84: case 0x54C85: case 0x54C86: case 0x54C87:
@@ -2395,6 +2724,7 @@ ns_swi_c (unsigned *r)
 	     abort path never calls. Without it ARMEABISupport 1.08 grows its
 	     stacks from its own data abort handler, as on the port's 5.29. */
 	  r[4] &= ~(1u << 16);
+	  rom_pmp_dirty = 1;		/* (a PMP area, maybe: kpmp_access) */
 	  /* creating one: its name, for where it goes (da_place) */
 	  const char *nm = (const char *) r[8];
 	  int i = 0;
@@ -2604,6 +2934,29 @@ fault_body (int sig, void *si, void *uc)
       && (R[1] & CPSR_T) && !(R[1] & 0x200u))
     {
       unsigned v = R[0];
+      if (R[1] & CPSR_IT)
+	{
+	  /* Into the middle of an IT block (a Thumb-2 load or store in one
+	     faulted, and RISC OS mapped the page): only an exception return
+	     sets ITSTATE, so finish the mode switch here and return through
+	     the signal frame, as the port's own handler does (HAL,
+	     SetCPSR_Finish): the mode byte, the flags from r3, T and
+	     ITSTATE from r1, then ldmdb r2, {r0-r3, ip, pc}. An
+	     interworking load ran the rest of the block unconditionally
+	     (the web browser's and Iris's WebKit, Thumb-2) */
+	  unsigned *t = (unsigned *) R[2];
+	  *(volatile uint8_t *) (v + VCPU_CPSR) = R[1] & 0xffu & ~CPSR_T;
+	  R[16] = (R[16] & ~(CPSR_APSR | CPSR_IT | CPSR_T))
+		  | (R[3] & CPSR_APSR) | (R[1] & (CPSR_IT | CPSR_T));
+	  R[0] = t[-6];
+	  R[1] = t[-5];
+	  R[2] = t[-4];
+	  R[3] = t[-3];
+	  R[12] = t[-2];
+	  R[15] = t[-1] & ~1u;
+	  ns.it_returns++;
+	  return;
+	}
       R[1] &= ~CPSR_T;
       *(volatile uint8_t *) (v + VCPU_CPSR) &= ~CPSR_T;
       *(volatile unsigned *) (R[2] - 4) |= 1;
@@ -2940,6 +3293,148 @@ kpmp_getpages (struct kpmp *p, unsigned *e)
   e[3] = (RD (p->node + DANODE_FLAGS) & 0xff) | (1u << 20);
 }
 
+/* OS_Memory 24 / OS_ValidateAddress in a PMP (physical memory pool) area,
+   answered as RISC OS's kernel does from its page tables (s.MemInfo
+   CheckMemoryAccess with CMA_CheckL2PT): page by page, mapped or not, with
+   the area's access privilege. RISC OS on Linux has no page tables to
+   check: a PMP area's pages are mapped from a Linux memory file, either by
+   the ROM (c.LinuxC do_PMP_*: 5.31 and later) or here (kpmp_*, the older
+   ROM's stubs). The Linux build of the kernel skips that check (it is
+   under PagedMemory), so it says the whole area is there, with its
+   internal flags CMA_CheckL2PT/CMA_DecodeAP left in bits 26-31; and the
+   older ROM says none of it is. Both are wrong for debuggers (EDT) and
+   anything else checking addresses: ARMEABISupport 1.08's stacks, its
+   mmaps, SOManager's shared libraries. */
+
+/* The CMA access bits (completely: 0-3) for access privilege 0-3, as
+   the kernel's MMU_PPLAccess table gives them */
+static const unsigned char ap_acc[4] = { 0xf, 0xd, 0xc, 0x5 };
+
+/* The ROM's PMP area nodes (DANode_PMP at +48; c.LinuxC's struct pmp_rec
+   after the last pool word: bytes, pcap, lpages, log, pool) */
+#define DANODE_PMP 48
+#define PMPREC_LPAGES 8
+#define PMPREC_POOL 16
+#define ROM_PMP_MAX 32
+static unsigned rom_pmp_nodes[ROM_PMP_MAX], rom_pmp_n;
+
+static int
+rom_pmp_node_ok (unsigned n)
+{
+  return n && (RD (n + DANODE_FLAGS) & (1u << 20)) && RD (n + DANODE_BASE)
+	 && !(RD (n + DANODE_BASE) & 0xfff) && RD (n + DANODE_MAXSIZE)
+	 && !(RD (n + DANODE_MAXSIZE) & 0xfff);
+}
+
+/* The ROM PMP area node whose logical range has lo, or 0. The nodes are
+   found in the system heap once, and again after a dynamic area is made
+   (OS_DynamicArea 0, below), so other addresses cost a short loop. */
+static unsigned
+rom_pmp_node (unsigned lo)
+{
+  if (rom_pmp_dirty)
+    {
+      rom_pmp_dirty = 0;
+      rom_pmp_n = 0;
+      unsigned base = SYSHEAP_BASE;
+      if (RD (base) != 0x70616548u)	/* "Heap" */
+	return 0;
+      unsigned end = base + RD (base + 12);
+      for (unsigned n = base + 16; n + 60 <= end && rom_pmp_n < ROM_PMP_MAX;
+	   n += 4)
+	{
+	  volatile unsigned *w = (volatile unsigned *) n;
+	  if ((w[3] & (1u << 20)) && w[2] && !(w[2] & 0xfff) && w[5]
+	      && !(w[5] & 0xfff) && w[8] && w[1] < 0x100000u)
+	    rom_pmp_nodes[rom_pmp_n++] = n;
+	}
+    }
+  for (unsigned i = 0; i < rom_pmp_n; i++)
+    {
+      unsigned n = rom_pmp_nodes[i];
+      if (rom_pmp_node_ok (n) && lo >= RD (n + DANODE_BASE)
+	  && lo - RD (n + DANODE_BASE) < RD (n + DANODE_MAXSIZE))
+	return n;
+    }
+  return 0;
+}
+
+/* Whole-range flags ANDed and part-of-range flags ORed over the pages of
+   lo..hi (inclusive end hi), as CMA_AddRange does; pool(l) gives each
+   page's pool page, or < 0 if unmapped */
+static unsigned
+cma_pages (unsigned base, unsigned lo, unsigned hi, unsigned ap,
+	   int (*pool) (void *, unsigned), void *ctx)
+{
+  unsigned acc = ap_acc[ap & 3], whole = 0xf, part = 0, any = 0, all = 1;
+  for (unsigned l = (lo - base) >> 12; l <= (hi - base) >> 12; l++)
+    if (pool (ctx, l) >= 0)
+      part |= acc, any = 1;
+    else
+      whole = 0, all = 0;
+  /* executable where readable (no XN on RISC OS on Linux): unmapped
+     pages are XN, as the kernel's CMA_Done makes them */
+  return (all ? whole : 0) | (part << 4) | (any ? 0 : 0xc00) | (all ? 0 : 0xc000);
+}
+
+static int
+kp_pool (void *ctx, unsigned l)
+{
+  struct kpmp *p = ctx;
+  int q = p->pool[l];
+  return q >= 0 && !(p->flags[q] & (1u << 15)) ? q : -1;
+}
+
+static int
+lite_pool (void *ctx, unsigned l)
+{
+  int i = (int) ctx;
+  return pmp[i].map && l < pmp[i].pages && pmp[i].map[l] ? 0 : -1;
+}
+
+static int
+rom_pool (void *ctx, unsigned l)
+{
+  unsigned rec = (unsigned) ctx;
+  if (!rec || l >= RD (rec + PMPREC_LPAGES))
+    return -1;
+  return ((volatile int *) RD (rec + PMPREC_POOL))[l];
+}
+
+/* The OS_Memory 24 flags for lo..hi (hi exclusive) wholly inside one PMP
+   area, or -1 for the kernel to answer */
+static int
+kpmp_access (unsigned lo, unsigned hi)
+{
+  hi = hi > lo ? hi - 1 : lo;
+  for (int i = 0; i < PMP_MAX; i++)	/* the test bed's ARMEABISupport's */
+    if (pmp[i].fd > 0 && lo >= pmp[i].base
+	&& hi - pmp[i].base < pmp[i].pages << 12)
+      return cma_pages (pmp[i].base, lo, hi, 0, lite_pool, (void *) i);
+  for (int i = 0; i < KPMP_MAX; i++)
+    {
+      struct kpmp *p = &kp[i];
+      if (p->node && lo >= p->base && hi - p->base < p->lpages << 12)
+	return cma_pages (p->base, lo, hi, RD (p->node + DANODE_FLAGS) & 0xf,
+			  kp_pool, p);
+    }
+  unsigned n = rom_pmp_node (lo);
+  if (!n)
+    return -1;
+  unsigned b = RD (n + DANODE_BASE), max = RD (n + DANODE_MAXSIZE);
+  if (hi - b >= max)
+    return -1;
+  unsigned phys = RD (n + DANODE_PMP), rec = 0;
+  if (phys && phys < 0xfffff000u)
+    {
+      rec = RD (phys + 4 * RD (n + DANODE_PMPMAXSIZE));
+      if (rec == 0xffffffffu)
+	rec = 0;
+    }
+  return cma_pages (b, lo, hi, RD (n + DANODE_FLAGS) & 0xf, rom_pool,
+		    (void *) rec);
+}
+
 /* lo..hi in one of ARMEABISupport's mmap areas ("mmap#N"; not its other
    pools: SOManager's shared libraries are in those) */
 static int
@@ -2949,6 +3444,19 @@ in_pmp_area (unsigned lo, unsigned hi)
     if (kp[i].node && kp[i].mmap && lo >= kp[i].base
 	&& lo - kp[i].base < kp[i].lpages << 12)
       return 1;
+  /* On a ROM that makes PMP areas itself (5.31: c.LinuxC), kp[] has
+     none of them: the ROM's own nodes, by their title. Without this,
+     JavaScriptCore's JIT code (Thumb-2) in mmap#N was patched as ARM
+     (the web browser's MiniBrowser: links dead; Iris 1.039: its web
+     process aborted in JSC on bbc.co.uk) */
+  unsigned n = rom_pmp_node (lo);
+  if (n)
+    {
+      const char *t = (const char *) RD (n + DANODE_TITLE);
+      if (t && (unsigned) t >= 0x8000u && t[0] == 'm' && t[1] == 'm'
+	  && t[2] == 'a' && t[3] == 'p' && t[4] == '#')
+	return 1;
+    }
   (void) hi;
   return 0;
 }
@@ -3686,6 +4194,32 @@ line_out (const char *label, unsigned v)
   newline ();
 }
 
+/* " (Title)" for a current active object that is a module (BASIC) */
+static const char *
+where_cao (unsigned cao)
+{
+  static char b[44];
+  regs r = {{ 12, 0, 0 }};
+  if (cao < 0x20000000u)
+    return "";
+  for (int n = 0; n < 400 && !swix_regs (0x1E, &r); n++)	/* OS_Module 12 */
+    {
+      unsigned base = r.r[3], len = *(unsigned *) (base - 4);
+      if (cao >= base && cao - base < len && len < 0x400000u)
+	{
+	  const char *t = (const char *) base + *(unsigned *) (base + 16);
+	  int i = 0;
+	  b[i++] = ' ', b[i++] = '(';
+	  while (i < 40 && *t > ' ')
+	    b[i++] = *t++;
+	  b[i++] = ')', b[i] = 0;
+	  return b;
+	}
+      r.r[0] = 12;
+    }
+  return "";
+}
+
 /* " (Module+offset)" for an address in a module's code */
 static void
 where_out (unsigned pc)
@@ -3760,9 +4294,10 @@ counts_reset (void)
     site_hits[i] = 0;
   for (int k = 0; k < OTHER_N; k++)
     other_traps[k].n = skip_traps[k].n = 0, other_traps[k].pc = skip_traps[k].pc = 0;
-  ns.cond_skipped = ns.emul_psr = ns.emul_priv = ns.getdents = ns.mem0 = 0;
+  ns.cond_skipped = ns.emul_psr = ns.emul_priv = ns.getdents = ns.mem0 = ns.mem24 = 0;
   ns.syncs = ns.full_syncs = ns.aborts = ns.ioc = ns.cp15_barriers = 0;
   ns.patched_sync = ns.imb_full = ns.lur_thumb = ns.thumb_returns = 0;
+  ns.it_returns = 0;
   reset_cs = mono_cs ();
 }
 
@@ -3908,13 +4443,55 @@ mod_command (int index, const char *tail, int argc)
   line_out ("Other privileged instructions done: ", ns.emul_priv);
   line_out ("Directory reads: ", ns.getdents);
   line_out ("OS_Memory 0 calls: ", ns.mem0);
+  line_out ("Access checks answered for PMP areas (OS_Memory 24, OS_ValidateAddress): ", ns.mem24);
   line_out ("PMP (lite) SWIs: ", ns.pmp_swis);
   line_out ("PMP operations: ", ns.kpmp_ops);
   line_out ("Reporter SWIs ignored: ", ns.reports);
   line_out ("Synchronisations in mmap areas (JIT) left: ", ns.sync_jit);
   line_out ("Synchronisations in application space of files loaded as code (FileSwitch), left: ", ns.sync_app_data);
-  line_out ("Synchronisations in application space of code written there (BASIC, programs), patched: ", ns.sync_app_code);
+  line_out ("Synchronisations in application space a program asked for, outside its image (its data), left: ", ns.sync_app_prog);
+  line_out ("Synchronisations in application space of code written there (BASIC, the C library), patched: ", ns.sync_app_code);
   line_out ("Synchronisations of a part of the program, patched: ", ns.sync_own);
+  line_out ("Patched instructions copied as data, put back as written to a file: ", ns.unpatched_words);
+  line_out ("Writes to files that had them: ", ns.unpatched_writes);
+  if (nsyncwho)
+    {
+      write0 ("Who synchronised application space:");
+      newline ();
+      for (unsigned i = 0; i < nsyncwho; i++)
+	{
+	  struct syncwho *w = &syncwho[i];
+	  write0 (w->what == 'f' ? "  left (FileSwitch) " : w->what == 'd' ? "  left (data)       " : w->what == 'o' ? "  own               " : w->what == 's' ? "  program start     " : "  patched           ");
+	  write_dec (w->n);
+	  write0 (" x, from &");
+	  write_hex8 (w->caller);
+	  if (!w->caller)
+	    write0 (" (not through the SWI vector)");
+	  else if (w->caller < 0x20000000u)
+	    write0 (" (application space)");
+	  else
+	    where_out (w->caller);
+	  write0 (", CAO &");
+	  write_hex8 (w->cao);
+	  write0 (where_cao (w->cao));
+	  write0 (", last &");
+	  write_hex8 (w->lo);
+	  write0 ("-&");
+	  write_hex8 (w->hi);
+	  if (w->sites)
+	    {
+	      write0 (", made ");
+	      write_dec (w->sites);
+	      write0 (" sites, first &");
+	      write_hex8 (w->s_addr);
+	      write0 (" &");
+	      write_hex8 (w->s_orig);
+	    }
+	  newline ();
+	}
+      if (syncwho_lost)
+	line_out ("  (other callers not kept): ", syncwho_lost);
+    }
   line_out ("Programs over 64 MB patched: ", ns.sync_big);
   line_out ("Synchronisations over 64 MB, not a program, left: ", ns.sync_too_big);
   write0 ("Patching new code (*NativeSupport SyncPatch On|Off): ");
@@ -3936,6 +4513,7 @@ mod_command (int index, const char *tail, int argc)
   newline ();
   line_out ("Returns to Thumb code through LoadUsrRegisters (trapped): ", ns.lur_thumb);
   line_out ("Returns to Thumb code through the mode switch: ", ns.thumb_returns);
+  line_out ("Returns into Thumb-2 IT blocks (through the signal frame): ", ns.it_returns);
   line_out ("Squeezed programs not patched until unsqueezed: ", ns.squeezed_skipped);
   line_out ("Whole-cache synchronisation seen: ", ns.imb_full);
   write0 ("SVC stack megabyte: &");

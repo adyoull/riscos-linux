@@ -7,6 +7,21 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### 7 Nov 2026: riscos-support 1.0.0031-1 (NativeSupport 0.23 to 0.30)
+
+- **NativeSupport 0.30: Thumb-2 code isn't patched as ARM.**
+  - **The Iris crash:** a word that is also a Thumb-2 32-bit branch (`B<c>.W`, `B.W`, `BL`) is no longer taken for a conditional `MSR CPSR`. JavaScriptCore's interpreter in Iris 1.039 has two: `beq.w` after a call, `F000 812D`, read as `MSRHI CPSR_fsc, r0`. Patched to a UDF, the web process went to "throw" with no exception pending and aborted on bbc.co.uk.
+  - **The neighbour rule:** a same-condition neighbour must be an MSR that sets the control field. Without this, a libwebkit2gtk `.rodata` table and NetSurf data were patched.
+  - **The 5.31 ROM's PMP areas:** JIT code in the ROM's own `mmap#` areas is left alone. Before, MiniBrowser's links were dead with the JIT on.
+- **NativeSupport 0.28: OS_Memory 24 and OS_ValidateAddress answer for PMP areas page by page**, as the kernel's CMA_AddRange does. Shared library code and thread stacks can now be checked (EDT); unmapped pages aren't accessible.
+- **NativeSupport 0.27:**
+  - **Thumb-2 IT state:** a return into a Thumb-2 IT block keeps its IT state, on all four routes back to Thumb code. This was WebKit's random crashes.
+  - **SWIs inside the SIGILL handler** run with SIGILL, SIGSEGV and SIGBUS let in. EDT starts.
+- **NativeSupport 0.23 to 0.26: the DDE's ROM build comes out unpatched.**
+  - A program's own synchronisation of its data is left.
+  - Patched words a program writes to a file are put back.
+  - `MRS` in application space is a UDF site, not a branch to a stub.
+
 ### 6 Nov 2026: riscos-rom 5.31-18, riscos-support 1.0.0029-1, riscos-harddisc 1.0.0035-1, riscos-kernel-wdk2023 7.2.0-4
 
 - **NativeSupport 0.21: programs over 64 MB are patched.** A program's own
