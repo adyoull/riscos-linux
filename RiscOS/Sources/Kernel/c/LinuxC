@@ -625,6 +625,24 @@ const void *do_PMP_LogOp(struct DANode *da, uint32_t *r2r3) {
   return err;
 }
 
+// OS_Memory 24 (s.MemInfo CheckMemoryAccess, which has no page tables to
+// check here): the first run of mapped pages of PMP area da at or after
+// address from. Returns its start, or 0 if there is none; *end = its end.
+uint32_t pmp_next_run(struct DANode *da, uint32_t from, uint32_t *end) {
+  uint32_t *phys = (uint32_t *)da->PMP;
+  struct pmp_rec *p;
+  uint32_t base = (uint32_t)da->Base, l, start;
+  if (!phys || phys[da->PMPMaxSize] == PMP_NONE) return 0;
+  p = (struct pmp_rec *)phys[da->PMPMaxSize];
+  l = from <= base ? 0 : (from - base) / PageSize;
+  while (l < p->lpages && p->pool[l] < 0) ++l;
+  if (l >= p->lpages) return 0;
+  start = l;
+  while (l < p->lpages && p->pool[l] >= 0) ++l;
+  *end = base + l * PageSize;
+  return base + start * PageSize;
+}
+
 // Resize (23): r2 = change in pool pages -> r2 = pages changed by
 const void *do_PMP_Resize(struct DANode *da, uint32_t *r2) {
   uint32_t old = da->PMPMaxSize, want, i;

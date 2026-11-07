@@ -2418,6 +2418,31 @@ CheckMemoryAccess ROUT
         LDRNE   r4, [r9, #DANode_SparseHWM] ; Use HWM as bounds when checking sparse/PMP areas
         ORRNE   r5, r5, #CMA_CheckL2PT ; ... and request L2PT check
         ADDEQ   r4, r3, lr
+      [ Linux
+        ; No page tables to check (CMA_CheckL2PT is PagedMemory's): a PMP
+        ; area's pages are mapped from a Linux memory file by c.LinuxC,
+        ; whose records give the runs of mapped pages (pmp_next_run). Sparse
+        ; areas are wholly mapped on Linux.
+        BIC     r5, r5, #CMA_CheckL2PT :OR: CMA_DecodeAP
+        TST     r6, #DynAreaFlags_PMP
+        BEQ     %FT29
+        LDR     r4, [r9, #DANode_Base]
+27
+        Push    "r0-r2"
+        SUB     sp, sp, #4
+        MOV     r0, r9
+        MOV     r1, r4
+        MOV     r2, sp
+        BL      pmp_next_run            ; r0 = start of the next mapped run (0: none), [sp] = its end
+        MOV     r3, r0
+        LDR     r4, [sp], #4
+        Pull    "r0-r2"
+        TEQ     r3, #0
+        BEQ     %FT24
+        BL      CMA_AddRange2           ; (returns only if the range goes on past it)
+        B       %BT27
+29
+      ]
         TST     r6, #DynAreaFlags_DoublyMapped ; Currently impossible for Sparse/PMP areas - so use of lr safe
         SUBNE   r3, r3, lr
         TSTNE   r6, #DynAreaFlags_Abortable

@@ -27,6 +27,7 @@
         IMPORT  do_PMP_Resize
         IMPORT  do_PMP_GetPages
         IMPORT  do_PMP_Free
+        IMPORT  pmp_next_run
         EXPORT  pmp_heap_claim
         EXPORT  pmp_heap_free
 
