@@ -2725,6 +2725,8 @@ ns_swi_c (unsigned *r)
 	}
       return 0;
     case 0x66:			/* OS_DynamicArea */
+      if (r[0] == 1)
+	rom_pmp_dirty = 1;		/* removing one: look again next time */
       if (r[0] == 0)
 	{
 	  /* "Abortable" (bit 16, RISC OS 5.30+): the kernel would pass the
@@ -3387,9 +3389,18 @@ rom_pmp_node (unsigned lo)
   for (unsigned i = 0; i < rom_pmp_n; i++)
     {
       unsigned n = rom_pmp_nodes[i];
+      /* checked again with RISC OS before it's used: an area removed
+	 since (a UnixLib program's, as it ends) leaves its node freed in
+	 the heap, words and all (crossdev's report: 0.31 then aborted at
+	 the next module load) */
       if (rom_pmp_node_ok (n) && lo >= RD (n + DANODE_BASE)
 	  && lo - RD (n + DANODE_BASE) < RD (n + DANODE_MAXSIZE))
-	return n;
+	{
+	  if (da_node_real (n))
+	    return n;
+	  rom_pmp_dirty = 1;
+	  return 0;
+	}
     }
   return 0;
 }

@@ -7,7 +7,7 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
-### 8 Nov 2026: NativeSupport 0.32, making a dynamic area no longer stops the desktop (riscos-support 1.0.0035-1)
+### 8 Nov 2026: NativeSupport 0.32 and 0.33, making or removing a dynamic area no longer stops the desktop (riscos-support 1.0.0035-1, 1.0.0036-1)
 
 - **The bug:** from NativeSupport 0.30 (riscos-support 1.0.0031-1), once
   a program had made a dynamic area, RISC OS could abort in NativeSupport
