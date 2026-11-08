@@ -40,7 +40,9 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   (NativeSupport 0.28 answers these checks itself natively, so this
   matters under QEMU.) Its code is a macro of its own (CheckMemoryAccess_LinuxPMP):
   inside CheckMemoryAccess_DynamicAreas it took that macro past objasm's
-  size limit ("Macro definition too big").
+  size limit ("Macro definition too big"). objasm's numbered labels don't
+  reach across macros, so it ends with the Z flag saying whether the area is
+  done, and CheckMemoryAccess_DynamicAreas branches on that.
 
 ## 5.31-18 (6 November 2026)
 

@@ -2366,14 +2366,17 @@ CheckMemoryAccess ROUT
 ; whose records give the runs of mapped pages (pmp_next_run); each run is
 ; added with the area's access, and unmapped pages are gaps. Sparse areas
 ; are wholly mapped on Linux. Used inside CheckMemoryAccess_DynamicAreas
-; (its own macro: that one is at objasm's size limit); label 24 is that
-; macro's, 27 and 29 this one's. Nothing on other machines.
+; (its own macro: that one is at objasm's size limit). objasm's local
+; labels don't cross macros, so this one ends with Z set when the area is
+; done (a PMP area, all its runs added) and Z clear (CMP r9, #0: r9 is a
+; node) to carry on; the caller then branches to its own label 24.
+; Nothing on other machines.
         MACRO
         CheckMemoryAccess_LinuxPMP
       [ Linux
         BIC     r5, r5, #CMA_CheckL2PT :OR: CMA_DecodeAP
         TST     r6, #DynAreaFlags_PMP
-        BEQ     %FT29
+        BEQ     %FT28
         LDR     r4, [r9, #DANode_Base]
 27
         Push    "r0-r2"
@@ -2386,9 +2389,11 @@ CheckMemoryAccess ROUT
         LDR     r4, [sp], #4
         Pull    "r0-r2"
         TEQ     r3, #0
-        BEQ     %FT24
+        BEQ     %FT29
         BL      CMA_AddRange2
         B       %BT27
+28
+        CMP     r9, #0
 29
       ]
         MEND
@@ -2401,7 +2406,7 @@ CheckMemoryAccess ROUT
         CMP     r1, r7
         BHS     %FT30
       ]
-        ; Look through the quick lookup table until we find a valid DANode ptr
+        ; Find a valid DANode ptr in the quick lookup table
         LDR     r6, [r10, #DynArea_ws]
         MOV     r3, r1
         TEQ     r6, #0 ; No workspace yet during ROM init (OS_Heap validating its pointers)
@@ -2451,7 +2456,10 @@ CheckMemoryAccess ROUT
         ORRNE   r5, r5, #CMA_CheckL2PT ; ... and request L2PT check
         ADDEQ   r4, r3, lr
         CheckMemoryAccess_LinuxPMP
-        TST     r6, #DynAreaFlags_DoublyMapped ; Currently impossible for Sparse/PMP areas - so use of lr safe
+      [ Linux
+        BEQ     %FT24
+      ]
+        TST     r6, #DynAreaFlags_DoublyMapped ; Not Sparse/PMP, so lr is safe
         SUBNE   r3, r3, lr
         TSTNE   r6, #DynAreaFlags_Abortable
         BEQ     %FT23
