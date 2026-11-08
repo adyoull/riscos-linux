@@ -61,6 +61,8 @@ union report {
     ev_resize    = CONST(4),
     ev_close     = CONST(5),
     ev_version   = CONST(6),
+    ev_mouse_rel = CONST(7),   /* to SocketKVM version 3 or later: mouse.x, y = signed
+                                  movement (y up, RISC OS's way), buttons unused */
   } reason;
   struct version version;
   struct {
@@ -84,6 +86,9 @@ union command {
     c_activescreen = CONST(7),
     c_startscreen = CONST(8),
     c_leds        = CONST(9),   /* to front ends that report version 2 or later */
+    c_pointer_pos = CONST(10),  /* to front ends that report version 3 or later: where
+                                   RISC OS has the pointer (its top left, in pixels from
+                                   the screen's top left), each time it moves */
   } reason;
   struct version version;
   struct {
@@ -120,5 +125,9 @@ union command {
     int32_t reason;
     ule32 leds;
   } leds;
+  struct pointer_pos {      /* the pointer's top left (active point taken off), pixels */
+    int32_t reason;
+    int32_t x, y;
+  } pointer_pos;
   uint8_t pad[33 * 8];
 };

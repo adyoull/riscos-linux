@@ -8,6 +8,23 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
 
 ## 5.31-19 (to be built)
 
+- **The mouse speed in Configure works** (and *Configure MouseStep): a
+  mouse's movement reaches RISC OS as a relative move (SocketKVM's new
+  ev_mouse_rel), which the kernel scales by the mouse speed and keeps in
+  the pointer's bounding box. The front end used to add the movement up
+  itself and give RISC OS the pointer's position, which the mouse speed
+  never applies to: on a 4K screen the pointer crawled. SocketKVM now
+  tells the front end where the pointer is as it moves (c_pointer_pos),
+  so it's drawn where RISC OS has it, and a program that moves the
+  pointer moves it on the screen too. Front ends say they can (version 3,
+  rol-fb from riscos-support 1.0.0034-1); older ones, and tablets (UTM),
+  go on as before. SocketKVM's version to the front end is 3.
+
+- **4K in 16 million colours:** the screen memory can be 64MB (it was
+  16MB), enough for 3840 x 2160 in 16 million colours (31.6MB). The memory
+  comes from Linux as it's used, so this costs nothing until a big mode is
+  chosen.
+
 - **OS_Memory 24 (and OS_ValidateAddress) answer for a PMP area page by
   page**, as RISC OS does from its page tables: only the pages mapped in
   the area are accessible, with the area's access privilege, and the

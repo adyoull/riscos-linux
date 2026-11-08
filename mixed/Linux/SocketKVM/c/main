@@ -220,7 +220,7 @@ int Keyv_handler(_kernel_swi_regs *regs, void *pw) {
       _swi(OS_Hardware, _IN(0) | _INR(8, 9), socket, 0, EntryNo_HAL_IRQEnable);
       struct version v;
       v.reason = c_version;
-      v.version = 2;
+      v.version = 3;   /* 3: takes ev_mouse_rel, sends c_pointer_pos */
       ix_write(socket, &v, sizeof(v));
     }
     _swi(OS_ScreenMode, _INR(0, 2) | _OUT(0), ScreenModeReason_RegisterDriver, 0, "Linux Socket Video", &gv_id);
@@ -242,6 +242,15 @@ int Socket_Ready_handler(_kernel_swi_regs *regs, void *pw) {
     switch(r.reason) {
       case ev_mouse:
         _swix(OS_CallAVector, _INR(0, 4) | _IN(9), PointerReason_Report, 3, r.mouse.x << EigFactor.x, (currentY - r.mouse.y - 1) << EigFactor.y, 0x6f736241, PointerV);
+        break;
+
+      // A mouse's movement (front ends of version 3 or later): reported as
+      // a relative move, so the kernel scales it by the mouse speed
+      // (*Configure MouseStep, Configure's Mouse) and keeps it in the
+      // pointer's bounding box. The front end draws the pointer where
+      // RISC OS then has it (c_pointer_pos).
+      case ev_mouse_rel:
+        _swix(OS_CallAVector, _INR(0, 4) | _IN(9), PointerReason_Report, 3, (int)r.mouse.x, (int)r.mouse.y, 0, PointerV);
         break;
 
       case ev_keydown:
@@ -389,6 +398,18 @@ int Graphics_handler(_kernel_swi_regs *r, void *pw) {
       break;
 
     case GraphicsV_UpdatePointer:
+      // where the pointer is, for front ends that draw it where RISC OS
+      // has it (version 3 or later: their mice report relative moves)
+      if (socket != -1 && frontend_version >= 3 && (r->r[0] & 1)) {
+        static int last_x = 0x7FFFFFFF, last_y;
+        if (r->r[1] != last_x || r->r[2] != last_y) {
+          struct pointer_pos pp;
+          pp.reason = c_pointer_pos;
+          pp.x = last_x = r->r[1];
+          pp.y = last_y = r->r[2];
+          ix_write(socket, &pp, sizeof(pp));
+        }
+      }
       if (r->r[0] & 2) {
         struct shape_t *s = (void*) r->r[3];
         struct pointer p = {

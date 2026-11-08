@@ -206,7 +206,12 @@ ARM_Analyse
         MOVEQ   a1, #0xC0000
         STR     a1, [a2, #RAMLIMIT]
 
-        MOV     a1, #0x1000000
+        ; The most screen memory (the screen dynamic area's maximum): 64MB,
+        ; enough for 3840 x 2160 (4K) in 16 million colours, 31.6MB, with
+        ; room for two banks. It was 16MB, so 4K only had 32 thousand
+        ; colours. Memory comes from Linux as it's used: only the address
+        ; space is taken until a big mode is chosen.
+        MOV     a1, #0x4000000
         STR     a1, [a2, #VideoSizeFlags]
 
         ADR     a1, PPLAccess
