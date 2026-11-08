@@ -95,6 +95,9 @@ static uint32_t palette[256];			/* 0x00BBGGRR */
 static uint32_t ptr_pal[4];			/* 0x00RRGGBB; [0] unused */
 static unsigned char ptr_shape[32][32];		/* colour 0-3 */
 static int ptr_h, ptr_ax, ptr_ay, ptr_changed;
+/* the pointer's scale: the desktop's, in whole multiples (a 1920 x 1080
+   desktop on a 4K monitor is shown twice the size, so is the pointer) */
+static int ps = 1;
 static uint32_t start_addr, active_addr;
 static int have_start, have_active;
 static int pcmouse, realmonitor;
@@ -1063,6 +1066,11 @@ make_maps (void)
   if (sh > fb_h) sh = fb_h;
   ox = (fb_w - sw) / 2;
   oy = (fb_h - sh) / 2;
+  ps = sw / width;
+  if (ps < 1)
+    ps = 1;
+  if (ps > 8)
+    ps = 8;
   for (int x = 0; x < fb_w; x++)
     xmap[x] = x < ox || x >= ox + sw ? -1 : (int) ((long long) (x - ox) * width / sw);
   for (int y = 0; y < fb_h; y++)
@@ -1074,7 +1082,7 @@ make_maps (void)
 
 /* Copy the output rectangle [x0,x1) x [y0,y1) from back to the display,
    with the key colour made clear in the video's area and the pointer
-   (32x32 at px,py, unscaled) drawn on. */
+   (32x32 at px,py, ps times the size) drawn on. */
 static void
 out_rect (int x0, int y0, int x1, int y1, int px, int py)
 {
@@ -1087,7 +1095,8 @@ out_rect (int x0, int y0, int x1, int y1, int px, int py)
       const uint32_t *row = back + (size_t) y * fb_w;
       unsigned char *d = fb + (size_t) y * fb_stride;
       int pr = y - py;
-      int has_ptr = pr >= 0 && pr < ptr_h && pr < 32;
+      int has_ptr = pr >= 0 && pr < ptr_h * ps && pr < 32 * ps;
+      pr = has_ptr ? pr / ps : 0;
       if (fb_bpp == 32)
 	{
 	  uint32_t *d32 = (uint32_t *) d;
@@ -1106,12 +1115,12 @@ out_rect (int x0, int y0, int x1, int y1, int px, int py)
 	    }
 	  if (!has_ptr)
 	    continue;
-	  for (int i = 0; i < 32; i++)
+	  for (int i = 0; i < 32 * ps; i++)
 	    {
 	      int x = px + i;
 	      if (x < x0 || x >= x1)
 		continue;
-	      unsigned c = ptr_shape[pr][i];
+	      unsigned c = ptr_shape[pr][i / ps];
 	      if (c)
 		d32[x] = ptr_pal[c] | 0xFF000000u;
 	    }
@@ -1122,8 +1131,8 @@ out_rect (int x0, int y0, int x1, int y1, int px, int py)
 	  for (int x = x0; x < x1; x++)
 	    {
 	      uint32_t c = row[x];
-	      if (has_ptr && x >= px && x < px + 32 && ptr_shape[pr][x - px])
-		c = ptr_pal[ptr_shape[pr][x - px]];
+	      if (has_ptr && x >= px && x < px + 32 * ps && ptr_shape[pr][(x - px) / ps])
+		c = ptr_pal[ptr_shape[pr][(x - px) / ps]];
 	      d16[x] = ((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x1F);
 	    }
 	}
@@ -1223,8 +1232,8 @@ redraw (int force)
     return;
   struct drm_clip_rect clips[3];
   int nclips = 0;
-  int px = ox + (int) ((long long) mx * sw / width) - ptr_ax;
-  int py = oy + (int) ((long long) my * sh / height) - ptr_ay;
+  int px = ox + (int) ((long long) mx * sw / width) - ptr_ax * ps;
+  int py = oy + (int) ((long long) my * sh / height) - ptr_ay * ps;
   if (screen_changed)
     {
       if (len != last_len)
@@ -1295,7 +1304,8 @@ redraw (int force)
       for (int i = 0; i < 2; i++)
 	{
 	  int x0 = rx[i] < 0 ? 0 : rx[i], y0 = ry[i] < 0 ? 0 : ry[i];
-	  int x1 = rx[i] + 32 > fb_w ? fb_w : rx[i] + 32, y1 = ry[i] + 32 > fb_h ? fb_h : ry[i] + 32;
+	  int x1 = rx[i] + 32 * ps > fb_w ? fb_w : rx[i] + 32 * ps;
+	  int y1 = ry[i] + 32 * ps > fb_h ? fb_h : ry[i] + 32 * ps;
 	  if (x1 <= x0 || y1 <= y0)
 	    continue;
 	  out_rect (x0, y0, x1, y1, px, py);

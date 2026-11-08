@@ -7,6 +7,13 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### 8 Nov 2026: riscos-support 1.0.0033-1 (the pointer on a 4K monitor)
+
+- rol-fb scales the pointer with the desktop, in whole multiples. On a Pi
+  with a 4K monitor, which shows the 1920 x 1080 desktop twice the size,
+  the pointer was half the size of everything else. Images 1.0.0019 have
+  1.0.0032-1; Updates brings this.
+
 ### 8 Nov 2026: images 1.0.0019, the first public release
 
 - **The images rebuilt with the newest of everything:** RISC OS 5.31-18,
