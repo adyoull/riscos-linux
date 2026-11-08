@@ -16,6 +16,73 @@ built. Ready-built packages (RISC OS, the Linux side, the kernels) come
 from [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg), which
 Configure's Updates uses.
 
+## Built on Timothy Baldwin's port
+
+RISC OS on Linux is built on Timothy Baldwin's
+[Linux port of RISC OS](https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source).
+It made it possible:
+- the RISC OS "ROM" as a Linux program;
+- its HAL on Linux's system calls;
+- IXFS;
+- the SDL front end;
+- the sandbox and the build.
+
+This is his to-do list, from his README, and where each item stands now:
+
+| His to-do item | Status |
+|---|---|
+| Complete the key map | Done by Timothy |
+| Fix the realtime clock | Done by Timothy |
+| Make data aborts raise errors | Done by Timothy |
+| Support writing timestamps in IXFS | Done by Timothy |
+| Support reading timestamps in IXFS to centisecond resolution | Done by Timothy |
+| Test timestamps | Done by Timothy |
+| Add sound modules | Done by Timothy |
+| **Add sound output** | **Done here:** RISC OS Open's sound modules play through Linux (HDMI, headphones, USB) |
+| Officially allocate names and SWI numbers etc. | Done by Timothy (and RISC OS Open allocated ours for the new modules) |
+| Fix failure to truncate unbuffered files opened for output, and the race | Done by Timothy |
+| Fix spurious FSEntry_Args 6 (flush) calls when files are closed | Done by Timothy |
+| **Perform proper error handling in IXFS** | **Done here:** RISC OS's own errors, the Locked attribute, files over 2 GB |
+| Split the video, keyboard and mouse driver into a separate module | Done by Timothy |
+| **Detect screen updates to avoid copying the full screen 20 times a second** | **Done here:** only what changed is redrawn |
+| **Finish the video, keyboard and mouse driver** | **Done here, as a new front end:** rol-fb, on Linux's KMS (the monitor's own modes, hardware pointer, keyboard LEDs, scroll wheel, video overlay) |
+| Fix overwriting of the ROM image when rebuilding RISC OS while it's running | Not addressed for building (Updates replaces the ROM safely on a running machine) |
+| **Provide a means to run Linux programs** | **Done here:** `*Linux` (as root, with a password), `*LinuxUser` and `*IXRun` |
+| **Implement PMP dynamic areas** | **Done here:** in RISC OS's kernel (5.31-3), so ARMEABISupport 1.08 and Iris work |
+| Replace the changes labelled "Hack" | Done by Timothy |
+| Replace the branch table at the beginning of the HAL | Done by Timothy |
+| **Write test cases for VFP errors** | **Partly:** RISC OS Open's VFPSupport tests and ours; over 20 million floating point and NEON results checked bit for bit |
+| **Implement VFPSupport** | **Done here:** everything RISC OS Open's VFPSupport 0.18 does that the port allows |
+| **Possibly add a binary release** | **Done here:** these images, and a signed package repository for Updates |
+
+**And beyond his list:**
+- **A complete system:**
+  - it starts straight into the desktop on Raspberry Pis, UEFI machines,
+    the Windows Dev Kit 2023, the Pinebooks and Apple Silicon Macs, on
+    Debian 13;
+  - Updates and going back;
+  - protected RISC OS.
+- **RISC OS 5.31:** RISC OS Open's current sources merged into the port,
+  which was 5.29, with 18 builds since.
+- **NativeSupport:** programs run as they were compiled, natively. It
+  patches privileged instructions into user mode ones on the fly while
+  keeping programs compatible, so the DDE still compiles valid binaries.
+- **Speed:**
+  - SWIs about three times as fast natively;
+  - FPA 4.5 times as fast natively;
+  - SWIs 4.8 times as fast under QEMU, and NEON up to 4.7 times.
+- **Hardware:**
+  - networking and Wi-Fi;
+  - USB discs and SD cards, including RISC OS's own format;
+  - phones and cameras (PDFS);
+  - the Pi's hardware video decoding and overlay;
+  - GPIO;
+  - the scroll wheel.
+- **Programs:** NetSurf, RDPServer and Folio, and PackMan set up with
+  RISC OS Open's lists, riscosdev.com's and riscos-packages.
+
+Every item, in full: [What RISC OS on Linux adds to his port](docs/what-we-added.md).
+
 ## What's where
 
 | Part of the image | Source here | Licence |
