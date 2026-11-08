@@ -73,15 +73,24 @@ officially allocated names and numbers, and so on) were his.
   browser. It keeps them compatible: what a program reads back of itself,
   and the files tools save, are as they were written. So the DDE still
   compiles valid binaries on RISC OS on Linux.
-- **Kernel changes for speed:**
-  - RISC OS's SWIs go straight to RISC OS (about three times as fast on a
-    Pi 4);
-  - FPA floating point goes straight to the FPEmulator (4.5 times as fast).
+- **VFP and NEON for RISC OS programs.** Timothy's port had no
+  VFPSupport (it was on his to-do list), so programs couldn't use VFP or
+  NEON through it. With VFPSupport for the port they can, natively and
+  under QEMU, and `*BASIC64` works as on a Pi.
+- **Kernel changes for speed (natively):**
+  - RISC OS's SWIs go straight to RISC OS instead of through Linux's
+    security filter and a signal: about 3× faster than before on a Pi 4
+    (native RISC OS is still about 4.5× faster again);
+  - FPA instructions go straight to the FPEmulator: 4.5× faster than
+    before.
 - **QEMU (Macs and other machines without 32-bit ARM):**
-  - SWIs 4.8 times as fast;
-  - floating point and NEON on the host's own FPU and vector unit (NEON up
-    to 4.7 times as fast), checked bit for bit against QEMU's exact
-    emulation.
+  - SWIs about 4.9× faster than with Timothy's QEMU changes alone;
+  - floating point and NEON on the host's own FPU and vector unit: VFP 1.1
+    to 1.4×, NEON 1.9 to 4.7× faster than QEMU's standard emulation, and
+    checked bit for bit against it.
+
+See [Speed, measured](#speed-measured) for the figures and what each is
+compared with.
 
 **Hardware and the desktop:**
 - **Networking:** wired and Wi-Fi, set up in Configure → Linux network.
@@ -101,6 +110,36 @@ officially allocated names and numbers, and so on) were his.
     riscos-packages.
 - **The SWI and error numbers** for the new modules allocated by RISC OS
   Open.
+
+## Speed, measured
+
+Each figure says what it's compared with. "Before" is RISC OS on Linux
+before that change. "Native RISC OS" is RISC OS 5.31 booted on the same
+Raspberry Pi 4 from its SD card, with no Linux. Native RISC OS is still
+faster at most things. A Mac can't run RISC OS natively, so the Mac
+figures compare against QEMU's standard emulation.
+
+**Raspberry Pi 4, natively (2–5 November 2026)**
+
+| Test | Before | Now | Native RISC OS |
+|---|---|---|---|
+| One SWI | 2.4 µs (through Linux's security filter and a signal) | 745 ns (the fast SWI entry): about 3× faster | 162 ns: still about 4.5× faster than RISC OS on Linux |
+| 500,000 FPA instructions | 27 cs (a Linux signal each time) | 6 cs (the fast FPA entry): 4.5× faster | not measured with this test |
+| RiscOSM drawing a map | 32 s | 30 s (with the fast SWI entry; NativeSupport 0.18's later change not yet timed) | 17 s |
+| Opening and closing a file | – | 118 µs | 2.45 ms: RISC OS on Linux is about 20× faster (Linux's file cache) |
+| Reading 64 KB from a file already read | – | 4.4 GB/s | 21 MB/s (Linux's file cache) |
+| Listing a directory (OS_GBPB 10) | – | 184 µs | 24 µs: native is about 7.6× faster |
+
+**Apple Silicon Mac, under QEMU (UTM)**
+
+| Test | Before | Now |
+|---|---|---|
+| SWIs per second | 694,000 (QEMU with Timothy's changes for the port) | 3.4 million: about 4.9× faster |
+| VFP floating point (ROBench) | QEMU's standard emulation | 1.1 to 1.4× faster |
+| NEON (ROBench's NEON and image tests) | QEMU's standard emulation | 1.9 to 4.7× faster |
+
+The floating point and NEON results are checked bit for bit against
+QEMU's exact emulation: over 20 million results.
 
 The full history is in
 [RELEASE-NOTES.md](../RELEASE-NOTES.md#the-full-history).

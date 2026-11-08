@@ -192,7 +192,8 @@ here took 25 days: about 270 commits across the test bed, the build
 builds; 32 versions of the Linux side, 37 of the desktop parts and 10
 kernel updates; and 19 image builds.
 
-Newest first. Every package version is listed below, folded.
+Newest first. Every package version is listed below, folded. Speed figures compare with RISC OS on Linux before that change, not with
+native RISC OS. [Speed, measured](docs/what-we-added.md#speed-measured) has both.
 
 ### 8 November: this release (1.0.0019)
 

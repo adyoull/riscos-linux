@@ -67,10 +67,17 @@ This is his to-do list, from his README, and where each item stands now:
 - **NativeSupport:** programs run as they were compiled, natively. It
   patches privileged instructions into user mode ones on the fly while
   keeping programs compatible, so the DDE still compiles valid binaries.
-- **Speed:**
-  - SWIs about three times as fast natively;
-  - FPA 4.5 times as fast natively;
-  - SWIs 4.8 times as fast under QEMU, and NEON up to 4.7 times.
+- **VFP and NEON** for RISC OS programs (VFPSupport, which his port
+  didn't have yet).
+- **Speed**, against RISC OS on Linux before each change. Native RISC OS
+  is still faster at most things; [the measured figures](docs/what-we-added.md#speed-measured) give
+  native RISC OS's times too.
+  - Natively on a Pi 4, SWIs are about 3× faster: 2.4 µs → 745 ns. Native
+    RISC OS takes 162 ns.
+  - Natively, FPA instructions are 4.5× faster.
+  - Under QEMU on a Mac, SWIs are about 4.9× faster than with Timothy's QEMU
+    changes alone.
+  - Under QEMU, NEON is 1.9 to 4.7× faster than QEMU's standard emulation.
 - **Hardware:**
   - networking and Wi-Fi;
   - USB discs and SD cards, including RISC OS's own format;
