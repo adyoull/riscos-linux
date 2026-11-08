@@ -38,6 +38,11 @@ restart:
 - **riscos-support 1.0.0033-1:** on a Raspberry Pi with a 4K monitor the
   pointer is the right size. Before, the pointer was half the size of
   everything else, because the 1920 × 1080 desktop is shown twice the size.
+- **riscos-support 1.0.0035-1: making a dynamic area no longer stops
+  the desktop.** On this release's images, once a program has made a
+  dynamic area (EDT the debugger does as it starts; SOManager after some
+  programs), RISC OS can report "Internal error: abort on data transfer"
+  over and over and the desktop stops. Install this update first.
 - **riscos-support 1.0.0034-1 and riscos-harddisc 1.0.0038-1:** 4K and 5K
   modes in Configure → Screen, on a Pi and under UTM. With RISC OS
   5.31-19, when it comes, they're in 16 million colours and Configure's

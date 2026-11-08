@@ -3006,6 +3006,8 @@ fault_body (int sig, void *si, void *uc)
 #define DANODE_SIZE 16
 #define DANODE_MAXSIZE 20
 #define DANODE_TITLE 32
+#define DANODE_WORKSPACE 24
+#define DANODE_HANDLER 28
 #define DANODE_PMPSIZE 52
 #define DANODE_PMPMAXSIZE 56
 static struct kpmp
@@ -3075,6 +3077,29 @@ kpmp_free (struct kpmp *p)
   memset (p, 0, sizeof *p);
 }
 
+/* Whether n, found by looking through the system heap for words like a
+   dynamic area node's, is the node of a dynamic area: the kernel's own
+   answer for its number (OS_DynamicArea 2) has the same base, flags,
+   handler, workspace and title. Any heap block can hold such words: one
+   taken for a PMP area's node gave kpmp_access a "DANode_PMP" that isn't
+   a pointer, and from the next dynamic area made on (0.30, 0.31) RISC OS
+   aborted in NativeSupport at every address check and the desktop
+   stopped (EDT's report). (Not the maximum size: for a PMP area r5 is
+   its pool's.) A SWI from here changes the caller's saved PSR in the
+   vcpu: it's kept. */
+static int
+da_node_real (unsigned n)
+{
+  unsigned vcpu = get_tls ();
+  unsigned saved = *(volatile unsigned *) (vcpu + 24);
+  regs d = {{ 2, RD (n + DANODE_NUMBER) }};
+  int bad = swix_regs (0x66, &d) != 0;	/* OS_DynamicArea 2 */
+  *(volatile unsigned *) (vcpu + 24) = saved;
+  return !bad && d.r[3] == RD (n + DANODE_BASE) && d.r[4] == RD (n + DANODE_FLAGS)
+	 && d.r[6] == RD (n + DANODE_HANDLER) && d.r[7] == RD (n + DANODE_WORKSPACE)
+	 && d.r[8] == RD (n + DANODE_TITLE);
+}
+
 static unsigned
 kpmp_find_node (int da)
 {
@@ -3086,7 +3111,8 @@ kpmp_find_node (int da)
     {
       volatile unsigned *w = (volatile unsigned *) n;
       if (w[1] == (unsigned) da && (w[3] & (1u << 20)) && w[2]
-	  && !(w[2] & 0xfff) && w[5] && !(w[5] & 0xfff) && w[8])
+	  && !(w[2] & 0xfff) && w[5] && !(w[5] & 0xfff) && w[8]
+	  && da_node_real (n))
 	return n;
     }
   return 0;
@@ -3353,7 +3379,8 @@ rom_pmp_node (unsigned lo)
 	{
 	  volatile unsigned *w = (volatile unsigned *) n;
 	  if ((w[3] & (1u << 20)) && w[2] && !(w[2] & 0xfff) && w[5]
-	      && !(w[5] & 0xfff) && w[8] && w[1] < 0x100000u)
+	      && !(w[5] & 0xfff) && w[8] && w[1] < 0x100000u
+	      && da_node_real (n))
 	    rom_pmp_nodes[rom_pmp_n++] = n;
 	}
     }

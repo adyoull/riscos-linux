@@ -7,6 +7,18 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### 8 Nov 2026: NativeSupport 0.32, making a dynamic area no longer stops the desktop (riscos-support 1.0.0035-1)
+
+- **The bug:** from NativeSupport 0.30 (riscos-support 1.0.0031-1), once
+  a program had made a dynamic area, RISC OS could abort in NativeSupport
+  at every address check, and the desktop stopped. EDT and crossdev both
+  reported it.
+- **The cause:** the PMP area nodes NativeSupport finds in the system
+  heap could be a heap block that only looked like one.
+- **The fix:** each one is now checked with OS_DynamicArea 2.
+- **Also, for RISC OS 5.31-19:** an undefined instruction in Thumb code
+  gives lr = the instruction + 2, as on a real ARM.
+
 ### 8 Nov 2026: the mouse speed, and 4K in 16 million colours (riscos-support 1.0.0034-1, riscos-harddisc 1.0.0038-1; RISC OS 5.31-19 to be built)
 
 From Chris's report: on a Pi 5 with a 4K monitor, Configure's mouse
