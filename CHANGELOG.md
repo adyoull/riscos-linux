@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-18 (to be built)
+## 5.31-18 (6 November 2026)
 
 - **An interrupt no longer changes SPSR_svc under the code it interrupts.**
   The kernel's IRQ entry, in the Linux build, already kept r14_svc across
