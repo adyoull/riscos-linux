@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-19 (to be built)
+## 5.31-19 (8 November 2026)
 
 - **The mouse speed in Configure works** (and *Configure MouseStep): a
   mouse's movement reaches RISC OS as a relative move (SocketKVM's new
