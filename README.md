@@ -9,6 +9,8 @@ Kit), RISC OS runs natively; elsewhere it runs under a patched QEMU.
 
 RISC OS itself is RISC OS Open's, in Timothy Baldwin's
 [Linux port](https://github.com/TimothyEBaldwin/RISC_OS_Linux_Source).
+[What RISC OS on Linux adds to his port](docs/what-we-added.md) lists
+it plainly, against his to-do list.
 This repository holds everything else in the images, and how they're
 built. Ready-built packages (RISC OS, the Linux side, the kernels) come
 from [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg), which

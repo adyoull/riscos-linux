@@ -43,6 +43,14 @@ Updates** brings it to the same versions without reinstalling.
 
 ## What RISC OS on Linux adds to RISC OS
 
+RISC OS on Linux is built on Timothy Baldwin's Linux port of RISC OS.
+[What it adds to his port](docs/what-we-added.md) lists every change plainly, starting
+with the open items on his to-do list. Of those, sound output, IXFS's
+error handling, redrawing only what changed, the screen, keyboard and
+mouse driver, running Linux programs, PMP dynamic areas, VFPSupport and a
+binary release are done.
+
+
 Everything RISC OS has, plus these, which native RISC OS doesn't:
 
 **The start-up screen** says what's happening (the disc being enlarged on
