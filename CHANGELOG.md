@@ -1,11 +1,34 @@
 # Changelog
 
-## 1.0 (2026-10-21 to 2026-11-04, unreleased)
+## 1.0 (2026-10-21 to 2026-11-08; images 1.0.0019, the first public release)
 
 From a test bed to RISC OS on Linux's images: the Linux side, the desktop
 parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
+
+### 8 Nov 2026: images 1.0.0019, the first public release
+
+- **The images rebuilt with the newest of everything:** RISC OS 5.31-18,
+  riscos-support 1.0.0032-1 (NativeSupport 0.31), riscos-harddisc
+  1.0.0037-1, and kernels 7.2.0-4 (generic and Dev Kit) and 6.6.78-6 (Pi).
+  - They're made from the published 1.0.0018 images, without rebuilding
+    Debian (`images/rebuild/`). The packages are put in as dpkg would, and
+    their postinsts' work is done against the image. `/riscos` and
+    HardDisc4's own directory now belong to RISC OS on the generic image
+    too, as on the Dev Kit's.
+  - The generic image boots to the desktop in QEMU (UEFI, Cortex-A76,
+    natively) with the versions above, and the Dev Kit image's root boots
+    with its own kernel.
+  - A 1.0.0018 image updated through Configure → Updates from a copy of
+    the repository gets the same versions, and Roll back is then offered.
+- **RELEASE-NOTES.md** is 1.0.0019's:
+  - the full history since the test bed began;
+  - screenshots of what RISC OS on Linux adds to RISC OS
+    (`docs/screenshots/1.0.0019`).
+- **The `riscos-5.31-source` branch has RISC OS 5.31-18:** the HAL's
+  GetVCPU/get_tls interrupt fix and the kernel keeping SPSR_svc.
+- `images/README-*.txt` for 1.0.0019.
 
 ### 8 Nov 2026: the numbers RISC OS Open allocated (not yet packaged)
 

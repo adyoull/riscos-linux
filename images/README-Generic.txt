@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0018 for 64-bit ARM machines (5 November 2026)
+RISC OS on Linux 1.0.0019 for 64-bit ARM machines (8 November 2026)
 ===================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
@@ -6,14 +6,14 @@ One image for:
   - 64-bit ARM machines that boot from UEFI: the firmware starts
     EFI/BOOT/BOOTAA64.EFI from this partition. That covers virtual
     machines (UTM, QEMU, Parallels: on an Apple Silicon Mac the ready-made
-    "RISC OS 1.0.0018.utm" is easier) and ARM boards and servers with
+    "RISC OS 1.0.0019.utm" is easier) and ARM boards and servers with
     standard UEFI firmware (ACPI, or a device tree from the firmware).
     The Windows Dev Kit 2023 needs its own device tree: use its own image
     (riscos-wdk2023) instead;
   - Pine64's Pinebook (Allwinner A64) and Pinebook Pro (Rockchip RK3399),
     with U-Boot (below) starting EFI/BOOT/BOOTAA64.EFI.
 
-Version 1.0, build 0018: RISC OS 5.31 (5.31-17: RISC OS Open's
+Version 1.0, build 0019: RISC OS 5.31 (5.31-18: RISC OS Open's
 sources merged into Timothy Baldwin's Linux port) with
 RISC OS Open's HardDisc4 5.30, on Debian 13 (the slim base
 Debian's own container images use, about 100 MB: no Linux desktop, no
@@ -24,6 +24,16 @@ run 32-bit ARM programs, otherwise under QEMU (slower). The start-up
 screen says "Starting RISC OS (native)..." when it runs natively.
 *NativeSupport shows what NativeSupport (the module that makes native
 running work) has done.
+
+New in build 0019 (every package update since build 0018): RISC OS
+5.31-18 (no more stops on the start-up screen; a program's switch back
+to user mode no longer goes wrong now and then); NativeSupport 0.31
+(Iris 1.039 and the web browser's JavaScript compiler work, big
+programs run natively, FPA floating point about 4.5 times as fast on a
+Pi, the SWI and error numbers RISC OS Open allocated); the last
+session's logs kept after a restart; Configure, Screen shows the
+monitor's own name and modes; the Pi kernel 6.6.78-6 and the generic
+kernel 7.2.0-4.
 
 Native or QEMU: a file /riscos/native on the Linux partition saying "off"
 runs RISC OS under QEMU, "on" always natively; without it (or "auto") it
