@@ -410,6 +410,25 @@ int Graphics_handler(_kernel_swi_regs *r, void *pw) {
           ix_write(socket, &pp, sizeof(pp));
         }
       }
+      // the pointer turned off (OS_Byte 106 0, or a shape of height 0): the
+      // kernel passes flags 0 and no shape, and gives the shape again
+      // (bit 1) when it comes back on. Front ends from version 3 draw the
+      // pointer where RISC OS has it, so they're told, once: a pointer
+      // message with visible 0 and no rows (rol-fb then draws none).
+      // Before, the last pointer stayed on screen, frozen where it was
+      // (5.31-20; !RDPClient turns the pointer off over its window).
+      // Older front ends (SDL) aren't sent it: they'd read rows from a
+      // height of 0.
+      {
+        static int told_off;
+        if (r->r[0] & 1)
+          told_off = 0;
+        else if (socket != -1 && frontend_version >= 3 && !told_off) {
+          struct pointer p = { c_pointer, 0, 0, 0, 0, 0 };
+          ix_write(socket, &p, sizeof(p));
+          told_off = 1;
+        }
+      }
       if (r->r[0] & 2) {
         struct shape_t *s = (void*) r->r[3];
         struct pointer p = {

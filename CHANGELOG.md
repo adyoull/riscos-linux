@@ -17,6 +17,15 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   a 1 GB physical pool (262,144 pages claimed one block at a time, 0.6 s)
   maps and reads back. To check on the build: Configure's RAM disc at
   1 GB and more, files copied in, the RAM disc made smaller and larger.
+- **A pointer turned off goes off** (SocketKVM): when a program turns the
+  pointer off (`*FX 106 0`, as !RDPClient does over its window, where it
+  draws the remote computer's pointer itself), the screen kept showing the
+  last pointer, frozen where it was since 5.31-19 (before, it followed the
+  mouse). The kernel gives SocketKVM no shape then, and SocketKVM passed the
+  pointer's visibility on only with a new shape. Front ends from version 3
+  (rol-fb) are now told once, with a pointer message that has no rows; the
+  SDL front ends aren't (they'd read rows from a height of 0). Chris
+  Gransden's report, found with !RDPClient's developers.
 
 ## 5.31-19 (8 November 2026)
 
