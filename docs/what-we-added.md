@@ -64,12 +64,15 @@ officially allocated names and numbers, and so on) were his.
   - two interrupt fixes that stopped rare hangs.
 
 **Running natively, and fast:**
-- **NativeSupport.** On processors that run 32-bit ARM programs (Pi 3, 4
-  and 5, the Dev Kit, the Pinebooks), RISC OS's own code ran natively, but
-  most programs loaded from disc didn't: they use privileged instructions,
-  which Linux doesn't allow. That covers UnixLib programs, modules, BASIC's
-  assembler and big programs like the web browser. NativeSupport prepares
-  them and does what Linux won't, so they run natively too.
+- **NativeSupport** lets programs run as they were compiled. On
+  processors that run 32-bit ARM programs (Pi 3, 4 and 5, the Dev Kit, the
+  Pinebooks), it patches privileged instructions into user mode ones on
+  the fly, as code is loaded or written, so programs run natively instead
+  of failing on instructions Linux doesn't allow. That covers UnixLib
+  programs, modules, BASIC's assembler and big programs like the web
+  browser. It keeps them compatible: what a program reads back of itself,
+  and the files tools save, are as they were written. So the DDE still
+  compiles valid binaries on RISC OS on Linux.
 - **Kernel changes for speed:**
   - RISC OS's SWIs go straight to RISC OS (about three times as fast on a
     Pi 4);
