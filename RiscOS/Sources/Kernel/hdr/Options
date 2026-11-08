@@ -182,7 +182,7 @@ PMPDebug        SETL  {FALSE}                   ; Physical memory pool debugging
 PMPParanoid     SETL  {FALSE}                   ; Validate PMPs after most ops
 
                 GBLL  PMPRAMFS
-PMPRAMFS        SETL  :LNOT: Linux              ; Whether RAMFS DA is a PMP (requires compatible RAMFS module)
+PMPRAMFS        SETL  {TRUE}                    ; Whether RAMFS DA is a PMP (requires compatible RAMFS module); on Linux too since the kernel does PMP areas itself (5.31-20)
 PMPRAMFS_Size   * 256                           ; Number of logical pages (physical size is unlimited)
 
   [ :LNOT: :DEF: LongDesc

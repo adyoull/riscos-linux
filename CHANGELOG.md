@@ -6,6 +6,18 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-20 (to be built)
+
+- **The RAM disc can be up to 2 GB** (it was 128 MB), as on native RISC OS
+  5.3x: the kernel makes it a physical memory pool area (PMPRAMFS), which
+  Timothy Baldwin's port had turned off on Linux (2017) because it had no
+  PMP areas then. The kernel has done PMP areas itself since 5.31-3, and
+  RISC OS Open's RAMFS uses either kind. Chris Gransden's report.
+  Checked before building, on 5.31-19 natively under QEMU: a PMP area with
+  a 1 GB physical pool (262,144 pages claimed one block at a time, 0.6 s)
+  maps and reads back. To check on the build: Configure's RAM disc at
+  1 GB and more, files copied in, the RAM disc made smaller and larger.
+
 ## 5.31-19 (8 November 2026)
 
 - **The mouse speed in Configure works** (and *Configure MouseStep): a
