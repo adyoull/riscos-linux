@@ -550,7 +550,12 @@ static void undefined_signal_handler(int signal, ix_siginfo_t *info, struct ix_u
   uint32_t * restrict r = ucontext->uc_mcontext.r;
   struct vcpu* vcpu = __kuser_get_tls();
 
-  ENTER_EXCEPTION(UND, 0, 4)
+  // lr_und is the instruction + 4 in ARM state, + 2 in Thumb state, as
+  // on a real ARM (it was + 4 for both, so a debugger setting Thumb
+  // breakpoints with an undefined instruction saw the wrong address).
+  // Worked out before ENTER_EXCEPTION, which clears the T bit.
+  uint32_t offset = (r[16] & PSR_T_BIT) ? 2 : 4;
+  ENTER_EXCEPTION(UND, 0, offset)
 }
 
 // Abort handling

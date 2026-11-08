@@ -20,6 +20,12 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   rol-fb from riscos-support 1.0.0034-1); older ones, and tablets (UTM),
   go on as before. SocketKVM's version to the front end is 3.
 
+- **An undefined instruction in Thumb code gives lr = the instruction + 2**,
+  as on a real ARM (it was + 4, the ARM state's offset, for both): the
+  HAL's SIGILL handler now takes the state into account. Debuggers that
+  put undefined instructions in Thumb code as breakpoints (EDT) saw the
+  wrong address.
+
 - **4K in 16 million colours:** the screen memory can be 64MB (it was
   16MB), enough for 3840 x 2160 in 16 million colours (31.6MB). The memory
   comes from Linux as it's used, so this costs nothing until a big mode is
