@@ -13,7 +13,7 @@ programs are built from (`aarch64-linux-gnu-gcc -O2 -static`):
 | `fe/rol-cmd.c` | runs Linux commands for RISC OS (*Linux, !Updates) through files in /riscos/cmd |
 | `mkimage-generic.sh` | builds the image: MBR (partition 1 from 16 MiB), FAT boot partition, Debian 13 slim root with RISC OS in /opt/riscos and /riscos |
 | `mbr.py` | writes the MBR |
-| `rebuild/` | images 1.0.0019 made from the 1.0.0018 images and the newest packages (see its README) |
+| `rebuild/` | images 1.0.0019 and 1.0.0020 made from the previous images and the newest packages (see its README) |
 | `kernel-*.config` | the kernels' configurations (Raspberry Pi's 6.6, mainline 7.2) |
 
 The root file system is Debian 13 "trixie" slim for arm64, from Debian's

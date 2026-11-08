@@ -1,6 +1,6 @@
-# RISC OS on Linux 1.0.0019 (8 November 2026): the first public release
+# RISC OS on Linux 1.0.0020 (8 November 2026): the first public release
 
-RISC OS 5.31 (5.31-18: RISC OS Open's nightly in Timothy Baldwin's Linux
+RISC OS 5.31 (5.31-19: RISC OS Open's nightly in Timothy Baldwin's Linux
 port) on Debian 13, for 64-bit ARM machines: Raspberry Pis, UEFI
 machines and virtual machines, Apple Silicon Macs (UTM), the Windows
 Dev Kit 2023 and the Pinebooks. RISC OS runs straight on the processor
@@ -8,22 +8,23 @@ where it can (Raspberry Pi 3, 4 and 5, the Dev Kit, the Pinebooks) and
 under QEMU where it can't (Apple's processors).
 
 This is a test release: it runs well on the machines below, but please
-report anything that doesn't work.
+[report](../README.md#reporting-a-problem) anything that doesn't work.
 
-![The desktop](docs/screenshots/1.0.0019/00-desktop.png)
+![The desktop](../docs/screenshots/1.0.0019/00-desktop.png)
 
 ## The images
 
 | Image | For | File |
 |---|---|---|
 | Generic | Raspberry Pi 3/3B+/CM3, Zero 2 W, 4/400/CM4, 5/500/CM5; UEFI machines (QEMU, ARM boards and servers); Pinebook and Pinebook Pro | `riscos-generic.img.xz` |
-| UTM | Apple Silicon Macs | `RISC OS 1.0.0019.utm` (in `RISC OS 1.0.0019.utm.zip`) |
+| UTM | Apple Silicon Macs | `RISC OS 1.0.0020.utm` (in `RISC OS 1.0.0020.utm.zip`) |
 | Windows Dev Kit 2023 | Snapdragon 8cx Gen 3 ("Project Volterra") only | `riscos-wdk2023.img.xz` |
 
 Write the .img.xz to a card or USB disc with Raspberry Pi Imager ("Use
 custom") or balenaEtcher. Unzip the .utm and double-click it to add it to
 UTM. Each image starts straight into the RISC OS desktop; Shutdown powers
-the machine off. `SHA256SUMS` lists the files' checksums.
+the machine off. `SHA256SUMS` lists the files' checksums. How to install
+on each machine is in [the README](../README.md#installing).
 
 The Dev Kit image is only for the Dev Kit: anywhere else Linux finds no
 screen and the machine switches off a minute later.
@@ -33,35 +34,23 @@ Updates** brings it to the same versions without reinstalling.
 
 ## Updates since this release
 
-The first **Check for updates** (Configure → Updates) brings these, then
-restart:
-- **riscos-support 1.0.0033-1:** on a Raspberry Pi with a 4K monitor the
-  pointer is the right size. Before, the pointer was half the size of
-  everything else, because the 1920 × 1080 desktop is shown twice the size.
-- **riscos-support 1.0.0035-1: making a dynamic area no longer stops
-  the desktop.** On this release's images, once a program has made a
-  dynamic area (EDT the debugger does as it starts; SOManager after some
-  programs), RISC OS can report "Internal error: abort on data transfer"
-  over and over and the desktop stops. Install this update first.
-- **riscos-support 1.0.0034-1 and riscos-harddisc 1.0.0038-1:** 4K and 5K
-  modes in Configure → Screen, on a Pi and under UTM. With RISC OS
-  5.31-19, when it comes, they're in 16 million colours and Configure's
-  mouse speed works.
+None yet. Configure → Updates → Check for updates finds them as they
+come.
 
 ## Versions in this release
 
 | Package | Version |
 |---|---|
-| RISC OS (`riscos-rom`) | 5.31-18 |
-| The Linux side (`riscos-support`) | 1.0.0032-1 (NativeSupport 0.31) |
-| The desktop parts (`riscos-harddisc`) | 1.0.0037-1 |
+| RISC OS (`riscos-rom`) | 5.31-19 |
+| The Linux side (`riscos-support`) | 1.0.0037-1 (NativeSupport 0.33, rol-fb 3) |
+| The desktop parts (`riscos-harddisc`) | 1.0.0038-1 |
 | Kernels | Pi 6.6.78-6; generic and Dev Kit 7.2.0-4 |
 | Linux | Debian 13 (trixie) |
 
 ## What RISC OS on Linux adds to RISC OS
 
 RISC OS on Linux is built on Timothy Baldwin's Linux port of RISC OS.
-[What it adds to his port](docs/what-we-added.md) lists every change plainly, starting
+[What it adds to his port](../docs/what-we-added.md) lists every change plainly, starting
 with the open items on his to-do list. Of those, sound output, IXFS's
 error handling, redrawing only what changed, the screen, keyboard and
 mouse driver, running Linux programs, PMP dynamic areas, VFPSupport and a
@@ -75,30 +64,30 @@ the first start, the network, the clock), and the logs of every start are
 copied to the card's FAT partition, so a machine with a dark screen can
 still say what went wrong.
 
-![The start-up screen](docs/screenshots/1.0.0019/01-startup-screen.png)
+![The start-up screen](../docs/screenshots/1.0.0019/01-startup-screen.png)
 
 **Configure** has three new plug-ins: **Linux network**, **Updates** and
 **Scroll wheel**.
 
-![Configure](docs/screenshots/1.0.0019/02-configure.png)
+![Configure](../docs/screenshots/1.0.0019/02-configure.png)
 
 **Linux network** sets up wired or Wi-Fi networking, with DHCP or a fixed
 address, and shows how the network is doing. RISC OS's own Internet
 module uses it as it is, and RISC OS's name servers follow Linux's, so a
 network that comes up late still works.
 
-![Configure → Linux network](docs/screenshots/1.0.0019/03-linux-network.png)
+![Configure → Linux network](../docs/screenshots/1.0.0019/03-linux-network.png)
 
 **Screen** starts the desktop at the monitor's own size. On a Pi it shows
 the monitor by name, with its modes; under UTM, the window's size.
 Resizing a virtual machine's window changes the mode to fit.
 
-![Configure → Screen](docs/screenshots/1.0.0019/04-screen.png)
+![Configure → Screen](../docs/screenshots/1.0.0019/04-screen.png)
 
 **Scroll wheel** scrolls the window under the pointer, either way round
 (reversed, as on a Mac, if you like).
 
-![Configure → Scroll wheel](docs/screenshots/1.0.0019/05-scroll-wheel.png)
+![Configure → Scroll wheel](../docs/screenshots/1.0.0019/05-scroll-wheel.png)
 
 **Updates** keeps the whole machine up to date from the desktop: RISC OS
 itself (the ROM), its Linux side, the kernel and the desktop parts come
@@ -113,19 +102,19 @@ and Debian's security fixes come too.
 
 Here a 1.0.0018 machine is updated to this release:
 
-![Updates finds the new versions](docs/screenshots/1.0.0019/11-updates-found.png)
+![Updates finds the new versions](../docs/screenshots/1.0.0019/11-updates-found.png)
 
-![Changes: what each new version changes](docs/screenshots/1.0.0019/12-updates-changes.png)
+![Changes: what each new version changes](../docs/screenshots/1.0.0019/12-updates-changes.png)
 
-![Installing](docs/screenshots/1.0.0019/13-updates-installing.png)
+![Installing](../docs/screenshots/1.0.0019/13-updates-installing.png)
 
-![Installed: restart to use them](docs/screenshots/1.0.0019/14-updates-installed.png)
+![Installed: restart to use them](../docs/screenshots/1.0.0019/14-updates-installed.png)
 
 **`*Linux`** runs a Linux command from RISC OS and prints its output, in a
 task window or at the command line. For example, `*Linux apt-get install
 htop`.
 
-![*Linux in a task window](docs/screenshots/1.0.0019/10-linux-command.png)
+![*Linux in a task window](../docs/screenshots/1.0.0019/10-linux-command.png)
 
 **Protected RISC OS:** RISC OS runs as an ordinary Linux user, so a RISC OS
 program can't change Linux or reach the rest of the disc. `*Linux` and
@@ -133,7 +122,7 @@ Updates are the deliberate way through, so they ask for Linux's root
 password, which you choose the first time. `*IXRun` runs Linux programs
 as RISC OS's own Linux user, with no password.
 
-![The root password, chosen the first time](docs/screenshots/1.0.0019/09-root-password.png)
+![The root password, chosen the first time](../docs/screenshots/1.0.0019/09-root-password.png)
 
 **Discs:**
 - **HardDisc4** is a hard disc icon on the icon bar, with Open '$', Free
@@ -145,9 +134,9 @@ as RISC OS's own Linux user, with no password.
   format (FileCore) appear as `SCSI::` drives, as on a native Pi. Eject
   is on their menu.
 
-![HardDisc4's menu](docs/screenshots/1.0.0019/06-harddisc4-menu.png)
-![HardDisc4 and its Free window](docs/screenshots/1.0.0019/07-harddisc4-free.png)
-![IXFS:$](docs/screenshots/1.0.0019/08-ixfs.png)
+![HardDisc4's menu](../docs/screenshots/1.0.0019/06-harddisc4-menu.png)
+![HardDisc4 and its Free window](../docs/screenshots/1.0.0019/07-harddisc4-free.png)
+![IXFS:$](../docs/screenshots/1.0.0019/08-ixfs.png)
 
 **And:**
 - **The clock** is set from the internet as soon as the network is up, and
@@ -178,7 +167,7 @@ as RISC OS's own Linux user, with no password.
 | Raspberry Pi 5 | Chris Gransden (1.0.0017) |
 | Windows Dev Kit 2023 | Chris Gransden (1.0.0017) |
 | UTM on an Apple Silicon Mac | Chris Gransden (1.0.0017); this release's QEMU in a Linux VM on an Apple Silicon Mac |
-| QEMU (UEFI, Cortex-A76, natively) | this release's generic image: the desktop, Configure, *Linux, the discs; 1.0.0018 updated to this release through Updates; the Dev Kit image's root with its kernel. 39 of the 40 programs on the disc start (with 5.31-18 and NativeSupport 0.30); Iris 1.039 loads bbc.co.uk |
+| QEMU (UEFI, Cortex-A76, natively) | this release's generic image and the Dev Kit image's root: the desktop, *Linux, RISC OS 5.31-19 and NativeSupport 0.33; with 5.31-19, a USB mouse at both mouse speeds, 4K in 16 million colours, menus and pointer moves, and the tablet; Iris 1.039 loads bbc.co.uk. With 1.0.0019's packages: Configure, the discs, 1.0.0018 updated through Updates; 39 of the 40 programs on the disc start |
 | Raspberry Pi 3, Zero 2 W | untried |
 | Pinebook, Pinebook Pro | untried: treat as experimental |
 
@@ -204,15 +193,41 @@ Please send reports with the `LOGS` folder from the FAT partition.
 
 RISC OS on Linux started as a test bed on 15 October 2026, for running
 Timothy Baldwin's Linux port of RISC OS on 64-bit ARM machines. Getting
-here took 25 days: about 270 commits across the test bed, the build
-(riscos-linux) and the package repository (riscos-rolpkg); 18 RISC OS
-builds; 32 versions of the Linux side, 37 of the desktop parts and 10
-kernel updates; and 19 image builds.
+here took 25 days: about 300 commits across the test bed, the build
+(riscos-linux) and the package repository (riscos-rolpkg); 19 RISC OS
+builds; 37 versions of the Linux side, 38 of the desktop parts and 10
+kernel updates; and 20 image builds.
 
 Newest first. Every package version is listed below, folded. Speed figures compare with RISC OS on Linux before that change, not with
-native RISC OS. [Speed, measured](docs/what-we-added.md#speed-measured) has both.
+native RISC OS. [Speed, measured](../docs/what-we-added.md#speed-measured) has both.
 
-### 8 November: this release (1.0.0019)
+### 8 November, afternoon: this release (1.0.0020)
+
+From Chris Gransden's report on a Raspberry Pi 5 with a 4K monitor, and
+from EDT's and crossdev's developers:
+- **RISC OS 5.31-19:**
+  - Configure's mouse speed works with a mouse. Its movement now reaches
+    RISC OS as movement, which RISC OS scales by the mouse speed, as on a
+    Pi. It was taken as a position, so the speed was always one pixel per
+    count: slow on a big screen. Tablets (UTM) work as before.
+  - The screen can use up to 64 MB, so 4K and 5K work in 16 million
+    colours, not only 32 thousand.
+  - Programs that move the pointer move it on the screen.
+  - A Thumb program's undefined instruction is reported at the right
+    address; memory checks (OS_Memory 24) answer for PMP areas page by
+    page under QEMU.
+- **The pointer** (rol-fb): the right size on a 4K monitor (the desktop
+  is 1920 × 1080 shown twice the size), and drawn where RISC OS has it
+  from the start.
+- **NativeSupport 0.32 and 0.33:** making or removing a dynamic area no
+  longer stops the desktop with "Internal error: abort on data transfer"
+  (EDT the debugger as it starts; static UnixLib programs as they end,
+  during a ROM build for example).
+- **UTM's monitor list** (Configure → Screen) has the common sizes from
+  2880 × 1800 to 5120 × 2880.
+- The images rebuilt with all of it.
+
+### 8 November: 1.0.0019 (not published)
 
 - **The SWI and error numbers RISC OS Open allocated:**
   - NativeSupport's SWIs are NativeSupport_PMPOp (&5AF40) and
@@ -349,6 +364,7 @@ The work that made RISC OS on Linux run well, before there were packages
 
 | Version | Date | What changed |
 |---|---|---|
+| 5.31-19 | 8 Nov | Configure's mouse speed works with a mouse; 4K and 5K in 16 million colours (64 MB screen); programs moving the pointer move it on screen |
 | 5.31-18 | 6 Nov | No more stops on the start-up screen as the desktop starts; an interrupt no longer spoils a program's switch back to user mode (SPSR_svc kept) |
 | 5.31-17.1 | 5 Nov | Starts again under QEMU (5.31-16 and -17 were readable only by root) |
 | 5.31-17 | 4 Nov | GPIO on a Pi 3 or 4, for programs and the Raspberry Pi DDE |
@@ -373,6 +389,11 @@ The work that made RISC OS on Linux run well, before there were packages
 
 | Version | Date | What changed |
 |---|---|---|
+| 1.0.0037-1 | 8 Nov | rol-fb: the pointer drawn where RISC OS has it from the start |
+| 1.0.0036-1 | 8 Nov | NativeSupport 0.33: the same after a dynamic area is removed (static UnixLib programs ending) |
+| 1.0.0035-1 | 8 Nov | NativeSupport 0.32: making a dynamic area no longer stops the desktop |
+| 1.0.0034-1 | 8 Nov | rol-fb 3: mouse movement to RISC OS as movement (its mouse speed applies, with 5.31-19); modes up to 64 MB listed |
+| 1.0.0033-1 | 8 Nov | rol-fb: the pointer the right size on a 4K monitor |
 | 1.0.0032-1 | 8 Nov | NativeSupport 0.31: RISC OS Open's SWI and error numbers |
 | 1.0.0031-1 | 7 Nov | NativeSupport 0.30: Iris 1.039, the JavaScript compiler, the DDE's tools, EDT, debuggers |
 | 1.0.0030-1 | 6 Nov | Iris 1.0.29 starts natively again |
@@ -410,6 +431,7 @@ The work that made RISC OS on Linux run well, before there were packages
 
 | Version | Date | What changed |
 |---|---|---|
+| 1.0.0038-1 | 8 Nov | UTM's monitor list with 4K and 5K sizes |
 | 1.0.0037-1 | 8 Nov | LinuxCodec, LinuxAudio and LinuxShell: RISC OS Open's numbers |
 | 1.0.0036-1 | 6 Nov | Updates repairs damaged package lists |
 | 1.0.0035-1 | 6 Nov | The sound, USB and SCSI modules keep SPSR_svc in their tickers |

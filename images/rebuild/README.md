@@ -1,5 +1,16 @@
 # Rebuilding the images from a release
 
+`mkroot20.sh`, `mkgen20.sh` and `mkwdk20.sh` made images 1.0.0020 from the
+1.0.0019 images the same way, with riscos-rom 5.31-19, riscos-support
+1.0.0037-1 and riscos-harddisc 1.0.0038-1 (the kernels are 1.0.0019's):
+
+```
+mkroot20.sh riscos-generic-1.0.0019.img ROOT POOL
+mkgen20.sh  riscos-generic-1.0.0019.img ROOT riscos-generic.img
+OFF=$((257 * 2048)) mkroot20.sh riscos-wdk2023-1.0.0019.img WROOT POOL
+mkwdk20.sh  riscos-wdk2023-1.0.0019.img WROOT riscos-wdk2023.img
+```
+
 `mkroot19.sh`, `mkgen19.sh` and `mkwdk19.sh` made images 1.0.0019 from
 the published 1.0.0018 images and the newest packages in the
 [riscos-rolpkg](https://github.com/adyoull/riscos-rolpkg) pool, without

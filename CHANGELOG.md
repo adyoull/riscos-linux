@@ -1,6 +1,15 @@
 # Changelog
 
-## 1.0 (2026-10-21 to 2026-11-08; images 1.0.0019, the first public release)
+## 1.0 (2026-10-21 to 2026-11-08; images 1.0.0020, the first public release)
+
+### 8 Nov 2026: images 1.0.0020
+
+The images rebuilt from 1.0.0019's with riscos-rom 5.31-19, riscos-support
+1.0.0037-1 (NativeSupport 0.33, rol-fb with the relative mouse) and
+riscos-harddisc 1.0.0038-1 (`images/rebuild/mk*20.sh`). 1.0.0019 was never
+published; 1.0.0020 is the first public release (RELEASE-NOTES.md).
+Checked under QEMU: the generic image and the Dev Kit image's root reach
+the desktop with RISC OS 5.31-19 and NativeSupport 0.33, natively.
 
 From a test bed to RISC OS on Linux's images: the Linux side, the desktop
 parts, and natively on real machines. What users get from this comes in
