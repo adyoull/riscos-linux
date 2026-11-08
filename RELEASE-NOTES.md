@@ -31,6 +31,14 @@ screen and the machine switches off a minute later.
 Already running an earlier test build (1.0.0006 or later)? **Configure →
 Updates** brings it to the same versions without reinstalling.
 
+## Updates since this release
+
+The first **Check for updates** (Configure → Updates) brings these, then
+restart:
+- **riscos-support 1.0.0033-1:** on a Raspberry Pi with a 4K monitor the
+  pointer is the right size. Before, the pointer was half the size of
+  everything else, because the 1920 × 1080 desktop is shown twice the size.
+
 ## Versions in this release
 
 | Package | Version |
