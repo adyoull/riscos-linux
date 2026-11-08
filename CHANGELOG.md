@@ -6,6 +6,17 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-19 (to be built)
+
+- **OS_Memory 24 (and OS_ValidateAddress) answer for a PMP area page by
+  page**, as RISC OS does from its page tables: only the pages mapped in
+  the area are accessible, with the area's access privilege, and the
+  internal flags no longer leak into bits 26-31 of the answer. Debuggers
+  and anything else checking addresses got the wrong answer for
+  ARMEABISupport 1.08's stacks and mmaps and SOManager's shared libraries.
+  (NativeSupport 0.28 answers these checks itself natively, so this
+  matters under QEMU.)
+
 ## 5.31-18 (6 November 2026)
 
 - **An interrupt no longer changes SPSR_svc under the code it interrupts.**
