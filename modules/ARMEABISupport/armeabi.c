@@ -743,7 +743,7 @@ unsupported (unsigned number, unsigned reason)
    "physical" pages around with OS_DynamicArea 22, mapping a task's copy in
    from a data abort handler when the task touches it. The port has neither
    physical pages nor PMP dynamic areas, so the test bed's QEMU does that
-   part (SWI &C0002, see qemu-arm-riscos): an allocator is an ordinary
+   part (SWI NativeSupport_PMPOp, &5AF40, see qemu-arm-riscos): an allocator is an ordinary
    dynamic area, of size 0 but reserving its address space, whose pages QEMU
    backs with a memory file. Page n of the area starts out as file page n.
    A QEMU without that support gives an error (an unknown SWI) and the
@@ -770,7 +770,8 @@ typedef struct allocator
 
 static allocator *allocators;
 
-/* SWI &C0002 (X form), see QEMU: returns 0, -errno, or an error pointer
+/* SWI NativeSupport_PMPOp (&5AF40, X form; NativeSupport's chunk,
+   allocated by RISC OS Open; was &C0002), see QEMU: returns 0, -errno, or an error pointer
    (a QEMU without it: the SWI goes to RISC OS, which doesn't know it). */
 static int
 host_pmp (unsigned op, unsigned a, unsigned b, unsigned c, unsigned d)
@@ -780,7 +781,7 @@ host_pmp (unsigned op, unsigned a, unsigned b, unsigned c, unsigned d)
   register unsigned r2 __asm__ ("r2") = b;
   register unsigned r3 __asm__ ("r3") = c;
   register unsigned r4 __asm__ ("r4") = d;
-  __asm__ volatile ("swi 0xE0002\n\tmovvs r0, #-1"
+  __asm__ volatile ("swi 0x7AF40\n\tmovvs r0, #-1"
 		    : "+r" (r0) : "r" (r1), "r" (r2), "r" (r3), "r" (r4)
 		    : "lr", "cc", "memory");
   return (int) r0 > -4096 && (int) r0 <= 0 ? (int) r0 : -1;
@@ -790,7 +791,7 @@ __asm__ (".text\n"
 	 "\t.global abort_return\n"
 	 "\t.type abort_return, %function\n"
 	 "abort_return:\n"
-	 "\tswi 0xE0003\n");
+	 "\tswi 0x7AF41\n"	/* NativeSupport_AbortReturn */);
 extern char abort_return[];
 static unsigned abort_regs[17];
 

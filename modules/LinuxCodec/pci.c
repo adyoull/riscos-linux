@@ -21,9 +21,9 @@
 
 #define BLOCK_MAGIC	0x4D415250u	/* "PRAM" */
 
-ERROR_BLOCK (no_memory, 0x81A60, "PCI_RAMAlloc: not enough memory");
-ERROR_BLOCK (bad_block, 0x81A61, "PCI_RAMFree: not memory from PCI_RAMAlloc");
-ERROR_BLOCK (no_bus, 0x81A62, "There's no PCI bus under RISC OS for Linux (only PCI_RAMAlloc and PCI_RAMFree are provided)");
+ERROR_BLOCK (no_memory, 0x823630, "PCI_RAMAlloc: not enough memory");
+ERROR_BLOCK (bad_block, 0x823631, "PCI_RAMFree: not memory from PCI_RAMAlloc");
+ERROR_BLOCK (no_bus, 0x823632, "There's no PCI bus under RISC OS for Linux (only PCI_RAMAlloc and PCI_RAMFree are provided)");
 ERROR_BLOCK (bad_swi, 0x1E6, "Unknown PCI SWI");
 
 static unsigned blocks, bytes;

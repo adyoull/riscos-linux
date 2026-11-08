@@ -15,7 +15,7 @@ module_start:
 	.word	title - module_start
 	.word	help - module_start
 	.word	commands - module_start
-	.word	0x5A440				@ SWI chunk (not yet registered)
+	.word	0x5AF00				@ SWI chunk (allocated by ROOL, 7 Nov 2026)
 	.word	cm_swi - module_start
 	.word	swi_names - module_start
 	.word	0				@ SWI decoding code

@@ -16,15 +16,15 @@ module_start:
 	.word	title - module_start
 	.word	help - module_start
 	.word	commands - module_start
-	.word	0				@ no SWIs
-	.word	0
-	.word	0
+	.word	0x5AF40				@ SWI chunk (allocated by ROOL, 7 Nov 2026)
+	.word	swi_handler - module_start
+	.word	swi_names - module_start
 	.word	0
 	.word	0				@ messages file
 	.word	flags - module_start
 
 title:	.asciz	"NativeSupport"
-help:	.asciz	"NativeSupport\t0.30 (07 Nov 2026) RISC OS for Linux, native"
+help:	.asciz	"NativeSupport\t0.31 (08 Nov 2026) RISC OS for Linux, native"
 	.align	2
 commands:
 	.asciz	"NativeSupport"
@@ -38,6 +38,25 @@ cmd_help:
 	.asciz	"*NativeSupport shows what NativeSupport does for RISC OS running natively on Linux: the privileged instructions patched and emulated, and the other calls it handles. *NativeSupport FastSWI On|Off turns the fast SWI entry (riscos-linux kernels) on or off, *NativeSupport FastFPA On|Off the fast FPA entry (FPEmulator's instructions). *NativeSupport Reset starts the counts again.\rSyntax: *NativeSupport [FastSWI On|Off|FastFPA On|Off|Reset]"
 	.align	2
 flags:	.word	1				@ 32-bit compatible
+swi_names:
+	.asciz	"NativeSupport"
+	.asciz	"PMPOp"
+	.asciz	"AbortReturn"
+	.byte	0
+	.align	2
+@ NativeSupport_PMPOp (&5AF40) and NativeSupport_AbortReturn (&5AF41) are
+@ answered on the SWI vector (ns_swi_vector, below), before the kernel looks
+@ for a module: this handler sees one only from Thumb code or with
+@ NativeSupport not active (RISC OS under QEMU answers them in QEMU itself).
+swi_handler:
+	adr	r0, swi_err
+	mov	r12, #0x80000000
+	cmp	r12, #1				@ V set
+	mov	pc, lr
+swi_err:
+	.word	0x823803
+	.asciz	"NativeSupport isn't active, or the SWI came from Thumb code"
+	.align	2
 
 @ Service calls (RISC OS 4 style table): Service_DynamicAreaCreate (&90)
 @ and _Remove (&91), for fault reports, and Service_ModulePreInit (&B9).
@@ -93,8 +112,8 @@ kpmp_\n:
 @ after the SWI, the caller's registers and (in the port's vcpu) SPSR. Most
 @ SWIs go straight on to the previous claimant, as they came; the few
 @ NativeSupport answers - OS_Memory (&68), OS_DynamicArea (&66),
-@ OS_ReadSysInfo (&58), &C0002,
-@ &C0003, also through OS_CallASWI(R12) - go to ns_swi_c (C), and back to
+@ OS_ReadSysInfo (&58), NativeSupport_PMPOp (&5AF40) and _AbortReturn
+@ (&5AF41), also through OS_CallASWI(R12) - go to ns_swi_c (C), and back to
 @ the caller through the port's MOVS pc, lr routine (V in SPSR as C sets).
 	.global	ns_swi_vector, ns_old_swi_vector, ns_movs_pc_lr, ns_svc_base
 ns_swi_vector:
@@ -131,9 +150,10 @@ ns_swi_vector:
 	teqne	r2, #0x08			@ patched words copied as data
 	teqne	r2, #0x3A			@ OS_ValidateAddress (PMP areas, as OS_Memory 24)
 	beq	1f
-	sub	r3, r2, #0xC0000
-	teq	r3, #2
-	teqne	r3, #3
+	sub	r3, r2, #0x5A000		@ NativeSupport_PMPOp (&5AF40),
+	sub	r3, r3, #0xF40			@ _AbortReturn (&5AF41)
+	teq	r3, #0
+	teqne	r3, #1
 	beq	1f
 	sub	r3, r2, #0x59000		@ ARMEABISupport_MMapOp (&59D04),
 	sub	r3, r3, #0xD00			@ for the fault reports

@@ -42,15 +42,15 @@
 
 int escape_state (void);
 
-ERROR_BLOCK (no_linux, 0x81A70, "*Linux needs RISC OS for Linux");
-ERROR_BLOCK (no_daemon, 0x81A71, "*Linux needs the image's rol-cmd (Linux didn't take the command)");
-ERROR_BLOCK (too_long, 0x81A72, "*Linux: the command is too long");
-ERROR_BLOCK (failed, 0x81A73, "The Linux command failed");
+ERROR_BLOCK (no_linux, 0x823700, "*Linux needs RISC OS for Linux");
+ERROR_BLOCK (no_daemon, 0x823701, "*Linux needs the image's rol-cmd (Linux didn't take the command)");
+ERROR_BLOCK (too_long, 0x823702, "*Linux: the command is too long");
+ERROR_BLOCK (failed, 0x823703, "The Linux command failed");
 ERROR_BLOCK (stopped, 0x11, "Escape");
-ERROR_BLOCK (bad_pw, 0x81A74, "Wrong password");
-ERROR_BLOCK (wait_pw, 0x81A75, "Too many wrong passwords: try again in a minute");
-ERROR_BLOCK (mismatch, 0x81A76, "The two new passwords are different");
-ERROR_BLOCK (empty_pw, 0x81A77, "The password can't be empty");
+ERROR_BLOCK (bad_pw, 0x823704, "Wrong password");
+ERROR_BLOCK (wait_pw, 0x823705, "Too many wrong passwords: try again in a minute");
+ERROR_BLOCK (mismatch, 0x823706, "The two new passwords are different");
+ERROR_BLOCK (empty_pw, 0x823707, "The password can't be empty");
 
 #define RC_AUTH 77
 #define RC_NOPASS 78

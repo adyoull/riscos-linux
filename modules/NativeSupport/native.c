@@ -23,7 +23,8 @@
      find_kpmp_stubs finds none and this is left to the kernel.)
    - The SWI vector (OS_ClaimProcessorVector): OS_Memory 0 for application
      space and RISC OS's workspace (the port refuses; SoundDMA and
-     ARMEABISupport 1.08 ask), and SWI &C0002/&C0003 and OS_DynamicArea 22
+     ARMEABISupport 1.08 ask), and SWIs NativeSupport_PMPOp/AbortReturn
+     (&5AF40/&5AF41, NativeSupport's chunk) and OS_DynamicArea 22
      for the test bed's ARMEABISupport (lite). (Not SIGSYS: the ROM's own
      SIGSYS handler must be the one Linux calls, as its interrupt handler
      holds interrupts back while the program counter is in it.)
@@ -75,6 +76,13 @@
    Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include "cmodule.h"
 typedef unsigned char uint8_t;
+
+/* NativeSupport's SWI chunk (allocated by RISC OS Open, 7 Nov 2026; until
+   then &C0002 and &C0003). The same numbers in the test bed's QEMU and the
+   lite ARMEABISupport. */
+#define NS_SWI_CHUNK 0x5AF40u
+#define NS_SWI_PMPOP 0x5AF40u
+#define NS_SWI_ABORTRETURN 0x5AF41u
 
 #define IXSupport_LinuxSyscall	0x59EC0
 #define OS_ReadVarVal		0x23
@@ -1697,7 +1705,7 @@ ill_body (int sig, void *si, void *uc)
 }
 
 /* ------------------------------------------------------------------------
-   The test bed's ARMEABISupport (lite): SWI &C0002, &C0003 and OS_Dynamic-
+   The test bed's ARMEABISupport (lite): SWIs &5AF40, &5AF41 and OS_Dynamic-
    Area 22 (as qemu/ patch item 5) */
 #define PMP_MAX 16
 #define ABH_MAX 16
@@ -1852,7 +1860,7 @@ abh_next (unsigned *R, int from)
   return 0;
 }
 
-/* SWI &C0003 (the SWI vector): an abort handler returned. Back to the
+/* SWI &5AF41, NativeSupport_AbortReturn (the SWI vector): an abort handler returned. Back to the
    aborted code: r (the caller's r0-r12, return address) and SPSR_svc are
    set to what they were at the abort; then the port's MOVS pc, lr. If no
    handler took the abort, it is tried again with them out of the way, so
@@ -1876,7 +1884,7 @@ abh_return_swi (unsigned *r, unsigned *spsr)
 	    r[1] = abh_fault;
 	    r[11] = abh_regs;
 	    r[12] = abh[i].r12;
-	    /* return: the routine, called with lr = the SWI &C0003 */
+	    /* return: the routine, called with lr = the SWI &5AF41 */
 	    r[13] = abh[i].routine & ~3u;
 	    *spsr = (*spsr & ~0xffu & ~CPSR_T) | (abh_vmode & 0xdf);
 	    /* the handler's lr: set in the aborted mode's bank below */
@@ -2626,11 +2634,11 @@ ns_swi_c (unsigned *r)
 	  return write_unpatched (swi & 0xfdffff, r, n, vcpu, spsr);
 	return 0;
       }
-    case 0xC0002:
+    case NS_SWI_PMPOP:
       r[0] = pmp_op (r);
       ns.pmp_swis++;
       break;
-    case 0xC0003:
+    case NS_SWI_ABORTRETURN:
       if (!abh_return_swi (r, spsr))
 	return 0;
       return 1;
@@ -3513,9 +3521,11 @@ kpmp_call (int op, unsigned *r)
 
 /* ------------------------------------------------------------------------
    Starting */
-ERROR_BLOCK (bad_rom, 0x81A8, "NativeSupport: this isn't the ROM it knows (RISC OS 5.29 for Linux)");
-ERROR_BLOCK (no_memory, 0x81A9, "NativeSupport: not enough memory");
-ERROR_BLOCK (no_kill, 0x81AA, "NativeSupport can't be removed while RISC OS runs natively");
+ERROR_BLOCK (bad_rom, 0x823800, "NativeSupport: this isn't the ROM it knows (RISC OS 5.29 for Linux)");
+ERROR_BLOCK (no_memory, 0x823801, "NativeSupport: not enough memory");
+ERROR_BLOCK (no_kill, 0x823802, "NativeSupport can't be removed while RISC OS runs natively");
+/* (0x823803: header.s, a NativeSupport SWI that reached the module's own
+   SWI handler, not the SWI vector) */
 
 extern void kpmp_0 (void), kpmp_1 (void), kpmp_2 (void), kpmp_3 (void);
 extern char module_start[];
@@ -3900,9 +3910,10 @@ mod_init (const char *tail, int instance, void *pw)
   (void) tail; (void) instance;
   if (ns.active)
     return NULL;
-  /* Under QEMU? It answers SWI &C0002 itself (99: no such operation). */
+  /* Under QEMU? It answers NativeSupport_PMPOp itself (99: no such
+     operation). */
   regs r = {{ 99 }};
-  if (!swix_regs (0xC0002, &r))
+  if (!swix_regs (NS_SWI_PMPOP, &r))
     return NULL;
   /* The port's Linux system call: after signal_exit, the restorer of the
      ROM's signal handlers ("mov r7, #173; swi 0; bx lr") */

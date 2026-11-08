@@ -21,13 +21,13 @@
 #define IOCTL_MBOX_PROPERTY	IOC (3, 100, 0, 4)	/* _IOWR(100, 0, compat_uptr_t) */
 #define MAX_BUFFER		(64 * 1024)
 
-ERROR_BLOCK (not_native, 0x81A50, "BCMSupport (RISC OS for Linux) needs RISC OS running natively on a Raspberry Pi");
-ERROR_BLOCK (no_vcio, 0x81A51, "Linux has no VideoCore mailbox (/dev/vcio): this needs a Raspberry Pi");
-ERROR_BLOCK (no_memory, 0x81A52, "BCMSupport: not enough memory");
-ERROR_BLOCK (bad_buffer, 0x81A53, "BCMSupport: bad property buffer");
-ERROR_BLOCK (failed, 0x81A54, "BCMSupport: the firmware didn't take the property buffer");
-ERROR_BLOCK (no_callback, 0x81A55, "BCMSupport_SendPropertyBuffer: responses by callback aren't provided under RISC OS for Linux");
-ERROR_BLOCK (not_here, 0x81A56, "This BCMSupport SWI isn't provided under RISC OS for Linux");
+ERROR_BLOCK (not_native, 0x823620, "BCMSupport (RISC OS for Linux) needs RISC OS running natively on a Raspberry Pi");
+ERROR_BLOCK (no_vcio, 0x823621, "Linux has no VideoCore mailbox (/dev/vcio): this needs a Raspberry Pi");
+ERROR_BLOCK (no_memory, 0x823622, "BCMSupport: not enough memory");
+ERROR_BLOCK (bad_buffer, 0x823623, "BCMSupport: bad property buffer");
+ERROR_BLOCK (failed, 0x823624, "BCMSupport: the firmware didn't take the property buffer");
+ERROR_BLOCK (no_callback, 0x823625, "BCMSupport_SendPropertyBuffer: responses by callback aren't provided under RISC OS for Linux");
+ERROR_BLOCK (not_here, 0x823626, "This BCMSupport SWI isn't provided under RISC OS for Linux");
 ERROR_BLOCK (bad_swi, 0x1E6, "Unknown BCMSupport SWI");
 
 static int vcio = -1;

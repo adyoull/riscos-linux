@@ -43,12 +43,15 @@ needs, ported from Timothy Baldwin's qemu_swi.diff for QEMU 5.2
    module chain; RISCOS_PSR_ROM_MODULES gives another list ("" for none).
 5. (ours) linux-user/arm/cpu_loop.c: PMP dynamic areas for the test bed's
    ARMEABISupport (lite) page allocators (SOManager's shared library
-   data). SWI &C0002 from outside the ROM backs a dynamic area's address
-   range with a memfd ("physical" page n = file page n) and maps, unmaps
-   and frees pages; OS_DynamicArea 22 on such an area is done here, not
+   data). SWI &5AF40 (NativeSupport_PMPOp, in NativeSupport's SWI chunk
+   allocated by RISC OS Open; &C0002 before 8 Nov 2026) from outside the
+   ROM backs a dynamic area's address range with a memfd ("physical"
+   page n = file page n) and maps, unmaps and frees pages;
+   OS_DynamicArea 22 on such an area is done here, not
    by RISC OS. Data aborts in one go first to the abort handlers
-   registered with SWI &C0002 (SOManager's, which map a task's copy of a
-   library's data in), which return through SWI &C0003.
+   registered with SWI &5AF40 (SOManager's, which map a task's copy of a
+   library's data in), which return through SWI &5AF41
+   (NativeSupport_AbortReturn).
 6. (ours) linux-user/arm/cpu_loop.c: what GCCSDK's ARMEABISupport 1.08
    (as Iris ships) needs from the kernel. The port creates physical
    memory pool areas (OS_DynamicArea 0, flag bit 20) but its
@@ -68,6 +71,13 @@ needs, ported from Timothy Baldwin's qemu_swi.diff for QEMU 5.2
    return from an exception to Thumb code (an abort taken in it) resumes
    in Thumb state. SWIs called through OS_CallASWI(R12) are looked at
    too. RISCOS_REPORT prints Report_Text0 messages (no !Reporter).
+   OS_Memory 24 (CheckMemoryAccess) and OS_ValidateAddress for a range
+   in either kind of PMP area are answered here from the pages mapped
+   there, as RISC OS's kernel answers from its page tables (page by page,
+   whole-range flags ANDed, part-of-range ORed; unmapped pages XN): the
+   kernel can't see memfd pages, so it said none of a library or stack
+   was there (EDT couldn't read them). OS_ValidateAddress is left to RISC
+   OS (Service_ValidateAddress) when no access flag is set.
    RISCOS_SWI_RESULT=<hex SWI> reports how that SWI returns (V, r0).
 7. (ours) linux-user/syscall.c: getdents and getdents64 leave out "."
    and ".." for the port. Its IXFS numbers a directory's entries in
@@ -864,7 +874,7 @@ index 451f3fe..7d23af6 100644
  #define TCG_TARGET_HAS_v64              0
  #endif
 diff --git a/linux-user/arm/cpu_loop.c b/linux-user/arm/cpu_loop.c
-index b404117..68ed668 100644
+index b404117..9824dd9 100644
 --- a/linux-user/arm/cpu_loop.c
 +++ b/linux-user/arm/cpu_loop.c
 @@ -25,6 +25,10 @@
@@ -878,7 +888,7 @@ index b404117..68ed668 100644
  
  #define get_user_code_u32(x, gaddr, env)                \
      ({ abi_long __r = get_user_u32((x), (gaddr));       \
-@@ -316,8 +320,1513 @@ static bool emulate_arm_fpa11(CPUARMState *env, uint32_t opcode)
+@@ -316,8 +320,1616 @@ static bool emulate_arm_fpa11(CPUARMState *env, uint32_t opcode)
      return true;
  }
  
@@ -1223,7 +1233,7 @@ index b404117..68ed668 100644
 +/*
 + * RISC OS for Linux: physically mapped (PMP) dynamic areas, for
 + * ARMEABISupport's page allocators (SOManager's shared library data). The
-+ * port has no physical pages, so the module asks QEMU (SWI &C0002, from
++ * port has no physical pages, so the module asks QEMU (SWI &5AF40, from
 + * outside the port's ROM) to back an ordinary dynamic area's address range
 + * with a memfd: "physical" page P is the memfd's page P, and mapping it at
 + * logical page L is an mmap of that file page there. OS_DynamicArea 22
@@ -1233,16 +1243,17 @@ index b404117..68ed668 100644
 + * registered (ARMEABISupport_AbortOp, how SOManager maps a library's data
 + * in for the task touching it): the handler runs with r1 = the fault
 + * address, r11 = the registers at the abort, r12 = its data and returns
-+ * (to SWI &C0003) r0 = 1 to retry the access, 0 to pass it on.
++ * (to SWI &5AF41) r0 = 1 to retry the access, 0 to pass it on.
 + *
-+ * SWI &C0002, r0 = operation:
++ * SWI &5AF40 (NativeSupport_PMPOp: NativeSupport's SWI chunk, allocated by
++ * RISC OS Open; was &C0002), r0 = operation:
 + *   0  add area: r1 DA number, r2 base, r3 size in pages -> r0 0 or -errno
 + *   1  remove area: r1 DA number
 + *   2  map: r1 DA, r2 logical page, r3 physical page, r4 count
 + *   3  unmap: r1 DA, r2 logical page, r3 count
 + *   4  release (free the memory of) physical pages: r1 DA, r2 page, r3 count
 + *   5  add abort handler: r1 routine, r2 r12 value, r3 17-word register
-+ *      block, r4 address of a SWI &C0003 (the return)
++ *      block, r4 address of a SWI &5AF41 (the return)
 + *   6  remove abort handler: r1 routine, r2 r12 value
 + */
 +#define RISCOS_PMP_MAX 16
@@ -1251,6 +1262,7 @@ index b404117..68ed668 100644
 +    int da, fd;
 +    abi_ulong base;
 +    uint32_t pages;
++    uint8_t *map;                       /* per page: 1 if mapped (OS_Memory 24) */
 +} riscos_pmp[RISCOS_PMP_MAX];
 +static struct riscos_abh {
 +    abi_ulong routine, r12;
@@ -1290,6 +1302,9 @@ index b404117..68ed668 100644
 +    abi_ulong a = p->base + (l << 12);
 +    abi_long r = target_mmap(a, n << 12, PROT_NONE,
 +                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
++    if (r == (abi_long)a && p->map) {
++        memset(p->map + l, 0, n);
++    }
 +    return r == (abi_long)a ? 0 : -EINVAL;  /* (addresses can look negative) */
 +}
 +
@@ -1303,6 +1318,9 @@ index b404117..68ed668 100644
 +    abi_ulong a = p->base + (l << 12);
 +    abi_long r = target_mmap(a, n << 12, PROT_READ | PROT_WRITE | PROT_EXEC,
 +                             MAP_SHARED | MAP_FIXED, p->fd, (off_t)ph << 12);
++    if (r == (abi_long)a && p->map) {
++        memset(p->map + l, 1, n);
++    }
 +    return r == (abi_long)a ? 0 : -ENOMEM;  /* (addresses can look negative) */
 +}
 +
@@ -1326,7 +1344,8 @@ index b404117..68ed668 100644
 +                    close(fd);
 +                    return -errno;
 +                }
-+                riscos_pmp[i] = (struct riscos_pmp){ r[1], fd, r[2], r[3] };
++                riscos_pmp[i] = (struct riscos_pmp){ r[1], fd, r[2], r[3],
++                                                     g_malloc0(r[3]) };
 +                return 0;
 +            }
 +        }
@@ -1339,6 +1358,8 @@ index b404117..68ed668 100644
 +        riscos_pmp_unmap(p, 0, p->pages);
 +        close(p->fd);
 +        p->fd = 0;
++        g_free(p->map);
++        p->map = NULL;
 +        return 0;
 +    case 2:
 +        p = riscos_pmp_find(r[1]);
@@ -1446,7 +1467,7 @@ index b404117..68ed668 100644
 +    return true;
 +}
 +
-+/* SWI &C0003: an abort handler returned. */
++/* SWI &5AF41: an abort handler returned. */
 +static void riscos_abh_return_swi(CPUARMState *env)
 +{
 +    if (riscos_abh_active < 0) {
@@ -2136,6 +2157,76 @@ index b404117..68ed668 100644
 +    return id | (addr & 0xfff);
 +}
 +
++/*
++ * OS_Memory 24 (CheckMemoryAccess) and OS_ValidateAddress in a PMP area,
++ * answered as RISC OS's kernel does from its page tables: page by page,
++ * mapped or not, with the area's access privilege. The pages here are
++ * mapped from a memfd (riscos_pmp: the test bed's ARMEABISupport; kpmp:
++ * the ROM's PMP stubs), which the kernel never sees, so it says none of
++ * the area is there: SOManager's shared libraries, ARMEABISupport's stacks
++ * and mmaps (EDT can't read them).
++ */
++static const uint8_t riscos_ap_acc[4] = { 0xf, 0xd, 0xc, 0x5 };
++
++/* Whole-range flags ANDed and part-of-range ORed over pages lo..hi
++   (inclusive) of an area at base; mapped(l) says whether page l is */
++static int riscos_cma_pages(abi_ulong base, abi_ulong lo, abi_ulong hi,
++                            uint32_t ap, bool (*mapped)(void *, uint32_t),
++                            void *ctx)
++{
++    uint32_t acc = riscos_ap_acc[ap & 3], part = 0;
++    bool any = false, all = true;
++    for (uint32_t l = (lo - base) >> 12; l <= (hi - base) >> 12; l++) {
++        if (mapped(ctx, l)) {
++            part |= acc;
++            any = true;
++        } else {
++            all = false;
++        }
++    }
++    /* executable where mapped; unmapped pages are XN, as CMA_Done says */
++    return (all ? acc : 0) | (part << 4) | (any ? 0 : 0xc00) |
++           (all ? 0 : 0xc000);
++}
++
++static bool riscos_lite_mapped(void *ctx, uint32_t l)
++{
++    struct riscos_pmp *p = ctx;
++    return p->map && l < p->pages && p->map[l];
++}
++
++static bool riscos_kpmp_mapped(void *ctx, uint32_t l)
++{
++    struct riscos_kpmp *p = ctx;
++    int32_t q = l < p->lpages ? p->pool[l] : -1;
++    return q >= 0 && !(p->flags[q] & (1u << 15));
++}
++
++/* The OS_Memory 24 flags for lo..hi (exclusive) wholly inside one PMP
++   area, or -1 for RISC OS to answer */
++static int riscos_pmp_access(abi_ulong lo, abi_ulong hi)
++{
++    hi = hi > lo ? hi - 1 : lo;
++    for (int i = 0; i < RISCOS_PMP_MAX; i++) {
++        struct riscos_pmp *p = &riscos_pmp[i];
++        if (p->fd > 0 && lo >= p->base &&
++            hi - p->base < (abi_ulong)p->pages << 12) {
++            return riscos_cma_pages(p->base, lo, hi, 0, riscos_lite_mapped, p);
++        }
++    }
++    for (int i = 0; i < KPMP_MAX; i++) {
++        struct riscos_kpmp *p = &riscos_kpmp[i];
++        uint32_t flags = 0;
++        if (p->node && lo >= p->base &&
++            hi - p->base < (abi_ulong)p->lpages << 12) {
++            get_user_u32(flags, p->node + DANODE_FLAGS);
++            return riscos_cma_pages(p->base, lo, hi, flags & 0xf,
++                                    riscos_kpmp_mapped, p);
++        }
++    }
++    return -1;
++}
++
 +static bool riscos_os_memory0(CPUARMState *env)
 +{
 +    uint32_t r0 = env->regs[0];
@@ -2347,10 +2438,10 @@ index b404117..68ed668 100644
 +    }
 +    riscos_swi_result_arm(env, insn);
 +    switch (insn & 0xfdffff) {         /* X bit ignored */
-+    case 0xC0002:
++    case 0x5AF40:                      /* NativeSupport_PMPOp */
 +        env->regs[0] = riscos_pmp_op(env);
 +        return true;
-+    case 0xC0003:
++    case 0x5AF41:                      /* NativeSupport_AbortReturn */
 +        riscos_abh_return_swi(env);
 +        return true;
 +    case 0x54c80:                       /* Report_Text0 */
@@ -2373,7 +2464,29 @@ index b404117..68ed668 100644
 +        }
 +        return false;
 +    case 0x68:                          /* OS_Memory */
++        if ((env->regs[0] & 0xff) == 24) {
++            int f = riscos_pmp_access(env->regs[1], env->regs[2]);
++            if (f < 0) {
++                return false;
++            }
++            env->regs[1] = f;
++            env->VF = 0;
++            return true;
++        }
 +        return riscos_os_memory0(env);
++    case 0x3a:                          /* OS_ValidateAddress */
++        {
++            /* as the kernel's ValidateAddress_Code: valid if any
++               "completely" access flag is set; if not, RISC OS decides
++               (Service_ValidateAddress) */
++            int f = riscos_pmp_access(env->regs[0], env->regs[1]);
++            if (f < 0 || !(f & 0xf)) {
++                return false;
++            }
++            env->CF = 0;
++            env->VF = 0;
++            return true;
++        }
 +    case 0x66:                          /* OS_DynamicArea */
 +        return env->regs[0] == 22 && riscos_pmp_da22(env);
 +    }
@@ -2392,7 +2505,7 @@ index b404117..68ed668 100644
      CPUState *cs = env_cpu(env);
      int trapnr, si_signo, si_code;
      unsigned int n, insn;
-@@ -326,6 +1835,29 @@ void cpu_loop(CPUARMState *env)
+@@ -326,6 +1938,29 @@ void cpu_loop(CPUARMState *env)
      for(;;) {
          cpu_exec_start(cs);
          trapnr = cpu_exec(cs);
@@ -2422,7 +2535,7 @@ index b404117..68ed668 100644
          cpu_exec_end(cs);
          process_queued_cpu_work(cs);
  
-@@ -351,7 +1883,19 @@ void cpu_loop(CPUARMState *env)
+@@ -351,7 +1986,19 @@ void cpu_loop(CPUARMState *env)
                      goto excp_debug;
                  }
  
@@ -2443,7 +2556,7 @@ index b404117..68ed668 100644
                      break;
                  }
  
-@@ -363,6 +1907,22 @@ void cpu_loop(CPUARMState *env)
+@@ -363,6 +2010,22 @@ void cpu_loop(CPUARMState *env)
              {
                  env->eabi = true;
                  /* system call */
@@ -2466,7 +2579,7 @@ index b404117..68ed668 100644
                  if (env->thumb) {
                      /* Thumb is always EABI style with syscall number in r7 */
                      n = env->regs[7];
-@@ -407,7 +1967,24 @@ void cpu_loop(CPUARMState *env)
+@@ -407,7 +2070,24 @@ void cpu_loop(CPUARMState *env)
                          env->regs[0] = cpu_get_tls(env);
                          break;
                      default:
@@ -2492,7 +2605,7 @@ index b404117..68ed668 100644
                              /*
                               * Syscalls 0xf0000..0xf07ff (or 0x9f0000..
                               * 0x9f07ff in OABI numbering) are defined
-@@ -445,6 +2022,12 @@ void cpu_loop(CPUARMState *env)
+@@ -445,6 +2125,12 @@ void cpu_loop(CPUARMState *env)
                                       env->regs[4],
                                       env->regs[5],
                                       0, 0);
@@ -2505,7 +2618,7 @@ index b404117..68ed668 100644
                      if (ret == -QEMU_ERESTARTSYS) {
                          env->regs[15] -= env->thumb ? 2 : 4;
                      } else if (ret != -QEMU_ESIGRETURN) {
-@@ -485,9 +2068,30 @@ void cpu_loop(CPUARMState *env)
+@@ -485,9 +2171,30 @@ void cpu_loop(CPUARMState *env)
              default:
                  g_assert_not_reached();
              }
@@ -2536,7 +2649,7 @@ index b404117..68ed668 100644
          case EXCP_BKPT:
          excp_debug:
              force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->regs[15]);
-@@ -507,7 +2111,9 @@ void cpu_loop(CPUARMState *env)
+@@ -507,7 +2214,9 @@ void cpu_loop(CPUARMState *env)
              EXCP_DUMP(env, "qemu: unhandled CPU exception 0x%x - aborting\n", trapnr);
              abort();
          }

@@ -13,7 +13,7 @@
    decoder has parsed the stream it signals a source change, and the
    CAPTURE side (YUV 4:2:0, planar I420) is set up at the size it reports.
 
-   SWIs (chunk &5A440, not yet registered with RISC OS Open):
+   SWIs (chunk &5AF00, allocated by RISC OS Open):
      LinuxCodec_Open      r0 = flags (0), r1 = codec (0 = H.264)
                           -> r0 = handle
      LinuxCodec_Close     r0 = handle
@@ -175,13 +175,13 @@ typedef struct decoder
 static decoder *decoders;
 static int native = -1;
 
-ERROR_BLOCK (no_ixsupport, 0x81A30, "LinuxCodec needs RISC OS for Linux");
-ERROR_BLOCK (not_native, 0x81A31, "LinuxCodec needs RISC OS running natively (not under QEMU)");
-ERROR_BLOCK (no_device, 0x81A32, "Linux has no video decoder for this codec (no V4L2 device takes it)");
-ERROR_BLOCK (bad_handle, 0x81A33, "Bad LinuxCodec handle");
-ERROR_BLOCK (no_memory, 0x81A34, "LinuxCodec: not enough memory");
-ERROR_BLOCK (bad_codec, 0x81A35, "LinuxCodec: unknown codec");
-ERROR_BLOCK (linux_failed, 0x81A36, "LinuxCodec: the Linux decoder failed");
+ERROR_BLOCK (no_ixsupport, 0x823600, "LinuxCodec needs RISC OS for Linux");
+ERROR_BLOCK (not_native, 0x823601, "LinuxCodec needs RISC OS running natively (not under QEMU)");
+ERROR_BLOCK (no_device, 0x823602, "Linux has no video decoder for this codec (no V4L2 device takes it)");
+ERROR_BLOCK (bad_handle, 0x823603, "Bad LinuxCodec handle");
+ERROR_BLOCK (no_memory, 0x823604, "LinuxCodec: not enough memory");
+ERROR_BLOCK (bad_codec, 0x823605, "LinuxCodec: unknown codec");
+ERROR_BLOCK (linux_failed, 0x823606, "LinuxCodec: the Linux decoder failed");
 ERROR_BLOCK (bad_swi, 0x1E6, "Unknown LinuxCodec SWI");
 
 static int
@@ -788,8 +788,8 @@ codec_info (regs *r)
    The decoder's picture buffers are given to rol-fb (the port's screen
    front end) as dmabufs; it shows them on a YUV overlay plane under the
    desktop, scaled by the display hardware. See rol-fb.c. */
-ERROR_BLOCK (no_overlay, 0x81A37, "LinuxCodec: no video overlay (rol-fb hasn't one on this display)");
-ERROR_BLOCK (not_decoding, 0x81A38, "LinuxCodec: no pictures yet (the decoder hasn't found the stream's size)");
+ERROR_BLOCK (no_overlay, 0x823607, "LinuxCodec: no video overlay (rol-fb hasn't one on this display)");
+ERROR_BLOCK (not_decoding, 0x823608, "LinuxCodec: no pictures yet (the decoder hasn't found the stream's size)");
 
 static int
 ov_call (decoder *d, int *msg, int fd, int *reply)

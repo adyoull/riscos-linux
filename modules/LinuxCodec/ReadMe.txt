@@ -24,13 +24,13 @@ first picture: it should be 250 pictures and checksum 116111199 (what
 ffmpeg's own decoder gives). Give a file name after CodecTest to decode
 another H.264 file (raw Annex B, as ffmpeg -f h264 writes).
 
-SWIs (chunk &5A440, not yet registered with RISC OS Open)
+SWIs (chunk &5AF00, allocated by RISC OS Open)
 --------------------------------------------------------
-LinuxCodec_Open (&5A440)
+LinuxCodec_Open (&5AF00)
   r0 = flags (0), r1 = codec (0 = H.264)  ->  r0 = handle
-LinuxCodec_Close (&5A441)
+LinuxCodec_Close (&5AF01)
   r0 = handle
-LinuxCodec_Decode (&5A442)
+LinuxCodec_Decode (&5AF02)
   r0 = handle, r1 -> data, r2 = length, r3 = timestamp (any 32-bit value:
   it comes back with the picture), r4 = flags (bit 0: end of stream -
   the decoder then gives out the pictures it still holds)
@@ -40,7 +40,7 @@ LinuxCodec_Decode (&5A442)
   Linux's decoder one whole picture at a time (the Pi's decoder takes
   each buffer as a complete picture; a picture cut in two came out with
   its lower part green).
-LinuxCodec_GetFrame (&5A443)
+LinuxCodec_GetFrame (&5AF03)
   r0 = handle  ->  r0 -> picture block, or 0 if none is ready yet
   The block (valid until the picture is released):
     +0  index (for ReleaseFrame)
@@ -51,10 +51,10 @@ LinuxCodec_GetFrame (&5A443)
     +32 timestamp (from Decode)
     +36 flags: bit 0 = the last picture after the end of stream
     +40 coded width, +44 coded height
-LinuxCodec_ReleaseFrame (&5A444)
+LinuxCodec_ReleaseFrame (&5AF04)
   r0 = handle, r1 = index: the decoder may reuse the picture's buffer.
   Hold on to at most two pictures at once.
-LinuxCodec_Info (&5A445)
+LinuxCodec_Info (&5AF05)
   r0 = handle  ->  r1 = width, r2 = height, r3 = state (0 waiting for
   the stream's size, 1 decoding, 2 drained), r4 = pictures decoded,
   r5 = bytes taken
@@ -74,19 +74,23 @@ pictures a second (drag a window over it to see the key colour at work).
 The desktop should be in a 16 million or 32 thousand colour mode, so that
 the key colour is exact.
 
-LinuxCodec_OverlayOpen (&5A446)
+LinuxCodec_OverlayOpen (&5AF06)
   r0 = handle  ->  r0 = key colour (&BBGGRR00, for ColourTrans_SetGCOL),
   r1 = 1 if the overlay is under the desktop (else it's on top of it:
   nothing covers the video)
-LinuxCodec_OverlayShow (&5A447)
+LinuxCodec_OverlayShow (&5AF07)
   r0 = handle, r1 = picture index (from GetFrame),
   r2-r5 = the screen rectangle x0, y0, x1, y1 in OS units (as a window's
   visible area): the picture is scaled to fill it.
   The picture stays on the screen until the next one is shown: don't
   ReleaseFrame a picture you've shown - LinuxCodec gives it back to the
   decoder when the next one replaces it.
-LinuxCodec_OverlayHide (&5A448)
+LinuxCodec_OverlayHide (&5AF08)
   r0 = handle: takes the video off the screen (Close does too).
+
+Errors (block &823600, allocated by RISC OS Open): LinuxCodec
+&823600-&823608, the VCHIQ stand-in &823610-&82361C, BCMSupport
+&823620-&823626, PCI &823630-&823632.
 
 The VideoCore stand-ins (VCHIQ, BCMSupport, PCI)
 ------------------------------------------------

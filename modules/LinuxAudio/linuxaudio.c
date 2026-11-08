@@ -178,8 +178,8 @@ static struct
   volatile int callback_pending;
 } la;
 
-ERROR_BLOCK (no_ixsupport, 0x81A0, "LinuxAudio needs RISC OS for Linux (IXSupport)");
-ERROR_BLOCK (no_memory, 0x81A1, "LinuxAudio: not enough memory");
+ERROR_BLOCK (no_ixsupport, 0x823500, "LinuxAudio needs RISC OS for Linux (IXSupport)");
+ERROR_BLOCK (no_memory, 0x823501, "LinuxAudio: not enough memory");
 
 static int
 linux_call (int nr, unsigned a, unsigned b, unsigned c)

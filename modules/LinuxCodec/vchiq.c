@@ -91,19 +91,19 @@ static instance *instances;
 static service services[SERVICES];
 static unsigned transfers, failures;
 
-ERROR_BLOCK (not_native, 0x81A40, "VCHIQ (RISC OS for Linux) needs RISC OS running natively on a Raspberry Pi 3 or 4");
-ERROR_BLOCK (no_vchiq, 0x81A41, "Linux has no VCHIQ (/dev/vchiq): this needs a Raspberry Pi 3 or 4");
-ERROR_BLOCK (bad_instance, 0x81A42, "Bad VCHIQ instance");
-ERROR_BLOCK (bad_service, 0x81A43, "Bad VCHIQ service handle");
-ERROR_BLOCK (no_memory, 0x81A44, "VCHIQ: not enough memory");
-ERROR_BLOCK (not_connected, 0x81A45, "VCHIQ: not connected (VCHIQ_Connect first)");
-ERROR_BLOCK (no_service, 0x81A46, "The VideoCore has no such service (or refused it)");
-ERROR_BLOCK (no_smem, 0x81A47, "The VideoCore's shared memory service isn't available under Linux");
-ERROR_BLOCK (too_many, 0x81A48, "VCHIQ: too many services open");
-ERROR_BLOCK (queue_failed, 0x81A49, "VCHIQ: Linux couldn't queue the message");
-ERROR_BLOCK (bulk_failed, 0x81A4A, "VCHIQ: Linux's bulk transfer failed");
-ERROR_BLOCK (dequeue_failed, 0x81A4B, "VCHIQ: Linux couldn't give the message (buffer too small?)");
-ERROR_BLOCK (not_here, 0x81A4C, "This VCHIQ SWI isn't provided under RISC OS for Linux");
+ERROR_BLOCK (not_native, 0x823610, "VCHIQ (RISC OS for Linux) needs RISC OS running natively on a Raspberry Pi 3 or 4");
+ERROR_BLOCK (no_vchiq, 0x823611, "Linux has no VCHIQ (/dev/vchiq): this needs a Raspberry Pi 3 or 4");
+ERROR_BLOCK (bad_instance, 0x823612, "Bad VCHIQ instance");
+ERROR_BLOCK (bad_service, 0x823613, "Bad VCHIQ service handle");
+ERROR_BLOCK (no_memory, 0x823614, "VCHIQ: not enough memory");
+ERROR_BLOCK (not_connected, 0x823615, "VCHIQ: not connected (VCHIQ_Connect first)");
+ERROR_BLOCK (no_service, 0x823616, "The VideoCore has no such service (or refused it)");
+ERROR_BLOCK (no_smem, 0x823617, "The VideoCore's shared memory service isn't available under Linux");
+ERROR_BLOCK (too_many, 0x823618, "VCHIQ: too many services open");
+ERROR_BLOCK (queue_failed, 0x823619, "VCHIQ: Linux couldn't queue the message");
+ERROR_BLOCK (bulk_failed, 0x82361A, "VCHIQ: Linux's bulk transfer failed");
+ERROR_BLOCK (dequeue_failed, 0x82361B, "VCHIQ: Linux couldn't give the message (buffer too small?)");
+ERROR_BLOCK (not_here, 0x82361C, "This VCHIQ SWI isn't provided under RISC OS for Linux");
 ERROR_BLOCK (bad_swi, 0x1E6, "Unknown VCHIQ SWI");
 
 static instance *

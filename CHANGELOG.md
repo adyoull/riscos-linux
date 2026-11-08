@@ -7,6 +7,16 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### 8 Nov 2026: the numbers RISC OS Open allocated (not yet packaged)
+
+| What | Now | Was |
+|---|---|---|
+| NativeSupport_PMPOp, NativeSupport_AbortReturn (NativeSupport 0.31 has a SWI chunk with names) | &5AF40, &5AF41 | &C0002, &C0003 |
+| LinuxCodec_Open … LinuxCodec_OverlayHide | &5AF00 … &5AF08 | &5A440 … &5A448 |
+| Errors of LinuxAudio, LinuxCodec (with VCHIQ, BCMSupport, PCI), LinuxShell, NativeSupport | &8235xx, &8236xx, &8237xx, &8238xx | &81A0–1, &81A30–62, &81A70–77, &81A8–A |
+
+- **The QEMU patch** answers NativeSupport's new SWI numbers, as the lite ARMEABISupport now uses them. It also gains 0.28's OS_Memory 24 / OS_ValidateAddress item, which this copy didn't have yet.
+
 ### 7 Nov 2026: riscos-support 1.0.0031-1 (NativeSupport 0.23 to 0.30)
 
 - **NativeSupport 0.30: Thumb-2 code isn't patched as ARM.**
