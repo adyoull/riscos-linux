@@ -7,6 +7,18 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### 8 Nov 2026: RISC OS 5.31-19 and riscos-support 1.0.0037-1 (the mouse speed and 4K in 16 million colours, released)
+
+- **RISC OS 5.31-19** (the owner's DDE build of rol/src 44da7369c) is
+  packaged: the mouse speed applies to a mouse, the screen can be up to
+  64 MB (4K and 5K in 16 million colours), programs moving the pointer move
+  it on screen, a Thumb program's undefined instruction is reported at the
+  right address. Checked under QEMU at 3840 x 2160 with a USB mouse and
+  with a tablet; Iris 1.039 draws bbc.co.uk.
+- **rol-fb** (riscos-support 1.0.0037-1): the pointer is drawn where RISC
+  OS has it from the start, not only after the mouse first moves, and
+  stays right when its shape changes.
+
 ### 8 Nov 2026: NativeSupport 0.32 and 0.33, making or removing a dynamic area no longer stops the desktop (riscos-support 1.0.0035-1, 1.0.0036-1)
 
 - **The bug:** from NativeSupport 0.30 (riscos-support 1.0.0031-1), once

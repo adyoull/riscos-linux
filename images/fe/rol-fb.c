@@ -80,6 +80,8 @@ enum { C_MODE_CHANGE = 0, C_SET_PALETTE = 1, C_POINTER = 2, C_SUSPEND = 3,
    position itself (R_MOUSE), which the mouse speed doesn't apply to. */
 static unsigned ro_version;
 static int rel_mouse;			/* the pointer is RISC OS's (C_POINTER_POS) */
+static int abs_seen;			/* a tablet has reported: it places the pointer */
+static int ro_px, ro_py, have_ro_pos;	/* the last C_POINTER_POS */
 static int clampi (int v, int lo, int hi);
 /* The keyboard LEDs as RISC OS has them (C_LEDS), -1 until it says */
 static int ro_leds = -1;
@@ -1416,6 +1418,13 @@ read_messages (void)
 	      ptr_h = 32;
 	    ptr_ax = p[2];
 	    ptr_ay = p[3];
+	    /* RISC OS sends the position before a new shape: its top left
+	       is for this shape's active point */
+	    if (have_ro_pos && (rel_mouse || !abs_seen) && width > 0 && height > 0)
+	      {
+		mx = clampi (ro_px + ptr_ax, 0, width - 1);
+		my = clampi (ro_py + ptr_ay, 0, height - 1);
+	      }
 	    const unsigned char *src = p + 5;
 	    for (int y = 0; y < 32; y++)
 	      for (int x = 0; x < 32; x++)
@@ -1439,7 +1448,13 @@ read_messages (void)
 	  have_start = 1;
 	  break;
 	case C_POINTER_POS:		/* the pointer's top left, pixels */
-	  if (rel_mouse && width > 0 && height > 0)
+	  /* until a tablet reports, the pointer is where RISC OS has it,
+	     even before the mouse first moves (at start-up, after a mode
+	     change, or when a program moves it) */
+	  ro_px = (int) c.w[1];
+	  ro_py = (int) c.w[2];
+	  have_ro_pos = 1;
+	  if ((rel_mouse || !abs_seen) && width > 0 && height > 0)
 	    {
 	      mx = clampi ((int) c.w[1] + ptr_ax, 0, width - 1);
 	      my = clampi ((int) c.w[2] + ptr_ay, 0, height - 1);
@@ -1738,14 +1753,14 @@ read_input (int i)
 	    {
 	      if (e->code == ABS_X && inputs[i].absmax_x > 0)
 		{
-		  rel_mouse = 0;
+		  rel_mouse = 0, abs_seen = 1;
 		  int fx = (int) ((long long) e->value * fb_w / (inputs[i].absmax_x + 1));
 		  mx = clampi (sw > 0 ? (int) ((long long) (fx - ox) * w / sw) : fx, 0, w - 1);
 		  moved = 1;
 		}
 	      else if (e->code == ABS_Y && inputs[i].absmax_y > 0)
 		{
-		  rel_mouse = 0;
+		  rel_mouse = 0, abs_seen = 1;
 		  int fy = (int) ((long long) e->value * fb_h / (inputs[i].absmax_y + 1));
 		  my = clampi (sh > 0 ? (int) ((long long) (fy - oy) * h / sh) : fy, 0, h - 1);
 		  moved = 1;
