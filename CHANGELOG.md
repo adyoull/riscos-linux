@@ -7,6 +7,26 @@ parts, and natively on real machines. What users get from this comes in
 the images (1.0.0001 onwards) and through Updates (riscos-rolpkg's
 CHANGELOG lists each package).
 
+### 8 Nov 2026: the mouse speed, and 4K in 16 million colours (riscos-support 1.0.0034-1, riscos-harddisc 1.0.0038-1; RISC OS 5.31-19 to be built)
+
+From Chris's report: on a Pi 5 with a 4K monitor, Configure's mouse
+speed did nothing, the pointer was slow, and 4K had only 32 thousand
+colours.
+- **rol-fb 3:**
+  - with RISC OS 5.31-19, a mouse's movement goes to RISC OS as relative
+    moves, so the mouse speed applies;
+  - the pointer is drawn where RISC OS has it;
+  - tablets (UTM) and older ROMs carry on as before;
+  - the Pi's monitor definition lists modes up to 64MB.
+- **The UTM monitor definition** is kept in `harddisc/extras` now, with
+  4K and 5K modes.
+- **RISC OS 5.31-19** (the `nightly-merge` source; built with the DDE):
+  - SocketKVM takes relative moves and tells the front end where the
+    pointer is (protocol version 3);
+  - the screen memory can be 64MB (was 16MB).
+  - Checked here with 5.31-18 binary-patched to 64MB: 3840 x 2160 in 16
+    million colours.
+
 ### 8 Nov 2026: riscos-support 1.0.0033-1 (the pointer on a 4K monitor)
 
 - rol-fb scales the pointer with the desktop, in whole multiples. On a Pi

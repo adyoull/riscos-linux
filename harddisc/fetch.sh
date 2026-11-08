@@ -101,6 +101,10 @@ fi
 mkdir -p "$hd/Utilities" && cp -a "$extras/!Updates" "$hd/Utilities/"
 # the desktop's first mode: the screen's size, until one is saved in Configure
 cp "$extras/Monitor,feb" "$boot/Choices/Boot/PreDesk/Configure/Monitor,feb"
+# the monitor definition for virtual machines (UTM, QEMU): any size works
+# in a window; common sizes up to 5120 x 2880 (64MB, from RISC OS 5.31-19)
+mkdir -p "$boot/Resources/Configure/Monitors/Other"
+cp "$extras/Monitors/Other/UTM,fff" "$boot/Resources/Configure/Monitors/Other/UTM,fff"
 mkdir -p "$boot/Loader"
 mv "$work/CMOS" "$boot/Loader/CMOS"
 

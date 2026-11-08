@@ -64,13 +64,23 @@
 #include "linux2ro.h"
 
 enum { R_MOUSE = 0, R_KEYDOWN = 1, R_KEYUP = 2, R_MODE_SYNC = 3,
-       R_RESIZE = 4, R_CLOSE = 5, R_VERSION = 6 };
+       R_RESIZE = 4, R_CLOSE = 5, R_VERSION = 6, R_MOUSE_REL = 7 };
 enum { C_MODE_CHANGE = 0, C_SET_PALETTE = 1, C_POINTER = 2, C_SUSPEND = 3,
        C_CLOSE_CTL = 4, C_VERSION = 6, C_ACTIVESCREEN = 7, C_STARTSCREEN = 8,
-       C_LEDS = 9 };
+       C_LEDS = 9, C_POINTER_POS = 10 };
 /* The protocol version this front end reports: 2 = it sets the keyboard
-   LEDs (C_LEDS), so SocketKVM sends them */
-#define FE_VERSION 2
+   LEDs (C_LEDS), so SocketKVM sends them; 3 = it draws the pointer where
+   RISC OS says (C_POINTER_POS), so SocketKVM sends that */
+#define FE_VERSION 3
+/* SocketKVM's version (its C_VERSION): from 3 (RISC OS 5.31-19) a mouse's
+   movement goes to RISC OS as relative moves (R_MOUSE_REL), which RISC OS
+   scales by its mouse speed (Configure's Mouse, *Configure MouseStep), and
+   the pointer is drawn where RISC OS then has it (C_POINTER_POS). Before,
+   and for tablets (absolute: UTM, VMs), rol-fb gives RISC OS the pointer's
+   position itself (R_MOUSE), which the mouse speed doesn't apply to. */
+static unsigned ro_version;
+static int rel_mouse;			/* the pointer is RISC OS's (C_POINTER_POS) */
+static int clampi (int v, int lo, int hi);
 /* The keyboard LEDs as RISC OS has them (C_LEDS), -1 until it says */
 static int ro_leds = -1;
 static void set_leds (int fd);
@@ -1414,6 +1424,7 @@ read_messages (void)
 	    break;
 	  }
 	case C_VERSION:
+	  ro_version = c.w[1];
 	  for (int k = 0; k < 256; k++)
 	    if (key_down[k])
 	      send_report (R_KEYDOWN, k, 0, 0);
@@ -1426,6 +1437,13 @@ read_messages (void)
 	case C_STARTSCREEN:
 	  start_addr = c.w[1];
 	  have_start = 1;
+	  break;
+	case C_POINTER_POS:		/* the pointer's top left, pixels */
+	  if (rel_mouse && width > 0 && height > 0)
+	    {
+	      mx = clampi ((int) c.w[1] + ptr_ax, 0, width - 1);
+	      my = clampi ((int) c.w[2] + ptr_ay, 0, height - 1);
+	    }
 	  break;
 	case C_LEDS:			/* bit 0 Caps Lock, 1 Num Lock, 2 Scroll Lock */
 	  ro_leds = (int) (c.w[1] & 7);
@@ -1615,7 +1633,7 @@ read_input (int i)
   ssize_t n;
   while ((n = read (inputs[i].fd, ev, sizeof ev)) > 0)
     {
-      int moved = 0;
+      int moved = 0, rel_dx = 0, rel_dy = 0;
       int w = width > 0 ? width : fb_w, h = height > 0 ? height : fb_h;
       for (int k = 0; k < n / (ssize_t) sizeof ev[0]; k++)
 	{
@@ -1688,7 +1706,17 @@ read_input (int i)
 	    }
 	  else if (e->type == EV_REL)
 	    {
-	      if (e->code == REL_X)
+	      if ((e->code == REL_X || e->code == REL_Y) && ro_version >= 3)
+		{
+		  /* a mouse, and RISC OS takes relative moves: it applies
+		     its mouse speed, and says where the pointer is */
+		  if (e->code == REL_X)
+		    rel_dx += e->value;
+		  else
+		    rel_dy += e->value;
+		  rel_mouse = 1;
+		}
+	      else if (e->code == REL_X)
 		mx = clampi (mx + e->value, 0, w - 1), moved = 1;
 	      else if (e->code == REL_Y)
 		my = clampi (my + e->value, 0, h - 1), moved = 1;
@@ -1710,12 +1738,14 @@ read_input (int i)
 	    {
 	      if (e->code == ABS_X && inputs[i].absmax_x > 0)
 		{
+		  rel_mouse = 0;
 		  int fx = (int) ((long long) e->value * fb_w / (inputs[i].absmax_x + 1));
 		  mx = clampi (sw > 0 ? (int) ((long long) (fx - ox) * w / sw) : fx, 0, w - 1);
 		  moved = 1;
 		}
 	      else if (e->code == ABS_Y && inputs[i].absmax_y > 0)
 		{
+		  rel_mouse = 0;
 		  int fy = (int) ((long long) e->value * fb_h / (inputs[i].absmax_y + 1));
 		  my = clampi (sh > 0 ? (int) ((long long) (fy - oy) * h / sh) : fy, 0, h - 1);
 		  moved = 1;
@@ -1724,6 +1754,9 @@ read_input (int i)
 	}
       if (moved)
 	send_report (R_MOUSE, mx, my, buttons);
+      /* RISC OS's y is up, Linux's down */
+      if (rel_dx || rel_dy)
+	send_report (R_MOUSE_REL, (uint32_t) rel_dx, (uint32_t) -rel_dy, 0);
     }
   if (n < 0 && errno == ENODEV)
     {
@@ -1976,8 +2009,10 @@ write_mdf (void)
 	  continue;
 	if (m->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN | DRM_MODE_FLAG_DBLCLK))
 	  continue;
-	/* up to 16MB of screen memory (2560 x 1600 in 16 million colours) */
-	if ((size_t) m->hdisplay * m->vdisplay * 4 > 16u << 20 || !m->clock)
+	/* up to 64MB of screen memory (RISC OS 5.31-19: 4K in 16 million
+	   colours; earlier ROMs have 16MB, so they take the biggest modes
+	   only in fewer colours) */
+	if ((size_t) m->hdisplay * m->vdisplay * 4 > 64u << 20 || !m->clock)
 	  continue;
 	/* once each size and frame rate */
 	int dup = 0;

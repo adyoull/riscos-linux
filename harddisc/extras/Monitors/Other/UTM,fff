@@ -1,0 +1,362 @@
+# Monitor definition file for RISC OS for Linux on UTM (riscos-linux-testbed)
+# The port draws into a window, so any size works: these are common
+# panel sizes, at 60Hz (CVT reduced blanking timings; the port ignores them).
+# Up to 64MB of screen memory (RISC OS 5.31-19: 5120 x 2880 in 16 million
+# colours); earlier ROMs have 16MB, so the modes past 2560 x 1600 have
+# fewer colours there.
+
+file_format:1
+monitor_title:Linux port (UTM)
+DPMS_state:0
+
+# 640 x 480 (60Hz)
+startmode
+mode_name:640 x 480
+x_res:640
+y_res:480
+pixel_rate:23904
+h_timings:32,80,0,640,0,48
+v_timings:6,9,0,480,0,3
+sync_pol:0
+endmode
+
+# 800 x 600 (60Hz)
+startmode
+mode_name:800 x 600
+x_res:800
+y_res:600
+pixel_rate:35769
+h_timings:32,80,0,800,0,48
+v_timings:6,12,0,600,0,3
+sync_pol:0
+endmode
+
+# 1024 x 768 (60Hz)
+startmode
+mode_name:1024 x 768
+x_res:1024
+y_res:768
+pixel_rate:56263
+h_timings:32,80,0,1024,0,48
+v_timings:6,15,0,768,0,3
+sync_pol:0
+endmode
+
+# 1152 x 864 (60Hz)
+startmode
+mode_name:1152 x 864
+x_res:1152
+y_res:864
+pixel_rate:70060
+h_timings:32,80,0,1152,0,48
+v_timings:6,17,0,864,0,3
+sync_pol:0
+endmode
+
+# 1280 x 720 (60Hz)
+startmode
+mode_name:1280 x 720
+x_res:1280
+y_res:720
+pixel_rate:64195
+h_timings:32,80,0,1280,0,48
+v_timings:6,14,0,720,0,3
+sync_pol:0
+endmode
+
+# 1280 x 800 (60Hz)
+startmode
+mode_name:1280 x 800
+x_res:1280
+y_res:800
+pixel_rate:71280
+h_timings:32,80,0,1280,0,48
+v_timings:6,16,0,800,0,3
+sync_pol:0
+endmode
+
+# 1280 x 960 (60Hz)
+startmode
+mode_name:1280 x 960
+x_res:1280
+y_res:960
+pixel_rate:85363
+h_timings:32,80,0,1280,0,48
+v_timings:6,19,0,960,0,3
+sync_pol:0
+endmode
+
+# 1280 x 1024 (60Hz)
+startmode
+mode_name:1280 x 1024
+x_res:1280
+y_res:1024
+pixel_rate:90979
+h_timings:32,80,0,1280,0,48
+v_timings:6,20,0,1024,0,3
+sync_pol:0
+endmode
+
+# 1366 x 768 (60Hz)
+startmode
+mode_name:1366 x 768
+x_res:1366
+y_res:768
+pixel_rate:72515
+h_timings:32,80,0,1366,0,48
+v_timings:6,15,0,768,0,3
+sync_pol:0
+endmode
+
+# 1400 x 1050 (60Hz)
+startmode
+mode_name:1400 x 1050
+x_res:1400
+y_res:1050
+pixel_rate:101088
+h_timings:32,80,0,1400,0,48
+v_timings:6,21,0,1050,0,3
+sync_pol:0
+endmode
+
+# 1440 x 900 (60Hz)
+startmode
+mode_name:1440 x 900
+x_res:1440
+y_res:900
+pixel_rate:88992
+h_timings:32,80,0,1440,0,48
+v_timings:6,18,0,900,0,3
+sync_pol:0
+endmode
+
+# 1600 x 900 (60Hz)
+startmode
+mode_name:1600 x 900
+x_res:1600
+y_res:900
+pixel_rate:97891
+h_timings:32,80,0,1600,0,48
+v_timings:6,18,0,900,0,3
+sync_pol:0
+endmode
+
+# 1600 x 1200 (60Hz)
+startmode
+mode_name:1600 x 1200
+x_res:1600
+y_res:1200
+pixel_rate:130204
+h_timings:32,80,0,1600,0,48
+v_timings:6,24,0,1200,0,3
+sync_pol:0
+endmode
+
+# 1680 x 1050 (60Hz)
+startmode
+mode_name:1680 x 1050
+x_res:1680
+y_res:1050
+pixel_rate:119232
+h_timings:32,80,0,1680,0,48
+v_timings:6,21,0,1050,0,3
+sync_pol:0
+endmode
+
+# 1920 x 1080 (60Hz)
+startmode
+mode_name:1920 x 1080
+x_res:1920
+y_res:1080
+pixel_rate:138528
+h_timings:32,80,0,1920,0,48
+v_timings:6,21,0,1080,0,3
+sync_pol:0
+endmode
+
+# 1920 x 1200 (60Hz)
+startmode
+mode_name:1920 x 1200
+x_res:1920
+y_res:1200
+pixel_rate:153878
+h_timings:32,80,0,1920,0,48
+v_timings:6,24,0,1200,0,3
+sync_pol:0
+endmode
+
+# 2048 x 1152 (60Hz)
+startmode
+mode_name:2048 x 1152
+x_res:2048
+y_res:1152
+pixel_rate:156856
+h_timings:32,80,0,2048,0,48
+v_timings:6,23,0,1152,0,3
+sync_pol:0
+endmode
+
+# 2560 x 1080 (60Hz)
+startmode
+mode_name:2560 x 1080
+x_res:2560
+y_res:1080
+pixel_rate:181152
+h_timings:32,80,0,2560,0,48
+v_timings:6,21,0,1080,0,3
+sync_pol:0
+endmode
+
+# 2560 x 1440 (60Hz)
+startmode
+mode_name:2560 x 1440
+x_res:2560
+y_res:1440
+pixel_rate:241046
+h_timings:32,80,0,2560,0,48
+v_timings:6,28,0,1440,0,3
+sync_pol:0
+endmode
+
+# 2560 x 1600 (60Hz)
+startmode
+mode_name:2560 x 1600
+x_res:2560
+y_res:1600
+pixel_rate:267811
+h_timings:32,80,0,2560,0,48
+v_timings:6,32,0,1600,0,3
+sync_pol:0
+endmode
+
+# 2880 x 1800 (60Hz)
+startmode
+mode_name:2880 x 1800
+x_res:2880
+y_res:1800
+pixel_rate:337805
+h_timings:32,80,0,2880,0,48
+v_timings:6,43,0,1800,0,3
+sync_pol:0
+endmode
+
+# 3024 x 1964 (60Hz)
+startmode
+mode_name:3024 x 1964
+x_res:3024
+y_res:1964
+pixel_rate:385901
+h_timings:32,80,0,3024,0,48
+v_timings:7,46,0,1964,0,3
+sync_pol:0
+endmode
+
+# 3200 x 1800 (60Hz)
+startmode
+mode_name:3200 x 1800
+x_res:3200
+y_res:1800
+pixel_rate:373363
+h_timings:32,80,0,3200,0,48
+v_timings:5,44,0,1800,0,3
+sync_pol:0
+endmode
+
+# 3440 x 1440 (60Hz)
+startmode
+mode_name:3440 x 1440
+x_res:3440
+y_res:1440
+pixel_rate:319896
+h_timings:32,80,0,3440,0,48
+v_timings:7,31,0,1440,0,3
+sync_pol:0
+endmode
+
+# 3456 x 2234 (60Hz)
+startmode
+mode_name:3456 x 2234
+x_res:3456
+y_res:2234
+pixel_rate:498574
+h_timings:32,80,0,3456,0,48
+v_timings:7,54,0,2234,0,3
+sync_pol:0
+endmode
+
+# 3840 x 1600 (60Hz)
+startmode
+mode_name:3840 x 1600
+x_res:3840
+y_res:1600
+pixel_rate:395040
+h_timings:32,80,0,3840,0,48
+v_timings:7,36,0,1600,0,3
+sync_pol:0
+endmode
+
+# 3840 x 2160 (60Hz)
+startmode
+mode_name:3840 x 2160
+x_res:3840
+y_res:2160
+pixel_rate:533280
+h_timings:32,80,0,3840,0,48
+v_timings:5,54,0,2160,0,3
+sync_pol:0
+endmode
+
+# 3840 x 2400 (60Hz)
+startmode
+mode_name:3840 x 2400
+x_res:3840
+y_res:2400
+pixel_rate:592560
+h_timings:32,80,0,3840,0,48
+v_timings:6,60,0,2400,0,3
+sync_pol:0
+endmode
+
+# 4096 x 2160 (60Hz)
+startmode
+mode_name:4096 x 2160
+x_res:4096
+y_res:2160
+pixel_rate:567410
+h_timings:32,80,0,4096,0,48
+v_timings:7,52,0,2160,0,3
+sync_pol:0
+endmode
+
+# 4480 x 2520 (60Hz)
+startmode
+mode_name:4480 x 2520
+x_res:4480
+y_res:2520
+pixel_rate:721613
+h_timings:32,80,0,4480,0,48
+v_timings:5,64,0,2520,0,3
+sync_pol:0
+endmode
+
+# 5120 x 2160 (60Hz)
+startmode
+mode_name:5120 x 2160
+x_res:5120
+y_res:2160
+pixel_rate:703930
+h_timings:32,80,0,5120,0,48
+v_timings:7,52,0,2160,0,3
+sync_pol:0
+endmode
+
+# 5120 x 2880 (60Hz)
+startmode
+mode_name:5120 x 2880
+x_res:5120
+y_res:2880
+pixel_rate:938362
+h_timings:32,80,0,5120,0,48
+v_timings:5,74,0,2880,0,3
+sync_pol:0
+endmode
