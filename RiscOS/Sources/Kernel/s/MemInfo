@@ -2361,6 +2361,38 @@ CheckMemoryAccess ROUT
         BL      CMA_AddRange2
 20
 
+; Linux build: no page tables to check (CMA_CheckL2PT is PagedMemory's).
+; A PMP area's pages are mapped from a Linux memory file by c.LinuxC,
+; whose records give the runs of mapped pages (pmp_next_run); each run is
+; added with the area's access, and unmapped pages are gaps. Sparse areas
+; are wholly mapped on Linux. Used inside CheckMemoryAccess_DynamicAreas
+; (its own macro: that one is at objasm's size limit); label 24 is that
+; macro's, 27 and 29 this one's. Nothing on other machines.
+        MACRO
+        CheckMemoryAccess_LinuxPMP
+      [ Linux
+        BIC     r5, r5, #CMA_CheckL2PT :OR: CMA_DecodeAP
+        TST     r6, #DynAreaFlags_PMP
+        BEQ     %FT29
+        LDR     r4, [r9, #DANode_Base]
+27
+        Push    "r0-r2"
+        SUB     sp, sp, #4
+        MOV     r0, r9
+        MOV     r1, r4
+        MOV     r2, sp
+        BL      pmp_next_run
+        MOV     r3, r0
+        LDR     r4, [sp], #4
+        Pull    "r0-r2"
+        TEQ     r3, #0
+        BEQ     %FT24
+        BL      CMA_AddRange2
+        B       %BT27
+29
+      ]
+        MEND
+
         MACRO
         CheckMemoryAccess_DynamicAreas
         ; Dynamic areas
@@ -2372,7 +2404,7 @@ CheckMemoryAccess ROUT
         ; Look through the quick lookup table until we find a valid DANode ptr
         LDR     r6, [r10, #DynArea_ws]
         MOV     r3, r1
-        TEQ     r6, #0 ; We can get called during ROM init, before the workspace is allocated (pesky OS_Heap validating its pointers)
+        TEQ     r6, #0 ; No workspace yet during ROM init (OS_Heap validating its pointers)
         ADD     r6, r6, #(:INDEX:DynArea_AddrLookup) :AND: &00FF
         LDREQ   r9, [r10, #DAList] ; So just start at the first DA
         ADD     r6, r6, #(:INDEX:DynArea_AddrLookup) :AND: &FF00
@@ -2418,31 +2450,7 @@ CheckMemoryAccess ROUT
         LDRNE   r4, [r9, #DANode_SparseHWM] ; Use HWM as bounds when checking sparse/PMP areas
         ORRNE   r5, r5, #CMA_CheckL2PT ; ... and request L2PT check
         ADDEQ   r4, r3, lr
-      [ Linux
-        ; No page tables to check (CMA_CheckL2PT is PagedMemory's): a PMP
-        ; area's pages are mapped from a Linux memory file by c.LinuxC,
-        ; whose records give the runs of mapped pages (pmp_next_run). Sparse
-        ; areas are wholly mapped on Linux.
-        BIC     r5, r5, #CMA_CheckL2PT :OR: CMA_DecodeAP
-        TST     r6, #DynAreaFlags_PMP
-        BEQ     %FT29
-        LDR     r4, [r9, #DANode_Base]
-27
-        Push    "r0-r2"
-        SUB     sp, sp, #4
-        MOV     r0, r9
-        MOV     r1, r4
-        MOV     r2, sp
-        BL      pmp_next_run            ; r0 = start of the next mapped run (0: none), [sp] = its end
-        MOV     r3, r0
-        LDR     r4, [sp], #4
-        Pull    "r0-r2"
-        TEQ     r3, #0
-        BEQ     %FT24
-        BL      CMA_AddRange2           ; (returns only if the range goes on past it)
-        B       %BT27
-29
-      ]
+        CheckMemoryAccess_LinuxPMP
         TST     r6, #DynAreaFlags_DoublyMapped ; Currently impossible for Sparse/PMP areas - so use of lr safe
         SUBNE   r3, r3, lr
         TSTNE   r6, #DynAreaFlags_Abortable

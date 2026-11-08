@@ -38,7 +38,9 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   and anything else checking addresses got the wrong answer for
   ARMEABISupport 1.08's stacks and mmaps and SOManager's shared libraries.
   (NativeSupport 0.28 answers these checks itself natively, so this
-  matters under QEMU.)
+  matters under QEMU.) Its code is a macro of its own (CheckMemoryAccess_LinuxPMP):
+  inside CheckMemoryAccess_DynamicAreas it took that macro past objasm's
+  size limit ("Macro definition too big").
 
 ## 5.31-18 (6 November 2026)
 
