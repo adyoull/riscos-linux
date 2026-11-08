@@ -139,6 +139,11 @@ as RISC OS's own Linux user, with no password.
 - **Programs that come with it:** NetSurf, RDPServer and Folio (the PDF
   and ebook reader), installed as PackMan installs them, so PackMan
   upgrades them.
+- **PackMan is already set up**, with nothing to add: RISC OS Open's
+  two package lists, riscosdev.com's autobuilt packages (Iris, the web
+  browser, among them) and [riscos-packages](https://github.com/adyoull/riscos-packages)
+  (Andrew Youll's apps and ports). The certificates PackMan needs for the
+  https lists are installed too (!CaCertificates).
 
 ## Tested
 
@@ -165,7 +170,8 @@ finds.
   internal SSD or NVMe) aren't offered to RISC OS; USB discs and SD cards
   are.
 - Socket_Connect can report success for a connection that was refused.
-- Iris isn't included: get it from riscosdev.com or PackMan.
+- Iris isn't included: install it with PackMan (riscosdev.com's list is
+  already set up).
 
 Please send reports with the `LOGS` folder from the FAT partition.
 
