@@ -6,7 +6,12 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-20 (to be built)
+## 5.31-21 (to be built)
+
+The number after 5.31 now counts builds: each ROM built and tested gets
+the next one, released or not. 5.31-20 was built (09 Nov 2026) and tested
+but not released: its RAM disc couldn't be given any size (below). 5.31-21
+is the same source with that fixed.
 
 - **The RAM disc can be up to 2 GB** (it was 128 MB), as on native RISC OS
   5.3x: the kernel makes it a physical memory pool area (PMPRAMFS), which
@@ -15,7 +20,7 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   RISC OS Open's RAMFS uses either kind. Chris Gransden's report.
   OS_ChangeDynamicArea now hands PMP areas to their handlers on Linux too,
   as on native RISC OS (the Linux build has no sparse areas, DA_Batman,
-  and the check was inside that): the first 5.31-20 build (09 Nov) gave
+  and the check was inside that): the 5.31-20 build (09 Nov) gave
   "Unable to move memory" for any RAM disc size, from Configure, the Task
   Manager or *ChangeDynamicArea. Checked with that build patched the same
   way, natively under QEMU: the RAM disc grows to 64 MB and 1 GB, a 4 MB
