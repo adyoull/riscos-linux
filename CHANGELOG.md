@@ -6,12 +6,17 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-21 (to be built)
+## 5.31-22 (to be built)
 
 The number after 5.31 now counts builds: each ROM built and tested gets
 the next one, released or not. 5.31-20 was built (09 Nov 2026) and tested
 but not released: its RAM disc couldn't be given any size (below). 5.31-21
-is the same source with that fixed.
+(09 Nov 2026, the same source with that fixed) was built and tested but
+not released: it had no Resources.BASIC.VFPData, as the s.VFPData that
+BASIC's GenData wrote during the build lacked one line ("VFP_Op_cc EQU 2")
+and objasm failed on it. GenData run again six times on the same Pi
+(NativeSupport 0.38, SWI stubs on and off) and under QEMU made the whole
+file every time, so 5.31-22 is the same source built again.
 
 - **The RAM disc can be up to 2 GB** (it was 128 MB), as on native RISC OS
   5.3x: the kernel makes it a physical memory pool area (PMPRAMFS), which
