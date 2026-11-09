@@ -13,6 +13,14 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   Timothy Baldwin's port had turned off on Linux (2017) because it had no
   PMP areas then. The kernel has done PMP areas itself since 5.31-3, and
   RISC OS Open's RAMFS uses either kind. Chris Gransden's report.
+  OS_ChangeDynamicArea now hands PMP areas to their handlers on Linux too,
+  as on native RISC OS (the Linux build has no sparse areas, DA_Batman,
+  and the check was inside that): the first 5.31-20 build (09 Nov) gave
+  "Unable to move memory" for any RAM disc size, from Configure, the Task
+  Manager or *ChangeDynamicArea. Checked with that build patched the same
+  way, natively under QEMU: the RAM disc grows to 64 MB and 1 GB, a 4 MB
+  file copies in, it refuses to change size while it has files ("can only
+  be changed when it is empty", as native), and goes back to 0.
   Checked before building, on 5.31-19 natively under QEMU: a PMP area with
   a 1 GB physical pool (262,144 pages claimed one block at a time, 0.6 s)
   maps and reads back. To check on the build: Configure's RAM disc at

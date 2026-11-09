@@ -5068,6 +5068,13 @@ ChangeDynamicSWI ROUT
         CMP     r0, #ChangeDyn_FreePool         ; Free pool is handled here. Other PMPs call through to their resize handler.
         TSTNE   r11, #DynAreaFlags_PMP
         BNE     CDA_PMP
+  |
+        ; Linux: PMP areas (the RAM disc, PMPRAMFS) are resized by their
+        ; handlers too (do_MoveMemory doesn't do them: NotAllMoved)
+        LDR     r11, [r10, #DANode_Flags]
+        CMP     r0, #ChangeDyn_FreePool
+        TSTNE   r11, #DynAreaFlags_PMP
+        BNE     CDA_PMP
   ]
       [ PMPParanoid
         BL      ValidatePMPs
