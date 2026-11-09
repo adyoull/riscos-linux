@@ -510,6 +510,12 @@ static void irq_signal_handler(int signal, ix_siginfo_t *info, struct ix_ucontex
 
   if (vcpu->cpsr & PSR_I_BIT) goto exit; // IRQs disabled, so return.
 
+  // In NativeSupport's SWI stubs (a SWI without a trap: the vcpu's mode
+  // switch done in user mode, its working values in the stubs' own memory,
+  // not on a stack), so held back as in the PVOps routines: taken when the
+  // SWI ends, as the kernel's exit (SetCPSR_Restart) finds it pending.
+  if (r[15] - __PVirt_SWIStubs.lo < __PVirt_SWIStubs.hi - __PVirt_SWIStubs.lo) goto exit;
+
   // In __PVirt_GetVCPU (LDR pc, =0xFFFF0FE0) or the kuser get_tls helper
   // it jumps to: lr is live, the return address of a BL to GetVCPU. If
   // the IRQ were taken here from IRQ mode (Sound's Level1 fill runs voice

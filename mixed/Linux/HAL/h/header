@@ -69,6 +69,8 @@ struct vcpu {
 typedef void (*RISCOS_Start_t)(unsigned int flags, OSHdr *riscos_header, void *hal_descriptor, void *ref);
 
 extern uint8_t __PVirt_VModeOffsets[];
+/* NativeSupport's SWI stub area (s.PVOps, hdr.CPU.PVOps PVirt_SWIStubs) */
+extern volatile struct { unsigned magic, lo, hi; } __PVirt_SWIStubs;
 extern struct vcpu init_vcpu;
 extern uint32_t SetCPSR_Start, SetCPSR_Restart, SetCPSR_End;
 extern uint32_t __PVirt_GetVCPU;

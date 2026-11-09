@@ -26,6 +26,20 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   (rol-fb) are now told once, with a pointer message that has no rows; the
   SDL front ends aren't (they'd read rows from a height of 0). Chris
   Gransden's report, found with !RDPClient's developers.
+- **Room for SWIs without a trap** (for NativeSupport 0.34): the HAL's
+  pvops table gets an entry, PVirt_SWIStubs (offset 140, after
+  VModeOffsets), pointing at a block of three words: "SWIS", then the
+  start and end of an area of code. NativeSupport puts stubs there that
+  enter the SWI handler directly from the busiest SWIs in the ROM, so no
+  trap to Linux and back. The HAL's IRQ signal handler now leaves an IRQ
+  pending (as it does when the I bit is set) while the interrupted code is
+  in that area, since a stub is half-way through switching to SVC mode;
+  the IRQ is taken when the stub's SWI handler next sets the PSR. With the
+  block left at zero (no NativeSupport, or an older one) nothing changes.
+  Tried before building on 5.31-19 with the same change patched into the
+  ROM, natively under QEMU: 320 ROM SWI sites given stubs, the desktop and
+  BASIC's SYS run through them, and SYS ColourTrans_SetGCOL takes about
+  30% less time (QEMU makes the trap cheap; a Pi should gain more).
 
 ## 5.31-19 (8 November 2026)
 

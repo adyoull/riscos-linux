@@ -118,6 +118,14 @@ PVirt_FindMode                  #       4
 PVirt_GetVCPU                   #       4
 PVirt_VModeOffsets              #       4
 
+        ; RISC OS on Linux (5.31-20): a block {magic "SWIS", lo, hi}. While
+        ; the program counter is in [lo, hi) the HAL holds interrupts back,
+        ; as it does in its own PVOps routines: NativeSupport's SWI stubs
+        ; (SWIs without a trap), which keep their working values in their
+        ; own memory, not on a stack. Not in older ROMs (the device's
+        ; description string follows VModeOffsets there).
+PVirt_SWIStubs                  #       4
+
 ; *******************************************
 ; ***  PVJumpTable - Jump table for PVOps ***
 ; ***     Uses PVOpsImports if in ROM     ***

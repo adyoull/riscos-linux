@@ -53,6 +53,7 @@
         EXPORT  __PVirt_FindMode
         EXPORT  __PVirt_GetVCPU
         EXPORT  __PVirt_VModeOffsets
+        EXPORT  __PVirt_SWIStubs
 
         EXPORT  SetCPSR_End
         EXPORT  SetCPSR_Restart
@@ -529,6 +530,7 @@ Device_PSR
         DE      FindMode
         DE      GetVCPU
         DE      VModeOffsets
+        DE      SWIStubs
 
 
 
@@ -552,6 +554,13 @@ fiq     DCD     test_stack, FIQ32_mode, 0
 und     DCD     test_stack, UND32_mode, 0
 abt     DCD     test_stack, ABT32_mode, 0
         %       4
+
+        ; NativeSupport's SWI stub area: {magic, lo, hi}, lo and hi written
+        ; by NativeSupport (hdr.CPU.PVOps PVirt_SWIStubs; c.Main's
+        ; irq_signal_handler holds interrupts back while pc is in [lo, hi))
+__PVirt_SWIStubs
+        DCD     &53495753               ; "SWIS"
+        DCD     0, 0
 
         AREA    Init_Stack, DATA, NOINIT
         %       64
