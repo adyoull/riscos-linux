@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-27 (not yet built)
+## 5.31-28 (not yet built)
 
 - **FileCore's zone compaction no longer aborts** (RAM discs, and SCSI
   discs in FileCore format): two places in `CompactZone`
@@ -40,7 +40,8 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   and on a Pi).
 - 5.31-25 (the first FileCore fix only) and 5.31-26 (both FileCore fixes
   and IXFS, without the page after ScratchSpace) were test builds; not
-  packaged.
+  packaged. 5.31-27 mapped the page at the wrong address (ADDRESS is the
+  ROM's base, not ScratchSpace's) and didn't start; not packaged.
 
 ## 5.31-24 (built 11 Nov 2026; released as riscos-rom 5.31-24)
 

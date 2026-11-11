@@ -872,12 +872,14 @@ int main(int argc, char **argv) {
 
   ix_mmap((void *)0x4000, 0x4000, ix_PROT_READ | ix_PROT_WRITE | ix_PROT_EXEC, ix_MAP_FIXED | ix_MAP_PRIVATE | ix_MAP_ANONYMOUS, -1, 0);
 
-  // The page after ScratchSpace (16K at ADDRESS) is memory, as it is on every
-  // other machine: there ScratchSpace ends at &8000, where application space
-  // starts. FileCore's zone compaction reads a word or two past the end of
-  // its tables in ScratchSpace (FileCore32, the move ordering); with nothing
-  // mapped here that was a data abort inside FileCore.
-  ix_mmap((void *)(ADDRESS + 0x4000), 0x1000, ix_PROT_READ | ix_PROT_WRITE, ix_MAP_FIXED | ix_MAP_PRIVATE | ix_MAP_ANONYMOUS, -1, 0);
+  // The page after ScratchSpace is memory, as it is on every other machine:
+  // there ScratchSpace ends at &8000, where application space starts. Here
+  // ScratchSpace is 16K at &20000000 (Kernel hdr.PublicWS), inside the
+  // range reserved above. FileCore's zone compaction reads a word or two
+  // past the end of its tables in ScratchSpace (FileCore32, the move
+  // ordering); with nothing mapped here that was a data abort inside
+  // FileCore.
+  ix_mmap((void *)0x20004000, 0x1000, ix_PROT_READ | ix_PROT_WRITE, ix_MAP_FIXED | ix_MAP_PRIVATE | ix_MAP_ANONYMOUS, -1, 0);
 
   if (!highmem) {
     // Map all memory above 0x80000000
