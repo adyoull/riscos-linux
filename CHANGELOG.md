@@ -6,6 +6,35 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-26 (not yet built)
+
+- **FileCore's zone compaction no longer aborts** (RAM discs, and SCSI
+  discs in FileCore format): two places in `CompactZone`
+  (`FileCore/s/FileCore32`) were only right with ScratchSpace in low
+  memory (&4000, as on every other machine); on RISC OS on Linux it is at
+  &20000000.
+  - "Double exact fit" worked out a bit address as the size table's
+    address times 16, modulo 2^32, and so read &1800 instead of &20001800:
+    a data abort inside FileCore, which was then left threaded ("FileCore
+    in use" for every later call). The lost top bits of the byte address
+    are put back. Chris Gransden's report: a ROM build on a 2 GB RAM disc
+    failed after a few seconds (1,312 aborts in his log, all at
+    &209AFB88).
+  - Ordering the moves read one word at or just past the end of
+    ScratchSpace before testing for the end: at &8000 that is the start of
+    application space and can be read; here nothing is mapped at
+    &20004000 (abort at &209B029C). The read is now conditional. The web
+    browser project's report: OS_Args 1 past the extent of a new file on
+    a RAM disc, after 100 files had been written and deleted.
+- **IXFS: a pointer set past the extent extends the file at once, with
+  zeros**, as RISC OS does (PRM, OS_Args 1): it left the file's length
+  alone until something was written, as Linux does. `IXSupport/c/fs`
+  (FSEntry_Args, fsargs_SetPTR): regular files only, and left alone where
+  the file can't be extended (open for reading). The web browser
+  project's report (UnixLib's lseek and SQLite behaved differently here
+  and on a Pi).
+- 5.31-25 was a test build with the first FileCore fix only; not packaged.
+
 ## 5.31-24 (built 11 Nov 2026; released as riscos-rom 5.31-24)
 
 - **A new dynamic area goes where it would on any other RISC OS machine:**

@@ -1170,6 +1170,16 @@ Stacked2 * 3*4
         BHS     %FT90           ;tried all
         AND     LR, R0, #7
         MOV     R0, R0, LSR #3
+      [ FragSize >= 1:SHL:29
+        ; The bit addresses above are FragSize*8 and FragSize*16 plus a
+        ; little, modulo 2^32: right while ScratchSpace is in low memory
+        ; (&4000). Where it is higher (RISC OS on Linux: &20000000) the top
+        ; three bits of the byte address are lost here, and the load below
+        ; read &1800 instead of &20001800: a data abort inside FileCore,
+        ; which was then left "in use". Put them back.
+        ASSERT  (FragSize :AND: &E0000000) = ((FragSize + SizeLen - 1) :AND: &E0000000)
+        ADD     R0, R0, #FragSize :AND: &E0000000
+      ]
         LDRB    R0, [R0]
         MOV     R0, R0, LSR LR
         TSTS    R0, #1
@@ -2302,7 +2312,11 @@ DoCompBufSize   # 4
       |
         CMPS    R0, #ScratchSpace+?ScratchSpace
       ]
-        LDR     R3, [R0], #3*4
+        ; Only while inside the table: this read the word at (or just past)
+        ; the end of ScratchSpace before the test. With ScratchSpace at
+        ; &4000 that is the start of application space, which can be read;
+        ; on RISC OS on Linux nothing is mapped there (data abort).
+        LDRLO   R3, [R0], #3*4
         BLO     %BT36
         TEQS    R5, #bit31
         BNE     %BT30

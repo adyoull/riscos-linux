@@ -1126,6 +1126,13 @@ _kernel_oserror *FSEntry_Args_handler(_kernel_swi_regs *r, void *pw) {
       r->r[2] = p;
       break;
     case fsargs_SetPTR:
+      // A pointer set past the extent extends the file at once, with zeros,
+      // as RISC OS does (PRM, OS_Args 1); Linux would leave the file as it
+      // was until something is written there. Left alone where the file
+      // can't be extended (opened for reading only, or not a regular file).
+      if (ix_fstat(fd, &s) == 0 && ix_S_ISREG(s.st_mode) &&
+          (uint64_t)(uint32_t)r->r[2] > (uint64_t)s.st_size)
+        (void)ix_ftruncate(fd, (uint32_t)r->r[2]);
       res = seek32(fd, r->r[2], ix_SEEK_SET, 0);
       if (res < 0) return fs_error(res);
       break;
