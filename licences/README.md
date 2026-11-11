@@ -15,6 +15,7 @@ the top-level README for which part is under which):
 | `wireless-regdb-copyright` | `regulatory.db`, the Wi-Fi regulatory database built into the kernels (ISC) |
 | `U-Boot-copyright` | U-Boot (Ubuntu's packages) |
 | `CaCertificates-certifi-LICENSE` | Mozilla's root certificates (MPL-2.0) |
+| `UnixLib-COPYING` | UnixLib, the C library RiSH (the RISC Shell, in Apps) is linked with; RiSH itself is this repository's own code (MIT, Copyright (c) 2026 Andrew Youll; `LICENSE` in the application) |
 
 Debian's packages carry their own, in `/usr/share/doc/*/copyright` on the
 image. This repository's own code is MIT (`LICENSE`).
