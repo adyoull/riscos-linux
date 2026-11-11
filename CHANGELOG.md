@@ -8,6 +8,20 @@ RISC OS 5.31-24 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### RiSH 0.04: the system font's size is put back as it was (11 Nov 2026; riscos-harddisc 1.0.0049-1)
+
+- Found testing a paste from Edit into RiSH under QEMU: after RiSH had
+  redrawn, Edit's text (system font) was drawn half height. RiSH's
+  redraw set the VDU 5 character size (VDU 23,17,7) to its own and then
+  "restored" it to 8 by 8 pixels; the mode's own size is 8 by 16 in a
+  90 dpi mode, and the setting is global, not the task's.
+- redraw() now reads GCharSizeX/Y and GCharSpaceX/Y (VDU variables 162
+  to 165) before changing them and puts those values back (size and
+  spacing separately, as they can differ).
+- Tested under QEMU (ROM 5.31-24): Edit open beside a RiSH window that
+  redraws (ls --color, typing, the cursor): Edit's text stays full
+  height.
+
 ### RiSH: its copyright and licence files (11 Nov 2026; riscos-harddisc 1.0.0048-1)
 
 - The owner: RiSH is part of RISC OS on Linux, with his copyright and the

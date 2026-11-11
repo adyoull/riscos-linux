@@ -24,7 +24,7 @@
 #include <kernel.h>
 #include <swis.h>
 
-#define VERSION "0.03 (11 Nov 2026)"
+#define VERSION "0.04 (11 Nov 2026)"
 
 #define IXSupport_LinuxSyscall	0x59EC0
 #define NR_read		3
@@ -1292,11 +1292,11 @@ redraw_rect (Term *t, const int *r)
     }
 }
 
-/* VDU 5 characters: 8 by 16 pixels (times the scale), spaced the same */
+/* VDU 5 characters' size (what = 2), spacing (4) or both (6), in pixels */
 static void
-char_size (int w, int h)
+char_size (int what, int w, int h)
 {
-  char v[10] = { 23, 17, 7, 6, (char) w, (char) (w >> 8), (char) h, (char) (h >> 8), 0, 0 };
+  char v[10] = { 23, 17, 7, (char) what, (char) w, (char) (w >> 8), (char) h, (char) (h >> 8), 0, 0 };
   _swix (OS_WriteN, _INR (0, 1), v, 10);
 }
 
@@ -1313,8 +1313,15 @@ redraw (Term *t, int update, const int *area)
     }
   else if (_swix (Wimp_RedrawWindow, _IN (1) | _OUT (0), b, &more))
     return;
+  /* RiSH's characters are 8 by 16 pixels (times the scale); the size and
+     spacing other programs' system font text is drawn with are put back
+     afterwards, as they were */
+  int in[5] = { 162, 163, 164, 165, -1 }, was[5] = { 8, 16, 8, 16, 0 };
   if (more)
-    char_size (8 * scale, (yeig >= 2 ? 8 : 16) * scale);
+    {
+      _swix (OS_ReadVduVariables, _INR (0, 1), in, was);
+      char_size (6, 8 * scale, (yeig >= 2 ? 8 : 16) * scale);
+    }
   int any = more;
   while (more)
     {
@@ -1323,7 +1330,10 @@ redraw (Term *t, int update, const int *area)
 	break;
     }
   if (any)
-    char_size (8, 8);
+    {
+      char_size (2, was[0], was[1]);
+      char_size (4, was[2], was[3]);
+    }
 }
 
 static void
