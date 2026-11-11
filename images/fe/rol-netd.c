@@ -13,6 +13,9 @@
  *                         separated by commas or spaces)
  *     hostname=riscos
  *     wifi_ssid= wifi_psk= wifi_country=GB
+ *     wifi_powersave=off  on: let the Wi-Fi save power between packets.
+ *                         Off by default: some Wi-Fi (the Pinebook Pro's
+ *                         Broadcom) drops its connection with it on.
  *
  *   status: interface, type, mac, link, state, address, netmask, gateway,
  *     dns, lease, rx, tx, ssid, signal, freq, interfaces, message, time
@@ -24,6 +27,10 @@
  * this and spoken to through its control socket. Run as "rol-netd" by init;
  * "rol-netd -d DIR -r FILE" uses DIR instead of /riscos/net and FILE
  * instead of /etc/resolv.conf (for testing).
+ *
+ * What happens (links up and down, addresses, wpa_supplicant) goes to
+ * /riscos/net/log.txt, with wpa_supplicant's own messages in
+ * /run/wpa_supplicant.log; init copies both to the FAT partition's LOGS.
  *
  * Copyright (c) 2026 Andrew Youll. MIT licence. */
 #define _GNU_SOURCE
@@ -37,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -110,7 +118,7 @@ read_num (const char *fmt, const char *ifn)
 struct config
 {
   char interface[16], mode[16], address[32], netmask[32], gateway[32],
-       dns[100], hostname[64], ssid[64], psk[100], country[8];
+       dns[100], hostname[64], ssid[64], psk[100], country[8], powersave[8];
 };
 
 static void
@@ -148,6 +156,7 @@ config_read (struct config *c)
         { "wifi_ssid", c->ssid, sizeof c->ssid },
         { "wifi_psk", c->psk, sizeof c->psk },
         { "wifi_country", c->country, sizeof c->country },
+        { "wifi_powersave", c->powersave, sizeof c->powersave },
       };
       for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
         if (!strcmp (l, keys[i].k))
@@ -395,13 +404,45 @@ dhcp_send (int type, uint32_t ciaddr, uint32_t req_ip, uint32_t server,
 
 static char message[200];
 
+/* The network's log: /riscos/net/log.txt (new at each start, up to 256 KB) */
+static void path (char *p, size_t n, const char *name);
+static void
+netlog (const char *fmt, ...)
+{
+  static FILE *f;
+  static long written;
+  if (!f)
+    {
+      char p[300];
+      path (p, sizeof p, "log.txt");
+      f = fopen (p, "w");
+      if (!f)
+        return;
+    }
+  if (written > 256 * 1024)
+    return;
+  struct timespec t;
+  clock_gettime (CLOCK_MONOTONIC, &t);
+  va_list ap;
+  va_start (ap, fmt);
+  written += fprintf (f, "[%6ld.%01ld] ", (long) t.tv_sec, t.tv_nsec / 100000000);
+  written += vfprintf (f, fmt, ap);
+  written += fprintf (f, "\n");
+  va_end (ap);
+  fflush (f);
+}
+
 static void
 say (const char *fmt, ...)
 {
+  char m[sizeof message];
   va_list ap;
   va_start (ap, fmt);
-  vsnprintf (message, sizeof message, fmt, ap);
+  vsnprintf (m, sizeof m, fmt, ap);
   va_end (ap);
+  if (strcmp (m, message))
+    netlog ("%s", m);
+  strcpy (message, m);
 }
 
 static void
@@ -550,6 +591,7 @@ static struct
   char conf_text[1024];         /* what its configuration says */
   int scanning;
   double scan_asked;
+  int ps_set;                   /* power saving set since the link came up */
 } wpa = { .ctrl = -1 };
 
 static void
@@ -691,12 +733,15 @@ wpa_start (const char *ifn, const struct config *c)
       dup2 (null, 0);
       dup2 (log >= 0 ? log : null, 1);
       dup2 (log >= 0 ? log : null, 2);
-      execl (wpa_bin, "wpa_supplicant", "-Dnl80211", "-i", ifn,
+      execl (wpa_bin, "wpa_supplicant", "-t", "-Dnl80211", "-i", ifn,
              "-c", "/run/wpa_supplicant.conf", (char *) NULL);
       _exit (127);
     }
   wpa.pid = p > 0 ? p : 0;
   wpa.started = now ();
+  wpa.ps_set = 0;
+  netlog ("wpa_supplicant started on %s%s%s", ifn, c->ssid[0] ? " for " : "",
+          c->ssid);
   if (p < 0)
     say ("Can't start wpa_supplicant: %s", strerror (errno));
 }
@@ -944,6 +989,8 @@ main (int argc, char **argv)
             wpa_close_ctrl ();
             say ("wpa_supplicant stopped (%d): see /run/wpa_supplicant.log",
                  WIFEXITED (ws) ? WEXITSTATUS (ws) : 128 + WTERMSIG (ws));
+            netlog ("wpa_supplicant stopped (%d)",
+                    WIFEXITED (ws) ? WEXITSTATUS (ws) : 128 + WTERMSIG (ws));
           }
       struct stat st;
       time_t mt = stat (cfgp, &st) == 0 ? st.st_mtime : 0;
@@ -1014,6 +1061,9 @@ main (int argc, char **argv)
           int carrier = (int) read_num ("/sys/class/net/%s/carrier", want_ifn);
           if (carrier != last_carrier)
             {
+              netlog ("%s: link %s", want_ifn, carrier == 1 ? "up" : "down");
+              if (wireless)
+                wpa.ps_set = 0;
               if (carrier != 1)
                 {
                   unconfigure ();
@@ -1037,6 +1087,18 @@ main (int argc, char **argv)
           else
             {
               (void) link_since;
+              /* Wi-Fi power saving, as the settings say (off unless
+                 wifi_powersave=on), each time the link comes up: drivers
+                 can set it again as they connect */
+              if (wireless && wpa.pid > 0 && !wpa.ps_set)
+                {
+                  char r[64];
+                  int on = !strcasecmp (conf.powersave, "on");
+                  if (!wpa_cmd (on ? "SET ps 1" : "SET ps 0", r, sizeof r))
+                    netlog ("%s: power saving %s (%s)", want_ifn, on ? "on" : "off",
+                            strncmp (r, "OK", 2) ? "not done" : "done");
+                  wpa.ps_set = 1;
+                }
               if (!applied)
                 {
                   if (!strcmp (conf.mode, "manual"))

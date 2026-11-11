@@ -23,13 +23,13 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"LinuxShell"
-help:	.asciz	"LinuxShell\t0.03 (03 Nov 2026) Linux commands from RISC OS"
+help:	.asciz	"LinuxShell\t0.04 (11 Nov 2026) Linux commands from RISC OS"
 	.align	2
 commands:
 	.asciz	"Linux"
 	.align	2
 	.word	cm_command_0 - module_start
-	.word	0x00FF0001			@ 1 to 255 parameters
+	.word	0x00FF0000			@ 0 to 255 parameters
 	.word	0
 	.word	cmd_help - module_start
 	.asciz	"LinuxPassword"
@@ -41,18 +41,18 @@ commands:
 	.asciz	"LinuxUser"
 	.align	2
 	.word	cm_command_2 - module_start
-	.word	0x00FF0001			@ 1 to 255 parameters
+	.word	0x00FF0000			@ 0 to 255 parameters
 	.word	0
 	.word	user_help - module_start
 	.word	0
 user_help:
-	.asciz	"*LinuxUser runs a Linux command as RISC OS's own Linux user (riscos, not root: no password) and prints what it prints. *IXRun does this in protected RISC OS. Escape stops it.\rSyntax: *LinuxUser <command>\r  e.g. *LinuxUser ls -l /riscos/HardDisc4"
+	.asciz	"*LinuxUser runs a Linux command as RISC OS's own Linux user (riscos, not root: no password) on a Linux terminal: what you type goes to it, so it can ask questions. With no command it is a shell (type exit to leave). *IXRun does this in protected RISC OS. Escape is Ctrl-C; twice quickly stops the command.\rSyntax: *LinuxUser [<command>]\r  e.g. *LinuxUser ls -l /riscos/HardDisc4"
 	.align	2
 pw_help:
 	.asciz	"*LinuxPassword sets Linux's root password, which *Linux and !Updates ask for (it asks for the current one first).\rSyntax: *LinuxPassword"
 	.align	2
 cmd_help:
-	.asciz	"*Linux runs a Linux command (as root, through /bin/sh) and prints what it prints. It asks for the root password (again after 5 minutes unused). Escape stops it. In a task window the desktop carries on meanwhile.\rSyntax: *Linux <command>\r  e.g. *Linux apt-get update"
+	.asciz	"*Linux runs a Linux command (as root, through /bin/sh) on a Linux terminal: what you type goes to it, so it can ask questions. With no command it is a root shell (type exit to leave). It asks for the root password (again after 5 minutes unused). Escape is Ctrl-C; twice quickly stops the command. In a task window the desktop carries on meanwhile.\rSyntax: *Linux [<command>]\r  e.g. *Linux apt-get update"
 	.align	2
 flags:	.word	1				@ 32-bit compatible
 

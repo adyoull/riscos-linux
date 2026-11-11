@@ -156,7 +156,7 @@ static struct
   unsigned emul_lo[8], emul_hi[8];
   int emul_n;
   /* counts, for *NativeSupport */
-  unsigned cond_skipped, lur_thumb, thumb_returns, squeezed_skipped, lur_stubbed;
+  unsigned cond_skipped, cond_nopped, lur_thumb, thumb_returns, squeezed_skipped, lur_stubbed;
   unsigned it_returns;		/* Thumb returns inside an IT block (full) */
   unsigned sync_app_data, sync_app_prog, sync_app_code, unpatched_words, unpatched_writes, sync_own, sync_big, sync_too_big;
   unsigned cp15_barriers, cp15_rewritten, abtdump_sw;
@@ -363,16 +363,52 @@ static unsigned nsyncwho, syncwho_lost, syncwho_logged;
 static int syncwho_cur = -1;	/* the row whose sync is being patched */
 static unsigned app_sites;	/* sites made in application space (ever) */
 static void dbg (const char *what, unsigned a, unsigned b, unsigned c);
+#define SITE_HASH 32768u		/* (a power of 2, twice SITES_MAX) */
+static unsigned short *site_hash;	/* site index + 1, by address and word */
+static unsigned sites_reused;
 static int
 site_add (unsigned *p, unsigned kind)
 {
-  unsigned i = nsites;
+  /* (0.43) The same instruction at the same address again (a program
+     run again: the DDE's ROM build made about 930 new sites in each
+     short build, 4000 in a full one, and 16384 is all there are; after
+     that programs' privileged instructions were left as they were):
+     its site again. Any task still holding that UDF there means the
+     same instruction. */
+  unsigned i, h = 0;
+  if (site_hash)
+    {
+      h = (((unsigned) p >> 2) * 2654435761u ^ *p * 40503u) >> 17;
+      for (int k = 0; k < 8; k++)
+	{
+	  unsigned v = site_hash[(h + k) & (SITE_HASH - 1)];
+	  if (!v)
+	    break;
+	  struct site *t = &sites[v - 1];
+	  if (t->addr == (unsigned) p && t->orig == *p && t->kind == kind)
+	    {
+	      if ((unsigned) p < 0x20000000u && syncwho_cur >= 0)
+		syncwho[syncwho_cur].sites++;
+	      *p = udf (UDF_BASE + v - 1);
+	      sites_reused++;
+	      return 1;
+	    }
+	}
+    }
+  i = nsites;
   if (i == SITES_MAX)
     {
       ns.full++;
       return 0;
     }
   nsites++;
+  if (site_hash)
+    for (int k = 0; k < 8; k++)
+      if (!site_hash[(h + k) & (SITE_HASH - 1)])
+	{
+	  site_hash[(h + k) & (SITE_HASH - 1)] = i + 1;
+	  break;
+	}
   {
     static int app_logged;
     if (debug_faults && (unsigned) p < 0x20000000u && app_logged < 80)
@@ -438,6 +474,7 @@ stub_branch (const unsigned *q)
 static unsigned veneer_psr;	/* sites found by the TEQ pc, pc rule */
 static int debug, debug_faults;
 static void dbg (const char *what, unsigned a, unsigned b, unsigned c);
+static unsigned mrs_flags_left;		/* _swix's flags-only MRS, not patched */
 static int
 psr_insn (const unsigned *p, const unsigned *lo, const unsigned *hi)
 {
@@ -455,6 +492,25 @@ psr_insn (const unsigned *p, const unsigned *lo, const unsigned *hi)
     }
   if (cond == 15)
     return 0;
+  /* The C libraries' _swix (UnixLib's, after its SWI): the flags the SWI
+     returned, read the way that works on 26- and 32-bit processors:
+       mov ip, #0; mrs ip, CPSR; teq ip, #0; ...; andne ip, ip, #&F0000000
+     Only the flags (NZCV) are kept, and those are the processor's own in
+     any mode, so the real MRS is right: left alone, it doesn't trap. (A
+     UDF there trapped at every _swix: 7.6 million times in one ROBench
+     run on a Pi 4, a signal each.) */
+  if ((w & 0xffff0fffu) == 0xe10f0000u && p > lo && p + 1 < hi)
+    {
+      unsigned rd = (w >> 12) & 15;
+      if (rd != 15 && p[-1] == (0xe3a00000u | (rd << 12))
+	  && p[1] == (0xe3300000u | (rd << 16)))
+	for (int d = 2; d <= 7 && p + d < hi; d++)
+	  if ((p[d] & 0x0fffffffu) == (0x0200020fu | (rd << 16) | (rd << 12)))
+	    {
+	      mrs_flags_left++;
+	      return 0;
+	    }
+    }
   int cpsr = 0, spsr = 0;
   if ((w & 0x0fff0fffu) == 0x010f0000u)			/* MRS Rd, CPSR */
     cpsr = ((w >> 12) & 15) != 15;
@@ -756,6 +812,118 @@ userbank_insn (const unsigned *p, const unsigned *lo, const unsigned *hi)
 	return 1;
       }
   return 0;
+}
+
+/* A skipped trap that would be skipped every time: the 26/32-bit test
+   "TEQ pc, pc; LDMNE sp!, {..., pc}^" in modules' SWI and service exits
+   (IXSupport's, BufferManager's, the Toolbox's: 5 million traps in a
+   35-minute session on a Pi 4, about 5 us each). On a 32-bit processor
+   TEQ pc, pc always sets Z, so the LDMNE never runs: it becomes a NOP and
+   traps no more. Only in the ROM and in modules that say they're 32-bit
+   (not 26-bit ones, which Aemulor runs as on a 26-bit processor, nor code
+   made at run time, nor application space, whose code a program can copy
+   out as data and write to a file). */
+#define ROMOS_LO 0x20810000u
+#define ROMOS_HI 0x20C00000u
+static unsigned rma_lo, rma_hi;		/* the RMA (its largest size) */
+#define NOPS_MAX 1024
+static unsigned nop_addr[NOPS_MAX], nop_orig[NOPS_MAX], nnops;
+static int nocondnop;			/* NativeSupport$NoCondNOP */
+static int priv_form (unsigned w);
+/* a privileged instruction with condition NE straight after TEQ pc, pc,
+   outside application space: never run */
+/* an NE instruction that leaves the flags and pc alone (so the one after
+   it still follows the TEQ pc, pc): LDMNE/LDRNE not of pc, a data
+   operation without S not to pc, STMNE/STRNE */
+static int
+ne_passes (unsigned x)
+{
+  if ((x >> 28) != 1)
+    return 0;
+  unsigned op = (x >> 25) & 7;
+  if (op == 4)					/* LDM/STM */
+    return !((x >> 20) & 1) || !(x & (1u << 15));
+  if (op == 2 || op == 3)			/* LDR/STR */
+    return (x & (1u << 4)) && op == 3 ? 0 : !((x >> 20) & 1) || ((x >> 12) & 15) != 15;
+  if (op == 0 || op == 1)			/* data processing */
+    return !((x >> 20) & 1) && ((x >> 12) & 15) != 15
+	   && (op == 1 || (x & 0x90u) != 0x90u);
+  return 0;
+}
+
+static int
+cond_never (const unsigned *p)
+{
+  if (nocondnop || (unsigned) p < 0x20000000u || (p[0] >> 28) != 1
+      || !priv_form (p[0]))
+    return 0;
+  /* straight after TEQ pc, pc, or after one or two other NE
+     instructions that follow it:
+       teq pc, pc; ldmnefd sp!, {r1-r9, lr}; orrnes pc, lr, #V_bit */
+  for (int d = 1; d <= 3; d++)
+    {
+      if (p[-d] == 0xe13f000fu)
+	return 1;
+      if (!ne_passes (p[-d]))
+	return 0;
+    }
+  return 0;
+}
+
+/* found as code is patched (the ROM's and modules' ranges, made writable
+   by the caller): made NOPs before they ever trap */
+static unsigned
+cond_nop_range (unsigned lo, unsigned hi)
+{
+  unsigned n = 0;
+  for (unsigned *p = (unsigned *) (lo & ~3u) + 1; p < (unsigned *) (hi & ~3u); p++)
+    if (cond_never (p))
+      {
+	/* (outside the ROM: kept, so that a module's code saved to a
+	   file gets the instruction back - write_fixed) */
+	if ((unsigned) p - ROM_LO >= ROM_HI - ROM_LO)
+	  {
+	    unsigned k;
+	    for (k = 0; k < nnops && nop_addr[k] != (unsigned) p; k++)
+	      ;
+	    if (k == nnops && nnops < NOPS_MAX)
+	      nnops++;
+	    if (k < NOPS_MAX)
+	      nop_addr[k] = (unsigned) p, nop_orig[k] = *p;
+	  }
+	*p = 0xe1a00000u;				/* MOV r0, r0 */
+	n++;
+      }
+  ns.cond_nopped += n;
+  return n;
+}
+
+/* A module that says it's 32-bit (its flags word, bit 0). Only those are
+   changed: a 26-bit module (Aemulor runs them, emulating a 26-bit
+   processor) takes the LDMNE ^ after TEQ pc, pc, as on a 26-bit machine,
+   and other code made at run time (Aemulor's, a JIT's) is left alone. */
+static int
+module_32bit (unsigned base, unsigned len)
+{
+  if (len <= 0x34)
+    return 0;
+  unsigned off = *(volatile unsigned *) (base + 0x30);
+  return off >= 0x34 && off < len && !(off & 3)
+	 && (*(volatile unsigned *) (base + off) & 1);
+}
+
+/* one in the ROM that trapped all the same */
+static void
+cond_nop (unsigned pc, unsigned w)
+{
+  (void) w;
+  if (!cond_never ((const unsigned *) pc) || pc - ROMOS_LO >= ROMOS_HI - ROMOS_LO
+      || !rom_writable (pc, pc + 4, 1))
+    return;
+  *(volatile unsigned *) pc = 0xe1a00000u;		/* MOV r0, r0 */
+  rom_writable (pc, pc + 4, 0);
+  lsys3 (0xf0002, pc, pc + 4, 0);			/* cacheflush */
+  ns.cond_nopped++;
 }
 
 static unsigned
@@ -1165,7 +1333,6 @@ extern int probe_call (int (*fn) (void *), void *arg);
 extern void probe_recover (void);
 extern unsigned probe_sp;
 struct pargs { unsigned *R, insn, lo, hi; };
-static unsigned rma_lo, rma_hi;		/* the RMA (its largest size) */
 
 static int p_psr (void *a) { struct pargs *p = a; return emulate_psr (p->R, p->insn); }
 static int p_priv (void *a) { struct pargs *p = a; return emulate_priv (p->R, p->insn); }
@@ -1391,6 +1558,82 @@ spsr_t_check (const struct ev *e)
       }
 }
 
+/* (0.45) A site whose instruction couldn't be done (emulate_psr and
+   emulate_priv both failed: MRS/MSR SPSR in user mode, a fault) goes to
+   RISC OS as an undefined instruction. With the UDF there, an undefined
+   instruction handler, an error report or a debugger saw &E7Fxxxxx, not
+   the instruction (!ArmDebug32: &E7F11AF1 for MRS R14, SPSR). So the
+   original word is put back first, and stays for SUSPEND_CS; the first
+   SWI after that makes it the site again (ns_fixups_run, from the SWI
+   vector), if the word is still there, so that the code works when it
+   next runs in a privileged mode. */
+#define SUSPEND_MAX 8
+#define SUSPEND_CS 1000u
+static struct { unsigned idx, when; } suspended[SUSPEND_MAX];
+static unsigned nsuspended, sites_suspended;
+extern unsigned ns_fixups;
+
+/* (Linux's clock, not a SWI: this is called in a signal handler and on
+   the SWI vector) */
+static unsigned
+linux_cs (void)
+{
+  unsigned ts[2] = { 0, 0 };
+  lsys3 (SYS_clock_gettime, 1, (unsigned) ts, 0);
+  return ts[0] * 100 + ts[1] / 10000000;
+}
+
+static int
+p_poke (void *a)
+{
+  struct pargs *p = a;
+  volatile unsigned *q = (volatile unsigned *) p->lo;
+  int rom = p->lo - ROMOS_LO < ROMOS_HI - ROMOS_LO;
+  if (*q != p->hi)
+    return 0;
+  if (rom && !rom_writable (p->lo, p->lo + 4, 1))
+    return 0;
+  *q = p->insn;
+  if (rom)
+    rom_writable (p->lo, p->lo + 4, 0);
+  lsys3 (0xf0002, p->lo, p->lo + 4, 0);		/* cacheflush */
+  return 1;
+}
+
+static void
+site_suspend (struct site *s)
+{
+  unsigned idx = s - sites;
+  struct pargs a = { 0, s->orig, s->addr, udf (UDF_BASE + idx) };
+  if (nsuspended == SUSPEND_MAX || !probe_call (p_poke, &a))
+    return;
+  suspended[nsuspended].idx = idx;
+  suspended[nsuspended].when = linux_cs ();
+  nsuspended++;
+  sites_suspended++;
+  ns_fixups = 1;
+}
+
+void ns_fixups_run (void);
+void
+ns_fixups_run (void)
+{
+  unsigned now = linux_cs (), k = 0;
+  for (unsigned i = 0; i < nsuspended; i++)
+    {
+      struct site *s = &sites[suspended[i].idx];
+      if (now - suspended[i].when < SUSPEND_CS)
+	{
+	  suspended[k++] = suspended[i];
+	  continue;
+	}
+      struct pargs a = { 0, udf (UDF_BASE + suspended[i].idx), s->addr, s->orig };
+      probe_call (p_poke, &a);		/* (not if it's something else now) */
+    }
+  nsuspended = k;
+  ns_fixups = k != 0;
+}
+
 static void ill_body (int sig, void *si, void *uc);
 static void fault_body (int sig, void *si, void *uc);
 
@@ -1474,6 +1717,7 @@ ill_body (int sig, void *si, void *uc)
 	  R[15] = pc + 4;
 	  ns.cond_skipped++;
 	  trap_count (skip_traps, pc, w);
+	  cond_nop (pc, w);
 	  return;
 	}
       /* SETEND LE/BE (ARMv6; trapped by Linux kernels that don't emulate
@@ -1659,6 +1903,11 @@ ill_body (int sig, void *si, void *uc)
 	      ns.emul_priv++;
 	      return;
 	    }
+	  /* it can't be done here (a privileged instruction in user mode,
+	     say): RISC OS gets it as an undefined instruction - the
+	     instruction itself, not the site's UDF */
+	  if (s->kind == KIND_PSR && s->addr == pc)
+	    site_suspend (s);
 	}
       else if (pc_emulated (pc) && priv_form (w))
 	{
@@ -2188,11 +2437,21 @@ app_phys (unsigned addr)
 	  for (k = 0; k < nids; k++)
 	    if (ids[k].dev == dev && ids[k].ino == ino)
 	      break;
-	  if (k == nids && nids < 256)
+	  /* (0.44: 255 at most, then the oldest again: the 256th's
+	     number didn't fit its 8 bits and came out as 0, and later
+	     ones as the first's) */
+	  if (k == nids && nids < 255)
 	    {
 	      ids[nids].dev = dev;
 	      ids[nids].ino = ino;
 	      nids++;
+	    }
+	  else if (k == nids)
+	    {
+	      static unsigned next;
+	      k = next++ % 255;
+	      ids[k].dev = dev;
+	      ids[k].ino = ino;
 	    }
 	  id = (unsigned) (k + 1) << 24 | ((off + (addr - lo)) & 0xfff000);
 	  found = 1;
@@ -2295,6 +2554,74 @@ aif_end (void)
   return 0x8000u + ro + rw;
 }
 
+/* SWIs without a trap (0.34; ns_swis_tmpl in header.s): the stub area, 16
+   4KB pages. The first has the fast SWI entry's counting hook (at
+   SWIS_FIRST). Then pairs: a data page, whose last 40 bytes are the
+   template's working words, and a code page starting with its common code,
+   then stubs of 16 bytes from SWIS_STUB0 (all within a pc-relative
+   load's 4KB of the working words). Code and the data it writes are in
+   different pages: QEMU's emulator throws a page's translated code away at
+   every write to it, which made a SWI three times as slow there. */
+#define SWIS_PAGE	0x1000u
+#define SWIS_PAGES	20u
+#define SWIS_HELD	15u		/* the hook's page and the pairs: where
+					   the ROM holds interrupts back */
+#define SWIS_FIRST	0x100u
+#define SWIS_STUB0	0xc0u
+#define SWIS_PER_PAGE	((0xfc0u - SWIS_STUB0) / 16)
+#define SWIS_PAIRS	((SWIS_HELD - 1) / 2)
+#define SWIS_MAX	(SWIS_PAIRS * SWIS_PER_PAGE)
+/* (0.45) Each stub's SWI word and its branch back to the site (what the
+   kernel reads, and where the SWI returns) are in the pages after those,
+   8 bytes a stub, outside the held range: an interrupt arriving at the
+   branch back is taken there like any other. In the held range it stayed
+   pending, with Linux's signals blocked, until the program's next SWI. */
+static struct
+{
+  int state;			/* 1: on; 0: off; -1: not in this ROM */
+  unsigned blk;			/* the ROM's PVirt_SWIStubs block */
+  unsigned area;		/* the stub area (4KB-aligned) */
+  unsigned *table;		/* the hook's {site, count} */
+  unsigned *queue;		/* put, taken, then 64 sites */
+  unsigned *site, *word;	/* per stub: its site and the SWI there */
+  unsigned n;			/* stubs made (never freed: a return
+				   address can be in one) */
+  unsigned patched, reused, range, excluded, full, unpatched;
+} sw;
+
+/* the code page of pair p (its data page is the one before) */
+static unsigned
+swis_code (unsigned p)
+{
+  return sw.area + (2 + 2 * p) * SWIS_PAGE;
+}
+
+static unsigned
+swis_stub (unsigned i)
+{
+  return swis_code (i / SWIS_PER_PAGE) + SWIS_STUB0 + (i % SWIS_PER_PAGE) * 16;
+}
+
+/* stub i's SWI word (then its branch back) */
+static unsigned
+swis_exit (unsigned i)
+{
+  return sw.area + SWIS_HELD * SWIS_PAGE + i * 8;
+}
+
+/* A SWI made through a stub returns to the stub's last word (a branch to
+   the site + 4): what code that looks at its caller's return address (the
+   FileSwitch check below) wants is the site's own */
+static unsigned
+swis_ret (unsigned a)
+{
+  unsigned e = sw.area + SWIS_HELD * SWIS_PAGE;
+  if (!sw.area || a - e >= SWIS_MAX * 8 || ((a - e) & 7) != 4)
+    return a;
+  unsigned i = (a - e) / 8;
+  return i < sw.n ? sw.site[i] + 4 : a;
+}
+
 /* OS_SynchroniseCodeAreas's caller (header.s's SWI vector: its return
    address), and whether that is in FileSwitch's code */
 extern unsigned ns_sync_caller;
@@ -2365,6 +2692,46 @@ syncwho_note (char what, unsigned caller, unsigned cao, unsigned lo, unsigned hi
   syncwho_cur = (int) nsyncwho++;
 }
 
+/* (0.45) NativeSupport$Leave: module titles, comma-separated, whose code
+   is left unpatched. The patching can't tell an instruction from data
+   that has the same bits: a debugger's, assembler's or emulator's tables
+   of instructions can be changed by it. Such a module can be named here
+   (set before it's loaded); its own privileged instructions are then done
+   only when the processor traps them. */
+static unsigned modules_left;
+static int
+leave_module (unsigned base, unsigned len)
+{
+  static char list[256];
+  unsigned vcpu = get_tls ();
+  unsigned saved = *(volatile unsigned *) (vcpu + 24);
+  regs v = {{ (unsigned) "NativeSupport$Leave", (unsigned) list, sizeof list - 1, 0, 0 }};
+  int have = !swix_regs (OS_ReadVarVal, &v) && v.r[2] && v.r[2] < sizeof list;
+  *(volatile unsigned *) (vcpu + 24) = saved;
+  if (!have || len < 0x34)
+    return 0;
+  list[v.r[2]] = 0;
+  unsigned to = *(volatile unsigned *) (base + 16);
+  if (!to || to >= len)
+    return 0;
+  const char *t = (const char *) (base + to);
+  for (const char *p = list; *p;)
+    {
+      int n = 0;
+      while (p[n] && p[n] != ',')
+	n++;
+      int k = 0;
+      while (k < n && t[k] > ' ' && ((t[k] ^ p[k]) & ~0x20) == 0)
+	k++;
+      if (n && k == n && t[k] <= ' ')
+	return 1;
+      p += n;
+      if (*p == ',')
+	p++;
+    }
+  return 0;
+}
+
 /* The current active object: &8000 while a program loaded there runs,
    a module's address while a module (BASIC, say) is the application */
 static unsigned
@@ -2404,6 +2771,11 @@ sync_patch (unsigned lo, unsigned hi)
     return;
   if (nosyncpatch)
     return;
+  /* a module being loaded (the kernel synchronises its block), named in
+     NativeSupport$Leave */
+  if (lo >= 0x20000000u && hi - lo >= 0x38
+      && (leave_module (lo, hi - lo) || leave_module (lo + 4, hi - lo - 4)))
+    return;
   /* In application space, only a program starting (its image at &8000):
      FileSwitch also synchronises any file loaded with OS_File's "this is
      code" flag (R3 bit 31), and a program that loads module files that
@@ -2424,7 +2796,7 @@ sync_patch (unsigned lo, unsigned hi)
 	 for memory outside its image: both may be data written out again
 	 (the DDE's ROM build, whose tools ask themselves). A part of the
 	 program's own image is always patched. */
-      unsigned caller = ns_sync_caller, end = aif_end ();
+      unsigned caller = swis_ret (ns_sync_caller), end = aif_end ();
       ns_sync_caller = 0;		/* (one SWI's: not a later sync's) */
       unsigned c = cao ();
       if (end && lo >= 0x8000u && hi <= end && c == 0x8000u)
@@ -2500,7 +2872,7 @@ sync_patch (unsigned lo, unsigned hi)
       if (hi - lo > 0x4000000u)
 	ns.sync_big++;
       {
-	unsigned caller = ns_sync_caller;
+	unsigned caller = swis_ret (ns_sync_caller);
 	ns_sync_caller = 0;
 	syncwho_note ('s', caller, cao (), lo, hi);
       }
@@ -2509,85 +2881,193 @@ sync_patch (unsigned lo, unsigned hi)
   syncwho_cur = -1;
 }
 
-/* A program's patched instructions written to a file. Copied out of its
-   image as data (CMHG's veneer templates: in the DDE's ROM build every C
-   module CMHG made had 4 of them), or code saved from where it is
-   (BASIC's assembler, then *Save): when a program writes [lo, lo+len) to
-   a file (OS_GBPB 1/2, OS_File 0/10), a word there that is UDF #n for a
-   live site in application space gets the original word back. A copy
-   keeps it; the site itself is put back only while the write is done
-   (unpatch_copies returns those, repatch makes them sites again). Only a
-   site still patched counts, so other data hardly ever matches. */
-#define LIVE_MAX 256
-static unsigned live_idx[LIVE_MAX];
-static unsigned
-unpatch_copies (unsigned lo, unsigned len)
+/* Patched words written to a file (0.45: rewritten). A program copies
+   code out of its image as data (CMHG's veneer templates: in the DDE's
+   ROM build every C module CMHG made had 4 of them), or saves code from
+   where it is (BASIC's assembler, then *Save; a module's code from the
+   RMA): when [lo, lo+len) is written to a file (OS_GBPB 1/2, OS_File
+   0/10) and has words of ours, the write is made from a copy with the
+   original instructions put back. Nothing in memory is changed (before
+   0.45 the words were put back in place for the write, and a copy kept
+   the original for good: code that ran meanwhile ran unpatched, and other
+   data that matched was changed in the program's own buffer).
+   Ours: a UDF at its site's own address; a copy of one (the site still
+   patched) with the words either side the same as the site's - a piece
+   of code, not data that happens to match; outside application space, a
+   branch to the MRS stub made for that address, and a never-run
+   instruction made a NOP there. Not the ROM (its SWI stubs and the like
+   stay). */
+static unsigned fix_nomem, fix_errors;
+
+static int
+p_rd (void *a)
 {
-  if (!app_sites || !len || lo < 0x8000u || lo >= 0x20000000u
-      || len > 0x4000000u || 0x20000000u - lo < len)
+  unsigned *q = a;
+  q[1] = *(volatile unsigned *) q[0];
+  return 1;
+}
+
+static int
+safe_rd (unsigned addr, unsigned *v)
+{
+  unsigned q[2] = { addr, 0 };
+  if (addr & 3 || !probe_call (p_rd, q))
     return 0;
-  regs e = {{ 0 }};
-  if (swix_regs (0x10, &e))			/* OS_GetEnv: r1 = the limit */
-    return 0;
-  unsigned hi = lo + len, nlive = 0;
-  if (hi > e.r[1])
-    return 0;
-  int any = 0;
-  for (unsigned a = (lo + 3) & ~3u; a + 4 <= hi; a += 4)
+  *v = q[1];
+  return 1;
+}
+
+/* w at a, in [lo, hi) being written: 1 and its original if it's ours */
+static int
+orig_word (unsigned a, unsigned w, unsigned lo, unsigned hi, unsigned *orig)
+{
+  if ((w & 0xfff000f0u) == 0xe7f000f0u)
     {
-      unsigned w = *(volatile unsigned *) a;
-      if ((w & 0xfff000f0u) != 0xe7f000f0u)
-	continue;
       int imm = udf_imm (w);
       if (imm < UDF_BASE || (unsigned) (imm - UDF_BASE) >= nsites)
-	continue;
+	return 0;
       struct site *t = &sites[imm - UDF_BASE];
-      if (t->addr < 0x8000u || t->addr >= 0x20000000u
-	  || *(volatile unsigned *) t->addr != w)
-	continue;
+      unsigned x, y, z;
       if (t->addr == a)
 	{
-	  if (nlive == LIVE_MAX)
-	    continue;
-	  live_idx[nlive++] = imm - UDF_BASE;
+	  *orig = t->orig;
+	  return 1;
 	}
-      *(volatile unsigned *) a = t->orig;
-      ns.unpatched_words++;
-      any = 1;
+      if (a - 4 < lo || a + 8 > hi || !safe_rd (t->addr, &x) || x != w
+	  || !safe_rd (t->addr - 4, &y) || y != *(volatile unsigned *) (a - 4)
+	  || !safe_rd (t->addr + 4, &z) || z != *(volatile unsigned *) (a + 4))
+	return 0;
+      *orig = t->orig;
+      return 1;
     }
-  if (any)
-    ns.unpatched_writes++;
-  return nlive;
+  if (a < 0x20000000u)
+    return 0;
+  if ((w & 0x0f000000u) == 0x0a000000u && stubs)
+    {
+      unsigned to = a + 8 + ((int) (w << 8) >> 6);
+      unsigned off = to - (unsigned) stubs;
+      if (off < nstub * 4 && !(off % 28))
+	{
+	  const unsigned *st = (const unsigned *) to;
+	  if ((st[0] & 0xffff0fffu) == 0xee1d0f70u
+	      && st[6] == branch_to ((unsigned) (st + 6), a + 4, 14))
+	    {
+	      *orig = (w & 0xf0000000u) | 0x010f0000u | (st[0] & 0xf000u);
+	      return 1;
+	    }
+	}
+      return 0;
+    }
+  if (w == 0xe1a00000u)
+    for (unsigned i = 0; i < nnops; i++)
+      if (nop_addr[i] == a)
+	{
+	  *orig = nop_orig[i];
+	  return 1;
+	}
+  return 0;
 }
 
-static void
-repatch (unsigned nlive)
-{
-  for (unsigned k = 0; k < nlive; k++)
-    *(volatile unsigned *) sites[live_idx[k]].addr = udf (UDF_BASE + live_idx[k]);
-}
+struct fixargs { unsigned lo, hi, n; char *buf; };
 
-/* The write, done here with the sites put back (and patched again after) */
+/* how many words of ours [lo, hi) has; with buf, the copy made and fixed */
 static int
-write_unpatched (unsigned swi, unsigned *r, unsigned nlive, unsigned vcpu,
-		 unsigned *spsr)
+p_fix (void *arg)
 {
+  struct fixargs *f = arg;
+  unsigned o;
+  f->n = 0;
+  if (f->buf)
+    memcpy (f->buf, (const void *) f->lo, f->hi - f->lo);
+  for (unsigned a = (f->lo + 3) & ~3u; a + 4 <= f->hi; a += 4)
+    {
+      unsigned w = *(volatile unsigned *) a;
+      if ((w & 0xfff000f0u) != 0xe7f000f0u
+	  && (a < 0x20000000u
+	      || ((w & 0x0f000000u) != 0x0a000000u && w != 0xe1a00000u)))
+	continue;
+      if (!orig_word (a, w, f->lo, f->hi, &o))
+	continue;
+      if (f->buf)
+	*(unsigned *) (f->buf + (a - f->lo)) = o;
+      f->n++;
+    }
+  return 1;
+}
+
+extern char ns_generr[];
+
+/* The write of [lo, lo+len), from a fixed copy if it has words of ours.
+   0: nothing to do (the SWI goes on as it came, or - a plain SWI's error
+   - as OS_GenerateError); 1: done here */
+static int
+write_fixed (unsigned swi, unsigned *r, unsigned lo, unsigned len,
+	     unsigned vcpu, unsigned *spsr, int xswi)
+{
+  if (!nsites || !len || lo < 0x8000u || len > 0x4000000u || lo + len < lo
+      || overlaps (lo, lo + len, ROM_LO, ROM_HI - ROM_LO)
+      || overlaps (lo, lo + len, self_lo, self_hi - self_lo))
+    return 0;
+  struct fixargs f = { lo, lo + len, 0, 0 };
+  if (!probe_call (p_fix, &f) || !f.n)
+    return 0;
+  /* (SWIs from here change the caller's saved PSR in the vcpu, which the
+     SWI's return uses: kept) */
+  unsigned saved = *(volatile unsigned *) (vcpu + 24);
+  char *m = rma_claim (len + 8);
+  *(volatile unsigned *) (vcpu + 24) = saved;
+  if (!m)
+    {
+      fix_nomem++;
+      return 0;
+    }
+  f.buf = m + (lo & 3);
   regs v;
   for (int k = 0; k < 10; k++)
     v.r[k] = r[k];
-  unsigned saved = *(volatile unsigned *) (vcpu + 24);
-  oserror *err = swix_regs (swi, &v);	/* (back through this vector) */
+  oserror *err = NULL;
+  int ok = probe_call (p_fix, &f) && f.n;
+  if (ok)
+    {
+      if (swi == 0x0C)
+	v.r[2] = (unsigned) f.buf;
+      else
+	v.r[4] = (unsigned) f.buf, v.r[5] = (unsigned) f.buf + len;
+      err = swix_regs (swi, &v);	/* (back through this vector) */
+    }
+  rma_free (m);
   *(volatile unsigned *) (vcpu + 24) = saved;
-  repatch (nlive);
-  for (int k = 0; k < 10; k++)
-    r[k] = v.r[k];
+  if (!ok)
+    return 0;
+  ns.unpatched_words += f.n;
+  ns.unpatched_writes++;
   if (err)
     {
+      fix_errors++;
       r[0] = (unsigned) err;
+      if (!xswi)
+	{
+	  /* a plain SWI: its error is raised, as the kernel would have:
+	     the SWI goes on as OS_GenerateError (ns_generr, header.s) */
+	  r[13] = (unsigned) ns_generr + 4;
+	  return 0;
+	}
       *spsr |= CPSR_V;
+      return 1;
     }
-  else
-    *spsr &= ~CPSR_V;
+  if (swi == 0x0C)
+    {
+      /* r2: the byte after the last one written, r3: those not written
+	 (C set if any), r4: the file's pointer */
+      r[2] = lo + (v.r[2] - (unsigned) f.buf);
+      r[3] = v.r[3];
+      r[4] = v.r[4];
+      if (v.r[3])
+	*spsr |= CPSR_C;
+      else
+	*spsr &= ~CPSR_C;
+    }
+  *spsr &= ~CPSR_V;
   return 1;
 }
 
@@ -2610,7 +3090,7 @@ ns_swi_c (unsigned *r)
     case 0x0C:			/* OS_GBPB 1, 2: write bytes */
     case 0x08:			/* OS_File 0, 10: save a block */
       {
-	unsigned lo, len, n, saved;
+	unsigned lo, len;
 	if ((swi & 0xfdffff) == 0x0C)
 	  {
 	    if (r[0] != 1 && r[0] != 2)
@@ -2623,16 +3103,8 @@ ns_swi_c (unsigned *r)
 	      return 0;
 	    lo = r[4], len = r[5] - r[4];
 	  }
-	if (!app_sites)
-	  return 0;
-	/* (unpatch_copies' OS_GetEnv would leave its own SPSR_svc in the
-	   vcpu, and the write would go back in the wrong mode) */
-	saved = *(volatile unsigned *) (vcpu + 24);
-	n = unpatch_copies (lo, len);
-	*(volatile unsigned *) (vcpu + 24) = saved;
-	if (n)
-	  return write_unpatched (swi & 0xfdffff, r, n, vcpu, spsr);
-	return 0;
+	return write_fixed (swi & 0xfdffff, r, lo, len, vcpu, spsr,
+			    (swi & 0x20000) != 0);
       }
     case NS_SWI_PMPOP:
       r[0] = pmp_op (r);
@@ -3578,8 +4050,6 @@ mem_eq (unsigned a, const char *s, unsigned n)
 }
 
 /* The ROM: its OS image is mapped from 0x20810000 to 0x20C00000 */
-#define ROMOS_LO 0x20810000u
-#define ROMOS_HI 0x20C00000u
 
 static void
 find_kpmp_stubs (void)
@@ -3756,9 +4226,18 @@ patch_modules (unsigned self)
 	}
       else if (base != self && len < 0x1000000)
 	{
+	  if (module_32bit (base, len))
+	    cond_nop_range (base, base + len);
 	  ns.patched += patch_range (base, base + len);
 	  sync_code (base, base + len);
 	}
+    }
+  /* the ROM's never-run LDMNE ^ (and the like) after TEQ pc, pc */
+  if (!nocondnop && rom_writable (ROMOS_LO, ROMOS_HI, 1))
+    {
+      if (cond_nop_range (ROMOS_LO, ROMOS_HI))
+	sync_code (ROMOS_LO, ROMOS_HI);
+      rom_writable (ROMOS_LO, ROMOS_HI, 0);
     }
   if (traptest && rom_writable (ROMOS_LO, ROMOS_HI, 1))
     {
@@ -3936,10 +4415,273 @@ fastswi_set (int on)
 {
   if (ns.fastswi < 0)
     return;
-  if (lsys (SYS_prctl, PR_RISCOS_SWI, on ? ns.swi_handler : 0, ns.sys_entry + 4, 0, 0, 0) == 0)
+  /* (with SWI stubs on, through their counting hook) */
+  unsigned h = sw.state > 0 ? sw.area + SWIS_FIRST : ns.swi_handler;
+  if (lsys (SYS_prctl, PR_RISCOS_SWI, on ? h : 0, ns.sys_entry + 4, 0, 0, 0) == 0)
     ns.fastswi = on;
   else if (on)
     ns.fastswi = -1;
+}
+
+/* ------------------------------------------------------------------------
+   SWIs without a trap (0.34)
+
+   Natively a SWI is a Linux trap: about 0.75 microseconds on a Pi 4 with
+   the fast entry, where RISC OS itself takes about 0.2. The ROM's busiest
+   SWI sites (found by the fast entry's hook: SWIS_THRESH traps from the
+   same word) are made branches to stubs (header.s, ns_swis_tmpl) that go
+   to RISC OS's SWI vector as the port's own SWI entry does, in user mode,
+   without Linux. The stubs are in the ROM image's fill (see swis_init).
+   Only in the ROM's OS image (never copied as data, as a
+   program's image can be: see patch_range), ARM code, and not OS_WriteS
+   (its string follows the SWI), OS_EnterOS or OS_BreakPt. Needs the ROM's
+   PVirt_SWIStubs block (5.31-20): its interrupt handler holds interrupts
+   back in the stub area, as in its own PVOps routines.
+   *NativeSupport SWIStubs On|Off; NativeSupport$NoSWIStubs (set when it
+   starts): off. */
+#define SWIS_THRESH	16u
+#define SWIS_TABLE	4096u
+#define SWIS_MAGIC	0x53495753u		/* "SWIS" */
+extern char ns_swis_tmpl[], ns_swis_common[], ns_swis_vmode[], ns_swis_coll[], ns_swis_tmpl_end[];
+extern char ns_swih_tmpl[], ns_swih_lo[], ns_swih_hi[], ns_swih_table[],
+  ns_swih_thresh[], ns_swih_queue[], ns_swih_rom[], ns_swih_tmpl_end[];
+extern unsigned ns_swiq, ns_swis_area, ns_swis_fixed;
+
+static void
+cacheflush (unsigned lo, unsigned hi)
+{
+  lsys3 (0xf0002, lo, hi, 0);
+}
+
+/* The ROM's block's lo and hi (in its HAL's data; in a test ROM, in its
+   code's fill: written through mprotect), with interrupts off */
+static void
+swis_blk_set (unsigned lo, unsigned hi)
+{
+  int ro = sw.blk >= 0x20808000u;
+  if (ro && !rom_writable (sw.blk, sw.blk + 12, 1))
+    return;
+  unsigned vcpu = get_tls ();
+  volatile uint8_t *cpsr = (volatile uint8_t *) (vcpu + 13);
+  int was_on = !(*cpsr & 0x80);
+  regs r = {{ 0 }};
+  if (was_on)
+    swix_regs (0x14, &r);		/* OS_IntOff */
+  *(volatile unsigned *) (sw.blk + 4) = lo;
+  *(volatile unsigned *) (sw.blk + 8) = hi;
+  if (was_on)
+    swix_regs (0x13, &r);		/* OS_IntOn */
+  if (ro)
+    rom_writable (sw.blk, sw.blk + 12, 0);
+}
+
+static void
+swis_init (void)
+{
+  sw.state = -1;
+  regs h = {{ 0x30A, 0, 0, 0, 0, 0, 0, 0, 5 }};
+  if (swix_regs (OS_Hardware, &h) || h.r[1] == 0xffffffffu || !h.r[2])
+    return;
+  unsigned b = RD (h.r[2] + 140);		/* PVirt_SWIStubs */
+  if (b - 0x20800000u >= 0x400000u || (b & 3) || RD (b) != SWIS_MAGIC)
+    return;
+  if (!ns_vmode_offsets && !find_vmode_offsets ())
+    return;
+  /* The area: in the ROM image's own fill (&FF words after its last
+     module: 480KB in 5.31-19), the highest 64KB there, within a branch
+     of every SWI in the ROM (the RMA is too far) and an address nothing
+     else is given. Made writable for good. */
+  unsigned area = 0, run = 0;
+  for (unsigned a = ROMOS_HI - SWIS_PAGE; a >= ROMOS_LO; a -= 4)
+    {
+      if (RD (a) != 0xffffffffu)
+	{
+	  run = 0;
+	  continue;
+	}
+      run += 4;
+      if (run >= SWIS_PAGES * SWIS_PAGE && !(a & (SWIS_PAGE - 1)))
+	{
+	  area = a;
+	  break;
+	}
+    }
+  if (!area || !rom_writable (area, area + SWIS_PAGES * SWIS_PAGE, 1))
+    return;
+  sw.table = rma_claim (SWIS_TABLE * 8);
+  sw.queue = rma_claim (66 * 4);
+  sw.site = rma_claim (SWIS_MAX * 4);
+  sw.word = rma_claim (SWIS_MAX * 4);
+  if (!sw.table || !sw.queue || !sw.site || !sw.word)
+    return;
+  sw.blk = b;
+  sw.area = area;
+  for (unsigned i = 0; i < SWIS_TABLE * 2; i++)
+    sw.table[i] = 0;
+  for (unsigned i = 0; i < 66; i++)
+    sw.queue[i] = 0;
+  /* each pair: the template so that its common code starts the code
+     page, its working words ending the data page */
+  unsigned tl = ns_swis_tmpl_end - ns_swis_tmpl;
+  unsigned cl = ns_swis_common - ns_swis_tmpl;
+  for (unsigned p = 0; p < SWIS_PAIRS; p++)
+    {
+      char *t = (char *) (swis_code (p) - cl);
+      for (unsigned i = 0; i < tl; i++)
+	t[i] = ns_swis_tmpl[i];
+      *(unsigned *) (t + (ns_swis_vmode - ns_swis_tmpl)) = ns_vmode_offsets;
+    }
+  char *hk = (char *) (sw.area + SWIS_FIRST);
+  unsigned hl = ns_swih_tmpl_end - ns_swih_tmpl;
+  for (unsigned i = 0; i < hl; i++)
+    hk[i] = ns_swih_tmpl[i];
+  *(unsigned *) (hk + (ns_swih_lo - ns_swih_tmpl)) = ROMOS_LO;
+  *(unsigned *) (hk + (ns_swih_hi - ns_swih_tmpl)) = ROMOS_HI;
+  *(unsigned *) (hk + (ns_swih_table - ns_swih_tmpl)) = (unsigned) sw.table;
+  *(unsigned *) (hk + (ns_swih_thresh - ns_swih_tmpl)) = SWIS_THRESH;
+  *(unsigned *) (hk + (ns_swih_queue - ns_swih_tmpl)) = (unsigned) sw.queue;
+  *(unsigned *) (hk + (ns_swih_rom - ns_swih_tmpl)) = ns.swi_handler;
+  cacheflush (sw.area, sw.area + SWIS_PAGES * SWIS_PAGE);
+  swis_blk_set (sw.area, sw.area + SWIS_HELD * SWIS_PAGE);
+  ns_swis_area = sw.area;		/* (header.s: swis_fixlr) */
+  sw.state = 0;
+}
+
+/* A busy site (from the queue): its SWI made a branch to a stub */
+static void
+swis_patch (unsigned site)
+{
+  unsigned w = RD (site);
+  if ((w & 0x0f000000u) != 0x0f000000u || (w >> 28) == 15)
+    return;				/* (not a SWI now: given one, or
+					   changed) */
+  unsigned n = w & 0xfdffffu;
+  if (n == 0x01 || n == 0x16 || n == 0x17	/* OS_WriteS, OS_EnterOS, OS_BreakPt */
+      || site - ROMOS_LO >= ROMOS_HI - ROMOS_LO)
+    {
+      sw.excluded++;
+      return;
+    }
+  unsigned i, s = 0;
+  for (i = 0; i < sw.n; i++)
+    if (sw.site[i] == site && sw.word[i] == w)
+      {
+	s = swis_stub (i);
+	sw.reused++;
+	break;
+      }
+  if (!s)
+    {
+      if (sw.n >= SWIS_MAX)
+	{
+	  sw.full++;
+	  return;
+	}
+      s = swis_stub (sw.n);
+      unsigned e = swis_exit (sw.n);
+      unsigned common = s & ~(SWIS_PAGE - 1);
+      unsigned words = common - (ns_swis_common - ns_swis_tmpl);
+      unsigned back = branch_to (e + 4, site + 4, 14);
+      if (!back || !branch_to (site, s, 14))
+	{
+	  sw.range++;
+	  return;
+	}
+      volatile unsigned *p = (volatile unsigned *) s;
+      volatile unsigned *x = (volatile unsigned *) e;
+      x[0] = w;							/* swi n */
+      x[1] = back;						/* b site + 4 */
+      p[0] = 0xe50fe000u | ((s + 8) - words);			/* str lr, scr_lr */
+      p[1] = 0xeb000000u | (((common - (s + 12)) >> 2) & 0xffffffu);	/* bl common */
+      p[2] = e + 4;						/* the SWI's return */
+      p[3] = 0xe7f000f0u;					/* (never run) */
+      cacheflush (s, s + 16);
+      cacheflush (e, e + 8);
+      sw.site[sw.n] = site;
+      sw.word[sw.n] = w;
+      sw.n++;
+    }
+  unsigned br = branch_to (site, s, w >> 28);
+  if (!rom_writable (site, site + 4, 1))
+    return;
+  *(volatile unsigned *) site = br;
+  rom_writable (site, site + 4, 0);
+  cacheflush (site, site + 4);
+  sw.patched++;
+}
+
+/* From ns_swi_vector (header.s), when the queue has sites: ret is this
+   SWI's return address, whose site isn't patched now */
+void ns_swiq_drain (unsigned ret);
+void
+ns_swiq_drain (unsigned ret)
+{
+  static int busy;
+  unsigned *q = sw.queue;
+  if (busy || !q)
+    return;
+  busy = 1;
+  while (q[1] != q[0])
+    {
+      unsigned site = q[2 + (q[1] & 63)];
+      if (site == ret - 4)
+	break;
+      q[1]++;
+      if (sw.state > 0)
+	swis_patch (site);
+    }
+  busy = 0;
+}
+
+/* *NativeSupport SWIStubs Off: every site back as it was (the stubs stay:
+   a return address can be in one) */
+static void
+swis_unpatch_all (void)
+{
+  for (unsigned i = 0; i < sw.n; i++)
+    {
+      unsigned site = sw.site[i], s = swis_stub (i);
+      if (RD (site) != branch_to (site, s, sw.word[i] >> 28)
+	  || !rom_writable (site, site + 4, 1))
+	continue;
+      *(volatile unsigned *) site = sw.word[i];
+      rom_writable (site, site + 4, 0);
+      cacheflush (site, site + 4);
+      sw.unpatched++;
+    }
+}
+
+static void
+swis_set (int on)
+{
+  if (sw.state < 0 || on == sw.state)
+    return;
+  if (!on)
+    swis_unpatch_all ();
+  else
+    sw.queue[1] = sw.queue[0];
+  sw.state = on;
+  ns_swiq = on ? (unsigned) sw.queue : 0;
+  if (on)
+    for (unsigned i = 0, n = sw.n; i < n; i++)
+      swis_patch (sw.site[i]);		/* their stubs again, at once */
+  if (ns.fastswi > 0)
+    fastswi_set (1);			/* the hook, or the ROM's handler */
+}
+
+/* 0.39: stub calls that began while another in the same page pair was
+   between its common code's start and its jump to the SWI vector (each
+   pair's working words; never more than 0 unless they're shared) */
+static unsigned
+swis_overlaps (void)
+{
+  unsigned n = 0, cl = ns_swis_common - ns_swis_tmpl;
+  unsigned off = ns_swis_coll - ns_swis_tmpl;
+  if (sw.state < 0)
+    return 0;
+  for (unsigned p = 0; p < SWIS_PAIRS; p++)
+    n += RD (swis_code (p) - cl + off);
+  return n;
 }
 
 oserror *
@@ -4026,6 +4768,9 @@ mod_init (const char *tail, int instance, void *pw)
   sites = rma_claim (SITES_MAX * sizeof *sites);
   reset_cs = mono_cs ();
   site_hits = rma_claim (SITES_MAX * 8);
+  site_hash = rma_claim (SITE_HASH * sizeof *site_hash);
+  for (unsigned i = 0; site_hash && i < SITE_HASH; i++)
+    site_hash[i] = 0;
   if (site_hits)
     for (unsigned i = 0; i < SITES_MAX * 2; i++)
       site_hits[i] = 0;
@@ -4081,6 +4826,13 @@ mod_init (const char *tail, int instance, void *pw)
   self_lo = self;
   self_hi = self + RD (self - 4);
   (void) pw;
+  /* (NativeSupport$NoCondNOP set when it starts: the never-run LDMNE ^
+     after TEQ pc, pc keep trapping, and are skipped each time) */
+  {
+    regs v = {{ (unsigned) "NativeSupport$NoCondNOP", 0, -1, 0, 0 }};
+    swix_regs (OS_ReadVarVal, &v);
+    nocondnop = v.r[2] != 0;
+  }
   patch_modules (self);
   patch_cacheflush (0x20800000u, 0x20804000u);	/* the HAL */
   if (ns.lur_ok && !lur_stub ()
@@ -4109,6 +4861,13 @@ mod_init (const char *tail, int instance, void *pw)
   patch_cacheflush (ROMOS_LO, ROMOS_HI);
   patch_imb_full ();
   ns.active = 1;
+  swis_init ();
+  {
+    regs v = {{ (unsigned) "NativeSupport$NoSWIStubs", 0, -1, 0, 0 }};
+    swix_regs (OS_ReadVarVal, &v);
+    if (!v.r[2])
+      swis_set (1);
+  }
   /* (NativeSupport$NoFastSWI set when it starts: SWIs the usual way) */
   {
     regs v = {{ (unsigned) "NativeSupport$NoFastSWI", 0, -1, 0, 0 }};
@@ -4213,12 +4972,20 @@ mod_service (regs *r)
 	}
       return;
     }
-  if (r->r[1] == 0xB9 && ns.active && (r->r[0] < ROM_LO || r->r[0] >= ROM_HI))
+  if (r->r[1] == 0xB9 && ns.active && (r->r[0] < ROM_LO || r->r[0] >= ROM_HI)
+      && !(leave_module (r->r[0], r->r[2] - 4) && ++modules_left))
     {
       unsigned v0 = veneer_psr;
+      if (module_32bit (r->r[0], r->r[2] - 4))
+	cond_nop_range (r->r[0], r->r[0] + r->r[2] - 4);
       ns.patched += patch_range (r->r[0], r->r[0] + r->r[2] - 4);
+      /* (0.44) what was changed here reaches the instruction cache: the
+	 kernel's own synchronisation of the module came before this
+	 service call (a module made from memory may have had none) */
+      cacheflush (r->r[0], r->r[0] + r->r[2]);
       if (aeabi105_fix (r->r[0], r->r[2]))
 	{
+	  cacheflush (r->r[0] + AEABI105_SIZE, r->r[0] + AEABI105_AFTER + 4);
 	  ns.aeabi105++;
 	  if (debug_faults)
 	    dbg ("fault-aeabi105", r->r[0], 0, 0);
@@ -4418,8 +5185,8 @@ mod_command (int index, const char *tail, int argc)
     {
       /* characters, not pointers: a table of pointers isn't relocated in
 	 this module (with three words GCC made one, and nothing matched) */
-      static const char words[3][10] = { "fastswi", "fastfpa", "syncpatch" };
-      for (int k = 0; k < 3; k++)
+      static const char words[4][10] = { "fastswi", "fastfpa", "syncpatch", "swistubs" };
+      for (int k = 0; k < 4; k++)
 	{
 	  const char *w = words[k];
 	  int i = 0;
@@ -4438,6 +5205,13 @@ mod_command (int index, const char *tail, int argc)
 		fastswi_set (on);
 	      write0 ("Fast SWI entry: ");
 	      write0 (ns.fastswi > 0 ? "on" : ns.fastswi ? "not in this Linux kernel" : "off");
+	    }
+	  else if (k == 3)
+	    {
+	      if (on || off)
+		swis_set (on);
+	      write0 ("SWIs without a trap: ");
+	      write0 (sw.state > 0 ? "on" : sw.state ? "not in this ROM" : "off");
 	    }
 	  else if (k == 2)
 	    {
@@ -4467,6 +5241,49 @@ mod_command (int index, const char *tail, int argc)
   write0 ("Fast FPA entry (*NativeSupport FastFPA On|Off): ");
   write0 (ns.fastfpa > 0 ? "on" : ns.fastfpa ? "not in this Linux kernel or ROM" : "off");
   newline ();
+  write0 ("SWIs without a trap (*NativeSupport SWIStubs On|Off): ");
+  write0 (sw.state > 0 ? "on" : sw.state ? "not in this ROM" : "off");
+  newline ();
+  if (sw.state >= 0)
+    {
+      line_out ("ROM SWI sites given stubs: ", sw.n);
+      line_out ("Stub calls overlapping another (should be 0): ", swis_overlaps ());
+      line_out ("Sites given their stub while their SWI was on its way, sent through it (should be 0): ", ns_swis_fixed);
+      line_out ("Patched (stubs made or used again): ", sw.patched);
+      line_out ("Busy sites found: ", sw.queue[0]);
+      line_out ("Busy sites left, out of the stubs' reach: ", sw.range);
+      line_out ("Busy sites left, OS_WriteS etc.: ", sw.excluded);
+      line_out ("Busy sites left, no stubs left: ", sw.full);
+      line_out ("Stub area: ", sw.area);
+      /* the sites that trap most (a patched site stops counting) */
+      unsigned done[6], nd = 0;
+      for (int r = 0; r < 6; r++)
+	{
+	  unsigned best = 0, bi = ~0u;
+	  for (unsigned i = 0; i < SWIS_TABLE; i++)
+	    {
+	      int seen = 0;
+	      for (unsigned j = 0; j < nd; j++)
+		seen |= done[j] == i;
+	      if (!seen && sw.table[2 * i] && sw.table[2 * i + 1] > best)
+		best = sw.table[2 * i + 1], bi = i;
+	    }
+	  if (bi == ~0u)
+	    break;
+	  done[nd++] = bi;
+	  unsigned site = sw.table[2 * bi], st = 0;
+	  for (unsigned k = 0; k < sw.n; k++)
+	    st |= sw.site[k] == site;
+	  write0 ("SWI site trapping most: ");
+	  write_hex8 (site);
+	  write0 (st ? " (stub) " : " ");
+	  write_hex8 (*(unsigned *) site);
+	  write0 (" traps ");
+	  write_dec (best);
+	  where_out (site);
+	  newline ();
+	}
+    }
   {
     unsigned fl, gl, fa;
     maps_report (&fl, &gl, &fa, debug_faults);
@@ -4503,6 +5320,7 @@ mod_command (int index, const char *tail, int argc)
   line_out ("Synchronisations of a part of the program, patched: ", ns.sync_own);
   line_out ("Patched instructions copied as data, put back as written to a file: ", ns.unpatched_words);
   line_out ("Writes to files that had them: ", ns.unpatched_writes);
+  line_out ("Writes left as they were (no memory for the copy): ", fix_nomem);
   if (nsyncwho)
     {
       write0 ("Who synchronised application space:");
@@ -4550,8 +5368,14 @@ mod_command (int index, const char *tail, int argc)
   line_out ("Aborts passed to handlers: ", ns.aborts);
   line_out ("IOC timer reads: ", ns.ioc);
   line_out ("Faults in emulations (failed): ", ns.probe_faults);
+  line_out ("Sites in use (of 16384): ", nsites);
+  line_out ("Sites used again (the same instruction at the same address): ", sites_reused);
+  line_out ("Instructions that couldn't be done, shown to RISC OS as themselves: ", sites_suspended);
+  line_out ("Modules left unpatched (NativeSupport$Leave): ", modules_left);
   line_out ("Sites or stubs not made (tables full): ", ns.full);
   line_out ("Trapped instructions whose condition failed (skipped): ", ns.cond_skipped);
+  line_out ("Never-run privileged instructions (TEQ pc, pc; LDMNE ^) made NOPs: ", ns.cond_nopped);
+  line_out ("MRS reading only the flags (_swix) left to run: ", mrs_flags_left);
   line_out ("CP15 barriers emulated: ", ns.cp15_barriers);
   line_out ("Abort register dumps switched back without a stack: ", ns.abtdump_sw);
   line_out ("CP15 barriers replaced by ARMv7 ones: ", ns.cp15_rewritten);

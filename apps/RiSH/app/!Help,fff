@@ -1,0 +1,46 @@
+RiSH, the RISC Shell, 0.03 (11 Nov 2026)
+========================================
+A Linux terminal for the RISC OS desktop, on RISC OS on Linux.
+
+Double-click !RiSH for a terminal: a Linux shell as RISC OS's own Linux
+user, the same one *IXRun uses. It has no password and can't change the
+system. Type exit (or close the window) to finish.
+
+The icon bar icon: Select opens another terminal; Adjust, or "Root shell"
+on its menu, opens a root terminal, which asks for Linux's root password
+first (the one *Linux and Updates use; the first time, you choose it).
+A root terminal is marked so that it can't be mistaken for an ordinary
+one: a red title bar that begins "ROOT:", a red cursor, and a line in
+bold at the top saying that every command runs with full privileges.
+
+Full-screen programs work: nano, vi, less, top, and anything else written
+for an xterm. Install what you need from a root terminal, for example
+
+    apt-get install nano
+
+The window can be resized (the program inside is told) and the scroll bar
+shows what has scrolled off the top (1000 lines). "Large text" on the
+menu doubles the size of the text, for 4K screens; it is on to begin with
+on a screen 2560 pixels wide or more.
+
+Keys: everything goes to Linux except F12 and the other keys RISC OS
+keeps. The cursor keys, Home, Copy (End), Page Up and Down, Insert,
+Delete, Tab and F1 to F11 are what an xterm sends. Ctrl-C, Ctrl-D, Ctrl-Z
+and the rest of the Ctrl keys work as on Linux.
+
+Copy and paste: drag with Select to select text (Adjust moves the end of
+the selection; dragging past the top or bottom scrolls). "Copy" on the
+menu, or Ctrl-Shift-C, puts it on RISC OS's clipboard for any program to
+paste. "Paste" on the menu, Ctrl-Shift-V or Shift-Insert types the
+clipboard's text into the terminal. (Ctrl-C and Ctrl-V alone go to
+Linux, as they must.)
+
+Not yet: the mouse inside programs, italic and blinking text. Characters
+RISC OS's system font doesn't have show as "?".
+
+Up to six terminals can be open at once.
+
+RiSH is part of RISC OS on Linux.
+Copyright (c) 2026 Andrew Youll. MIT licence: see the file LICENSE in
+this application. It is linked with UnixLib, whose licences are in the
+file UnixLib-COPYING beside it.

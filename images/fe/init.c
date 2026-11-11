@@ -1136,6 +1136,9 @@ fat_logs_once (void)
       copy_file ("/riscos/log.prev.txt", "/run/fatlog/LOGS/riscos-log.prev.txt");
       copy_file ("/riscos/kernel-log.prev.txt", "/run/fatlog/LOGS/kernel-log.prev.txt");
       copy_file ("/riscos/previous-end.txt", "/run/fatlog/LOGS/previous-end.txt");
+      /* the network's: rol-netd's and wpa_supplicant's (Wi-Fi) */
+      copy_file ("/riscos/net/log.txt", "/run/fatlog/LOGS/network-log.txt");
+      copy_file ("/run/wpa_supplicant.log", "/run/fatlog/LOGS/wifi-log.txt");
       if (umount ("/run/fatlog"))
 	umount2 ("/run/fatlog", MNT_DETACH);
     }

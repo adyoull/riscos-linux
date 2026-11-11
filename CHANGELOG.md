@@ -1,5 +1,494 @@
 # Changelog
 
+## Since images 1.0.0020 (9 to 11 November 2026; through Updates)
+
+RISC OS 5.31-24 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
+0.45, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
+`*IXRun`, the Pi kernel's fan driver and the Pi's headphone socket.
+riscos-rolpkg's CHANGELOG lists each package; the next images will
+include them.
+
+### RiSH: its copyright and licence files (11 Nov 2026; riscos-harddisc 1.0.0048-1)
+
+- The owner: RiSH is part of RISC OS on Linux, with his copyright and the
+  licences. In the application now: `LICENSE` (MIT, Copyright (c) 2026
+  Andrew Youll) and `UnixLib-COPYING` (the program is statically linked
+  with UnixLib), named in !Help; copyright lines in !Run and !Boot.
+  LICENCES.md has RiSH's row. The package's copyright file names RiSH and
+  UnixLib, and Documents.Licences has UnixLib-COPYING with a row in its
+  README. The program itself is 0.03, unchanged.
+
+### RiSH 0.03: copy and paste (11 Nov 2026; riscos-harddisc 1.0.0047-1)
+
+- **Selecting:** Select pressed in the window starts a selection and the
+  pointer is followed on null polls while the button is held (Adjust moves
+  the selection's end; past the top or bottom the window scrolls a line a
+  poll). It runs from a cell to just before another, by line number
+  counted from the first line ever shown, so it stays on its text as that
+  scrolls into the history. A click without a drag, a resize, the
+  alternate screen and clearing the history remove it.
+- **Copy** (the menu; Ctrl-Shift-C, told from Ctrl-C by the Shift key's
+  state): the text (Latin-1, LF line ends, trailing spaces left off,
+  line-drawing characters as - | +) is kept, and the clipboard claimed
+  (Message_ClaimEntity). Another program's paste (Message_DataRequest) is
+  answered with DataSave, and the file written where its DataSaveAck
+  says, then DataLoad. RAM transfer isn't offered.
+- **Paste** (the menu; Ctrl-Shift-V; Shift-Insert): RiSH's own clipboard
+  directly, else Message_DataRequest, the owner's DataSave answered with
+  <Wimp$Scrap>, and the file's text (up to 1 MB) typed in: line ends as
+  Return, Latin-1 as UTF-8, control codes dropped, inside ESC[200~ and
+  ESC[201~ when the program asked for bracketed paste (bash does).
+- **Tested** under QEMU: a drag selection, Copy and Paste from the menu
+  within RiSH; Ctrl-V in !Edit pasted RiSH's text; text copied in !Edit
+  pasted into RiSH with Ctrl-Shift-V. Not done: several lines, the
+  scrolling drag, Adjust, a paste into vi.
+
+### RiSH 0.02: "the RISC Shell" (11 Nov 2026; riscos-harddisc 1.0.0046-1)
+
+- The owner: RiSH stands for RISC Shell. Its Info, !Help and file headers
+  say so. Nothing else changed from 0.01.
+
+### RiSH 0.01: a Linux terminal for the desktop (11 Nov 2026; riscos-harddisc 1.0.0045-1, riscos-support 1.0.0044-1)
+
+- **apps/RiSH** (new; C, static UnixLib, built by apps/RiSH/build.sh into
+  out/apps/!RiSH; the sprites are drawn by mksprites.py). A Wimp program:
+  each window is an xterm-256color terminal on a rol-cmd terminal job.
+  - Emulation: cursor movement, erase, insert and delete (characters and
+    lines), scroll regions, index and reverse index, the alternate screen
+    (47, 1047, 1049), origin, wrap and insert modes, save and restore,
+    SGR (16, 256 and true colours, the last to the nearest of the 256),
+    REP, tabs, DA and DSR replies, OSC 0/2 (the window's title), the
+    VT100 line-drawing set and UTF-8 (Latin-1 as the system font has it;
+    box-drawing and block characters are drawn; the rest is "?").
+  - The window: VDU 5 system font at 8 by 16 pixels (VDU 23,17,7), twice
+    that with "Large text"; rows redrawn as they change; 1000 lines of
+    history above the screen in the same work area (the scroll bar); the
+    terminal's size is the window's (Open_Window_Request), sent to Linux.
+  - Keys as an xterm's, with application cursor keys; unknown function
+    keys go back to the Wimp (F12).
+  - A root terminal probes rol-cmd with no password, then asks in the
+    window (password, or a new one twice) and keeps the token rol-cmd
+    gives for the next root terminal. It is marked (the owner's request):
+    a red title bar that always begins "ROOT:", a red cursor, and a bold
+    banner when the shell starts.
+- **rol-cmd:** `@tty COLUMNS ROWS NAME` sets TERM (and then leaves
+  DEBIAN_FRONTEND unset); NAME.size changes the pty's size; NAME.trim
+  punches the read part out of NAME.out (fallocate; the length stays, so
+  offsets don't move); MAXJOBS 16.
+- **Tested** under QEMU (ROM 5.31-24, NativeSupport 0.45, 1280x800): the
+  shell, `ls --color`, busybox vi, less and top, an ncurses test program
+  (boxes, 256 colours, a scrolling sub-window, key names for the cursor
+  keys, Home, End, Delete, Page Up, F1 and F5), `seq 1 5000`, resizing by
+  the size icon (stty size followed), the scroll bar, Large text and back,
+  two windows at once, a root terminal with a new password, a second one
+  on the token, exit and Close. On the host: NAME.trim freed blocks with
+  the length kept. Not done: a Pi, a 4K screen, copy and paste, the mouse
+  in programs, nano itself (no Debian mirror from here).
+- One boot of the test image stopped on the start-up screen before RiSH
+  was run (hourglass, nothing drawn); the next boots were fine. Not
+  investigated.
+
+### The Pi's headphone socket: config.txt's dtparam=audio=on was the overlay's (11 Nov 2026; riscos-kernel-pi 6.6.78-8)
+
+- Ralph Barrett: still no sound from the Pi 4's headphone socket with
+  rol-snd choosing it. Every Pi 4 kernel log we have (his and ours) has
+  `snd_bcm2835.enable_headphones=0` with no `=1` after it on the firmware's
+  command line, and ALSA lists only vc4-hdmi-0 and vc4-hdmi-1: there is no
+  Headphones card for rol-snd to choose.
+- Cause: the images' config.txt had `dtparam=audio=on` after
+  `dtoverlay=vc4-kms-v3d`. A dtparam after an overlay belongs to that
+  overlay (vc4-kms-v3d has an `audio` parameter, HDMI's), so the base
+  device tree's audio stayed off.
+- Fix: the image scripts write it before the overlay; riscos-kernel-pi's
+  postinst moves the line in an installed card's config.txt (only when
+  the line is there and only after a dtoverlay; config.txt.old kept).
+  Installed under QEMU on the generic image: line moved, second run
+  changes nothing. Sound on a Pi: not yet confirmed.
+
+### An interactive terminal for Linux commands, and the Pi 5's fan (11 Nov 2026; riscos-support 1.0.0042-1, riscos-harddisc 1.0.0043-1, riscos-kernel-pi 6.6.78-7)
+
+- **rol-cmd: terminal jobs.** A request whose first line is `@tty COLUMNS
+  ROWS` runs on a pty: its output goes to NAME.out as before, and what
+  RISC OS appends to NAME.in is typed into the terminal (only a regular
+  file owned by RISC OS's user, never through a link; removed when the job
+  ends). An empty command is a shell (`bash -i`, or `sh -i`). The job is
+  its own session with the pty as its terminal, so Ctrl-C (byte 3 in
+  NAME.in) reaches what the shell is running; NAME.kill hangs up on the
+  terminal's foreground program and ends the shell (an interactive shell
+  ignores SIGTERM). Who it runs as is unchanged (`@user`: uid 1000;
+  otherwise root, with the password or a token). Requests without `@tty`
+  are untouched.
+- **LinuxShell 0.04.** *Linux and *LinuxUser (*IXRun) ask for a terminal
+  job sized to the text screen, send the keys waiting (OS_Byte 129) to
+  NAME.in each time round their loop (Return as CR, Delete as DEL, the
+  cursor keys as their escape sequences, with *FX 4,1 for the job's
+  length), and take no parameters for a shell. Escape sends Ctrl-C; a
+  second within 1.5 s writes NAME.kill. Output is filtered for RISC OS's
+  VDU: escape sequences dropped, tabs expanded, UTF-8 to Latin-1,
+  "backspace space backspace" as VDU 127 and a lone CR as rubbing the line
+  out (a task window acts on neither a bare backspace nor a bare CR),
+  other control codes dropped (17 changed the text colour). *LinuxPassword
+  is unchanged. A shell's exit status isn't reported.
+- **Tested** under QEMU (ROM 5.31-24, NativeSupport 0.45) in a task window:
+  *IXRun shell (id: riscos; `touch /etc/x`: permission denied), stty size,
+  `read -p`, cat with Ctrl-D, history with cursor up, Delete, Escape on
+  `sleep`, Escape twice, `exit 3`, one-off commands, *Linux with a new
+  root password, then passwd, `rm -i` and apt-get's [Y/n]. Not done:
+  full-screen programs (TERM=dumb), the F12 command line, a Pi.
+- **Pi kernel 6.6.78-7** (images/kernel-6.6-pi.config):
+  CONFIG_SENSORS_PWM_FAN and CONFIG_SENSORS_RASPBERRYPI_HWMON on. The Pi
+  5's fan (a user's report: the official cooler never starts) is driven by
+  pwm-fan from the board's device tree (trips at 50, 60, 67.5 and 75°C);
+  the PWM, thermal sensor and governor it needs were already in. Untested:
+  no Pi 5 here, and QEMU has no such fan.
+
+### Packaged 11 Nov 2026: riscos-support 1.0.0041-1, riscos-harddisc 1.0.0040-1, riscos-rom 5.31-24
+
+- **riscos-support 1.0.0041-1:** NativeSupport 0.45 (0.34 to 0.45 below: SWIs
+  without a trap, the lost-write fix, files written without patch markers,
+  the review's fixes) and rol-snd's choice of the headphone socket when the
+  screen has no speakers (below). Tested natively under QEMU with riscos-rom
+  5.31-24: the ROM applications, seven disc applications, and Iris loading
+  and scrolling a saved copy of the BBC home page, with no faults on the
+  serial log and NativeSupport's failure counts at 0. rol-snd's change is
+  untried on a Pi.
+- **riscos-harddisc 1.0.0040-1:** PackMan's own CaCertificates 1.00-6 in
+  place of the images' hand-placed `!CaCertificates` (`harddisc/extras`,
+  copied by `harddisc/fetch.sh`), with its PackMan record: installing Iris
+  stopped with "files conflict" (Ralph Barrett). The image build still
+  copies the hand-placed one; riscos-rolpkg's install-packman-packages then
+  replaces it, so the next images are right without a change here.
+- **riscos-rom 5.31-24** (ROL-ROM nightly-merge 2e219ea98): new dynamic
+  areas at the lowest free address, as on native RISC OS, not where Linux
+  chooses. `ROL-Testbed/MemCompare2` (a BASIC test of reads in and past
+  dynamic areas) gives the same result on it as on native RISC OS 5.31 on
+  the owner's Pi 4.
+
+### The Pinebook Pro: its touchpad, and its Wi-Fi dropping (9 Nov 2026; riscos-support 1.0.0038-1)
+
+Raik's report on 1.0.0020 on a Pinebook Pro: the touchpad is "a bit
+special", and the Wi-Fi connects for a second, drops, and does it again.
+- **rol-fb: touchpads move the pointer like a mouse.** A touchpad reports
+  where the finger is on the pad (ABS_X/Y), as a tablet does, so rol-fb
+  put the pointer at that place on the screen: it jumped wherever the
+  finger landed, and tapping did nothing. A touchpad (a device with
+  BTN_TOOL_FINGER that isn't a touchscreen or a pen tablet) now moves the
+  pointer by how far the finger moves, as relative moves RISC OS scales by
+  its mouse speed (about 8 counts a millimetre, up to 3 times that when
+  fast). Two fingers scroll (a wheel notch every 4 mm, both ways). A quick
+  touch (under 0.2 s, under 2 mm) is a click: one finger Select, two
+  Menu, three Adjust; not within 0.3 s of a key (a palm while typing).
+  Pressing the pad (a clickpad's button) is Select, with two fingers on
+  it Menu, three Adjust. Tablets (UTM, QEMU) and touchscreens are as
+  before. The log names a touchpad ("input event3: ... (touchpad)").
+  Checked with a test harness feeding rol-fb a touchpad's events (moves,
+  taps with 1 and 2 fingers, two-finger scroll, clicks), and under QEMU
+  that a tablet still places the pointer; not yet on a Pinebook Pro.
+- **rol-netd: Wi-Fi power saving off** (wpa_supplicant's `SET ps 0`, each
+  time the link comes up). The Pinebook Pro's Broadcom Wi-Fi (AP6256,
+  brcmfmac) is known to drop its connection with power saving on.
+  `wifi_powersave=on` in /riscos/net/config keeps it on. Not checked on a
+  Pinebook Pro yet (QEMU has no Wi-Fi).
+- **The network's log.** rol-netd writes what happens (links up and down,
+  addresses, wpa_supplicant starting and stopping, power saving) to
+  /riscos/net/log.txt, and wpa_supplicant's own log (with times now, -t,
+  so disconnections and their reasons show) stays in
+  /run/wpa_supplicant.log. init copies both to the FAT partition's LOGS
+  (network-log.txt, wifi-log.txt) with the others. Checked under QEMU: the
+  wired network's lines reach LOGS/network-log.txt.
+
+### NativeSupport 0.45: the audit's five open points (10 Nov 2026; release candidate)
+
+- **NativeSupport$Leave**: module titles (comma-separated, read as each
+  module is loaded) left unpatched, in the kernel's synchronisation of
+  the module and at Service_ModulePreInit. The patching can't tell an
+  instruction from data with the same bits (a debugger's, assembler's or
+  emulator's instruction tables); this is the way out for such a module.
+  *NativeSupport shows "Modules left unpatched".
+- **An instruction that can't be done is shown as itself.** When both
+  emulations fail for a site (MRS/MSR SPSR in user mode, a fault), the
+  original word is put back before RISC OS gets the undefined
+  instruction, so its handler, the error and a debugger see the
+  instruction, not &E7Fxxxxx (Ralph Barrett's !ArmDebug32 report). It is
+  made the site again by the first SWI 10 seconds later, if the word is
+  still there (ns_fixups_run, from the SWI vector; Linux's clock).
+- **SWI stubs: the SWI word and the branch back are outside the pages
+  where the ROM holds interrupts back.** The area is 20 pages: the
+  hook's, seven data/code pairs (held), then 8 bytes a stub {SWI, B site
+  + 4}. A stub is now str lr; bl common; the return address. An
+  interrupt arriving at the branch back used to stay pending, with
+  Linux's signals blocked, until the program's next SWI.
+- **Patched words written to a file: from a corrected copy.** OS_GBPB
+  1/2 and OS_File 0/10 of any memory but the ROM: the data is scanned
+  (through probe_call: no OS_GetEnv, no SWI at all unless something is
+  found); if it has words of ours the write is made from a copy in the
+  RMA with the originals. Memory is never changed (it was, for the
+  write, and copies for good). Ours: a UDF at its site's address; a copy
+  of one with the same words either side as the site has (not data that
+  happens to match: any matching word of a live site used to be changed
+  in the program's buffer); outside application space, the branch to
+  that address's MRS stub and a never-run NOP (now recorded). OS_GBPB's
+  r2-r4 and C come back as the kernel's; a plain (not X) SWI's error is
+  raised (the SWI goes on as OS_GenerateError) instead of coming back
+  as V set.
+- **Test commands gone**: SWIStubs Count, NoCond, Fresh, Fix, NoFix.
+Checked under QEMU: the desktop; BASIC's GenData right with the stubs
+made during it; FrontEnd saved from the RMA has no UDF (2 in memory, 4
+words put back); BASIC "MRS R0, SPSR" in user mode: the error, then
+&E14F0000 in memory; Tinct left by NativeSupport$Leave; ROBench os.swi,
+os.readvar, io.bput the same as 0.44 within the spread.
+(Found on the way: the first version read the time with a SWI from the
+SWI vector and looped; Linux's clock instead.)
+
+### NativeSupport 0.44: from a read-through of the whole module (10 Nov 2026; test version)
+
+- **Modules patched as they start reach the instruction cache.**
+  Service_ModulePreInit's patches (the never-run NOPs, any site the
+  kernel's own synchronisation hadn't shown, the ARMEABISupport 1.05
+  fix) were written with no cache flush after them; now flushed.
+- **OS_Memory 0's "physical" numbers for application space**: the 256th
+  different file mapped there got number 0 (its 8 bits overflowed) and
+  later ones the first's; now 255 at most, the oldest used again.
+Read and left as they are (see the project's audit note): the interrupt
+held back at a stub's last word until the next SWI (one instruction;
+needs the stubs' return words outside the held area), data in modules
+that looks like privileged instructions being patched (debuggers' and
+assemblers' tables), patched words in a module saved to a file, the
+write's C flag in write_unpatched, one squeezed program pending at a
+time, the test commands (Count, NoCond, Fresh, NoFix) to come out before
+release.
+
+### NativeSupport 0.43: sites used again; stubs made only on a SWI from USR mode (10 Nov 2026; test version)
+
+From reading the rest of the module after the lost BPUT# lines:
+- **The site table filled up in ROM builds.** A program run again got new
+  sites for the same instructions at the same addresses: the owner's
+  reports show about 930 new sites in each short build and 4,000 in a
+  full one, 11,183 of the 16,384 after StubTest41's twelve rounds. Full,
+  later programs' privileged instructions were left unpatched (their
+  mode changes then do nothing) until a restart. site_add now finds the
+  site made before for the same address, word and kind (a hash table)
+  and uses it again. *NativeSupport shows "Sites in use (of 16384)" and
+  "Sites used again".
+- **SWI stubs are made only on a SWI from USR mode** (ns_swi_vector's
+  drain): then no other SWI can be on its way to the kernel with its
+  site unread (ns_swi_c's own SWIs, an interrupt's and other modules'
+  on the vector are all from privileged modes), so the 0.42 case can't
+  arise. The 0.42 check stays as a second line.
+- **The 0.42 check is exact**: the stub's last word must branch back to
+  this SWI's return address, and the caller mustn't be Thumb code
+  (whose halfwords could look like a branch; an empty stub slot's &FF
+  words passed the old "is a SWI" test).
+Checked under QEMU: stubs made from nothing (Fresh) with the 0.42 check
+off and on, BASIC's GenData right both times (the USR-mode rule alone
+stops the loss); ROBench run three times, 118 sites in use throughout, 80
+used again.
+Not changed, noted: write_unpatched doesn't pass back the write's C
+flag; patched words in a module (RMA) saved to a file by a program stay
+patched (only application space is put back).
+
+### NativeSupport 0.42: the real cause of the lost BPUT# lines (10 Nov 2026; test version)
+
+StubTest41 (twelve builds, SWIStubs Fresh each time, 0.41's check on and
+off in turn) lost line 16 in every round, check on or off, and the check
+caught nothing: not an interrupt, and not chance. Reproduced under QEMU
+(robench first, so application space has patched code; then Fresh and
+BASIC's GenData): the 16th BPUT# lost, every time.
+
+The cause: on the 16th call BASIC's SWINE OS_GBPB is queued for a stub.
+ns_swi_vector sends every OS_GBPB and OS_File to ns_swi_c, which (once
+any application-space site exists) runs unpatch_copies over the data being
+written, and that calls SWIs of its own (OS_GetEnv). Their ns_swi_vector
+drains the queue, and ns_swiq_drain skips only *their* site, so the site of
+the OS_GBPB on its way is given its stub. ns_swi_c returns, the kernel
+reads the word before lr - now the branch to the stub - as the SWI number
+(an X SWI that doesn't exist), and the write fails without a word. 0.41's
+check ran only on the way into ns_swi_vector, before ns_swi_c.
+
+- swis_fixlr (a macro): the 0.41 check, now made on the way in and again
+  just before each jump to the kernel (after ns_swi_c, and on the plain
+  path), so lr is moved to the stub's last word whenever the site was
+  patched while its SWI was on its way, whoever patched it.
+Checked under QEMU: Fresh + NoFix lost line 16; Fresh + Fix wrote all of
+s.VFPData, the fix counted 1. StubTest42: six builds, Fix and NoFix.
+
+### rol-snd: HDMI only when the screen lists sound formats (9 Nov 2026; for the next riscos-support)
+
+Ralph Barrett on the forum (Pi 4, an HDMI monitor without speakers): no
+sound from the headphone socket either. rol-snd chose HDMI whenever the
+port's ELD said monitor_present 1, which a monitor without speakers also
+reports; it now needs sad_count above 0 too (the screen lists at least
+one sound format), otherwise the headphone socket comes first. Not yet
+built or tried on a Pi. The way round meanwhile: device=Headphones in
+/riscos/sound/config (IXFS:$.riscos.sound.config), then restart.
+
+### NativeSupport 0.41: a SWI is no longer lost when its site gets a stub on the way (9 Nov 2026; test version)
+
+StubTest40 (twelve builds, On and NoCond in turn) went wrong only in
+round 1, the first build after a restart: s.VFPData lost line 16, the
+16th BPUT#, the call on which BASIC's SWINE OS_GBPB (BASIC+&8E00) is
+found busy and queued. 0.39's lost line 606 was the call that made 4096
+(3490 in the round before + 606), when a site is queued again. The call
+lost is always the one in flight as its own site is patched.
+
+The cause: a trapped SWI goes through the ROM's SWI_handler (Linux's
+SIGSYS, the vcpu still in the caller's mode with interrupts on) before
+the kernel reads the SWI from the word before the return address. An
+interrupt there runs RISC OS's handlers, and their SWIs drain the queue
+(ns_swiq_drain skips only the site of the SWI doing the draining), so
+the site of the SWI on its way can be patched before the kernel reads
+it. The kernel then reads the branch to the stub as the SWI: for
+&1A0A2033 that's SWI &0A2033, an X SWI that doesn't exist, so it failed
+silently and the line wasn't written. Under QEMU the interrupt never
+lands there.
+
+- ns_swi_vector (before the kernel) checks the word before lr: a B or BL
+  into the stub area whose stub holds a SWI means this case, and lr is
+  set to the stub's last word, so the kernel reads the real SWI there
+  and the SWI returns through the stub's branch to the site + 4.
+  Counted: "Sites patched while their SWI was on its way, sent through
+  the stub".
+- For testing: *NativeSupport SWIStubs Fresh (every site back, counts
+  from 0, on: stubs made again as programs run, as after start-up),
+  SWIStubs NoFix and Fix (the check off and on). StubTest41: twelve
+  builds, Fresh with Fix and NoFix in turn.
+
+Checked under QEMU: stubs on with the check, Fresh remakes them, ROBench's
+SWI tests.
+
+### NativeSupport 0.40: *NativeSupport SWIStubs NoCond (9 Nov 2026; a test version, not in a package)
+
+StubTest with 0.39 (the owner's ROM build six times: stubs Count, On,
+Off, On, Count, Off) went wrong in round 2 (On): s.VFPData was 37 bytes
+short, one BPUT# line ("VFP_BitFieldArgs VFP_Op_Vn, &10, 3") never
+written. Count and Off were right, and no stub calls overlapped. BASIC
+writes each BPUT# line with a conditional SWI (SUBS r3, ...; SWINE
+OS_GBPB at BASIC+&8E00), given a stub as BNE stub. NoCond gives stubs
+only to SWIs with the AL condition (conditional ones trap as before;
+counted as "Conditional SWI sites left to trap"), to see whether the
+conditional ones are the cause. Checked under QEMU: 322 sites given
+stubs, 56 conditional ones left. StubTest40: twelve builds, On and NoCond
+in turn.
+
+### NativeSupport 0.39: SWI stub diagnostics (9 Nov 2026; a test version, not in a package)
+
+The owner's ROM builds (5.31-21, -22) with SWI stubs on lost one line of
+BASIC's s.VFPData (one BPUT#: "VFP_Op_cc EQU 2"), so the ROM had no
+VFPData, and the task window's text turned blue partway through; with
+*NativeSupport SWIStubs Off the same build is right. GenData run by
+itself (Pi and QEMU, 2 MB and 33 MB slots, stubs on and off) is always
+right. 0.39 adds two things to find which part does it:
+- **Overlapping stub calls counted.** Each page pair's working words
+  (the caller's lr, r0-r3, the return, the vector) are shared by its
+  stubs; the common code now counts calls in progress (busy) and calls
+  that start while another is (overlaps), without touching the caller's
+  flags. *NativeSupport shows "Stub calls overlapping another (should be
+  0)". The common code is 40 bytes longer, so stubs start at +&C0 (240 a
+  page, was 244), and the working words are the data page's last 40 bytes.
+- ***NativeSupport SWIStubs Count**: the fast SWI entry's counting hook
+  runs (sites counted and queued) but no site gets a stub, to tell the
+  hook's part from the stubs'.
+Checked under QEMU: 319 ROM sites given stubs, ROBench's os tests, 0
+overlaps. StubTest (the owner's ROLSrc: the ROM build six times, stubs
+Count, On, Off, On, Count, Off, each BuildLog kept, then AutoBench) is
+the test.
+
+### NativeSupport 0.38: no abort copying files (9 Nov 2026; not yet in a package)
+
+The owner copied a directory from LanMan98 to HardDisc4 with the Filer:
+"Internal error, no stack for trap handler: Internal error: abort on data
+transfer at &24925840" (NativeSupport+&7CAC). As a file is written,
+NativeSupport looks in the data for its UDFs (patched instructions copied
+as data, put back as written: unpatch_copies), and for each one checks the
+word at the site it stands for. A site in application space can belong to
+another program, run before with a bigger slot: its address can be past the
+end of the program writing now (Filer_Action), and not mapped. The copy's
+data held a word that looked like one of those UDFs, so reading the site
+aborted. Now a site past the current program's end (OS_GetEnv) is skipped.
+An old bug (since 0.23), not from 0.34-0.37.
+
+### NativeSupport 0.37: UnixLib's _swix no longer traps; more never-run instructions (9 Nov 2026; not yet in a package)
+
+From the owner's AutoBench run on a Pi 4 (5.31-20, 0.36, six ROBench runs):
+- **_swix's MRS.** One site in ROBench's application space trapped 7.6
+  million times a run: UnixLib's _swix, after its SWI, reads the flags the
+  way that works on 26- and 32-bit processors: "mov ip, #0; mrs ip, CPSR;
+  teq ip, #0; ...; andne ip, ip, #&F0000000". NativeSupport patches every
+  MRS CPSR in application space to a UDF (so code in a privileged mode
+  reads RISC OS's mode, not Linux's), a signal at each _swix. Only the
+  flags are kept there, and the processor's own flags are right in any
+  mode, so that pattern (MOV Rd, #0 before, TEQ Rd, #0 after, AND Rd, Rd,
+  #&F0000000 within 6) is now left to run. *NativeSupport counts them.
+  Under QEMU: ROBench os.readvar (OS_ReadVarVal through _swix) 28,000 a
+  second with 0.36, 155,000 with 0.37.
+- **More never-run instructions.** The never-run traps fell from 5 million
+  to 980,000 with 0.36; almost all those left (ARMEABISupport's, 980,028,
+  and IXSupport's, 267) are "teq pc, pc; ldmne sp!, {...}; orrnes pc, lr,
+  #V_bit": the privileged one is the second NE instruction after the TEQ.
+  Now up to two NE instructions that leave the flags and pc alone may come
+  between (in the ROM, 103 places instead of 39).
+Checked natively under QEMU (5.31-20): 109 made NOPs at start-up, the
+HardDisc4 apps start, Iris loads a page over HTTP with its JavaScript,
+CSS and images, no faults.
+
+### NativeSupport 0.36: only in 32-bit code (9 Nov 2026; not yet in a package)
+
+0.35 changed the never-run instruction in any module, and in any code
+synchronised outside application space. A 26-bit module (Aemulor runs them,
+emulating a 26-bit processor, where TEQ pc, pc leaves Z clear and the
+LDMNE ^ is the way out) or code made at run time (Aemulor's, a JIT's)
+could have been changed too. Now only in the ROM and in modules whose
+flags word says they're 32-bit; one that traps all the same is changed
+only in the ROM. Checked natively under QEMU: still 44 (the RMA's modules
+are all 32-bit), the desktop runs. 0.35 went only into the ROMTest20 kit.
+
+### NativeSupport 0.35: no more traps from a never-run instruction (9 Nov 2026; not yet in a package)
+
+The owner's Pi 4 report on 5.31-20 (35 minutes' use): 5 million traps
+(about 2,400 a second, each a signal costing about 5 us) on instructions
+whose condition failed, all at "TEQ pc, pc; LDMNE sp!, {..., pc}^" in the
+SWI and service exits of IXSupport (862,000), BufferManager (726,000) and
+the Toolbox modules (Window, Menu, Iconbar, DCS: 600,000 each). The test
+tells 26-bit from 32-bit: on a 32-bit processor TEQ pc, pc always sets Z,
+so the LDMNE never runs, but the Pi's Cortex-A72 (like the A78C and X1C)
+raises "undefined instruction" for it anyway, and NativeSupport skipped it
+each time. A privileged instruction with condition NE straight after TEQ
+pc, pc is now made a NOP (MOV r0, r0), so it never traps: in the ROM as
+NativeSupport starts, in modules as their code is patched (at start and as
+they're loaded), and any that still traps the first time it does. Only
+outside application space, as with the other stubs. *NativeSupport counts
+them; NativeSupport$NoCondNOP set before it loads leaves them as they were.
+Checked natively under QEMU (which doesn't trap them, so the count of traps
+can only be seen on a Pi): 44 made NOPs (39 in the ROM, 5 in RMA modules),
+IXSupport's, BufferManager's and Window's read back as &E1A00000, the
+desktop and the SWI benchmark run as before.
+
+### NativeSupport 0.34: SWIs without a trap (9 Nov 2026; needs RISC OS 5.31-20 or later, not yet in a package)
+
+The busiest SWIs in the ROM are made without a trap to Linux, a second go
+at 5.31-6's fast SWI (that one pushed registers on the caller's stack,
+which broke code with no room on it). With a ROM that has PVirt_SWIStubs
+(5.31-20 onwards), NativeSupport finds 64 KB of the ROM's unused fill (all
+&FF) within branch reach of all the ROM's code and puts its stubs there.
+The fast SWI entry's handler counts the SWIs trapped at each ROM site;
+after 16, the site's SWI is replaced by a branch to a stub of its own,
+which switches to SVC mode the way the HAL does and enters the SWI handler
+with the return address after the site. OS_WriteS, OS_EnterOS and
+OS_BreakPt are left alone (they read or change what follows the SWI or the
+mode). NativeSupport's FileSwitch checks see a stub's return address as
+its site's. *NativeSupport SWIStubs On|Off; NativeSupport$NoSWIStubs set
+before loading leaves it off; *NativeSupport lists the counts and the
+sites still trapping most.
+- Each stub's working words are in a page of their own next to its code:
+  QEMU throws away a page's translated code at every write to it, which at
+  first made a SWI three times as slow there.
+- *NativeSupport SWIStubs On puts the stubs made before back at once.
+Checked natively under QEMU on the 1.0.0020 image with 5.31-19 patched to
+have PVirt_SWIStubs: 320 sites given stubs, the desktop runs; BASIC, 3 runs
+each, stubs on against off: SYS OS_ReadMonotonicTime 26.1 against 31.1 µs,
+SYS ColourTrans_SetGCOL 33.8 against 49.3 µs (QEMU makes a trap cheap, so
+a Pi should gain more).
+
 ## 1.0 (2026-10-21 to 2026-11-08; images 1.0.0020, the first public release)
 
 ### 8 Nov 2026: images 1.0.0020

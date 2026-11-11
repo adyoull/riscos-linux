@@ -92,8 +92,14 @@ card_score (int num, const char *id, const char *name)
 	    if (!strncmp (e->d_name, "eld#", 4))
 	      {
 		snprintf (p, sizeof p, "/proc/asound/card%d/%s", num, e->d_name);
+		/* a screen there that lists sound formats (sad_count above 0:
+		   a monitor without speakers has an ELD too, with none) */
 		if (read_file (p, buf, sizeof buf) > 0 && strstr (buf, "monitor_present\t\t1"))
-		  present = 1;
+		  {
+		    char *sc = strstr (buf, "sad_count");
+		    if (!sc || atoi (sc + strcspn (sc, "0123456789")) > 0)
+		      present = 1;
+		  }
 	      }
 	  closedir (d);
 	  return present ? 300 : 50;

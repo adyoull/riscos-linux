@@ -19,6 +19,17 @@
    so no password. Protected RISC OS's *IXRun is an alias for it (TestBed
    start-up): RISC OS's own view of the files has no Linux programs.
 
+   Interactive (0.04). Both commands ask rol-cmd for a terminal job (the
+   request's first line "@tty COLUMNS ROWS"): the command runs on a Linux
+   terminal, what is typed here is appended to NAME.in for rol-cmd to type
+   into it, and Linux does the echoing and line editing. So programs that
+   ask questions or read passwords work, Ctrl-C and Ctrl-D reach them, and
+   with no command at all the job is a shell (*Linux: root's, after the
+   password; *LinuxUser and *IXRun: RISC OS's own user's). Escape sends
+   Ctrl-C; twice within a second and a half stops the job as before.
+   The terminal is a plain one (TERM=dumb): escape sequences are dropped,
+   so full-screen programs (editors, top) don't work yet.
+
    Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 #include "cmodule.h"
 #include "../LinuxCodec/rolsys.h"
@@ -32,6 +43,8 @@
 #define O_WRONLY	1
 #define O_CREAT		0100
 #define O_TRUNC		01000
+#define O_APPEND	02000
+#define OS_ReadVduVariables	0x31
 #define OS_ReadMonotonicTime	0x42
 #define OS_UpCall	0x33
 #define OS_Byte		0x06
@@ -106,24 +119,179 @@ nap (void)
   lsys (NR_nanosleep, (unsigned) ts, 0, 0, 0, 0, 0);
 }
 
+/* What the Linux terminal shows, on RISC OS's screen. Only what a plain
+   terminal needs gets through: RISC OS's VDU driver would take other
+   control codes as its own commands (17 is "set the text colour"). Escape
+   sequences are dropped whole, tabs become spaces, and UTF-8 becomes
+   Latin-1 where it can. Linux rubs a character out with "backspace,
+   space, backspace"; that becomes RISC OS's one code for it, 127, which
+   a task window acts on too (it ignores a bare backspace). */
+static struct { int col, esc, need, bs, cr; unsigned cp; } term;
+
+static void
+vdu (unsigned c)
+{
+  regs r = {{ c }};
+  swix_regs (OS_WriteC_, &r);
+}
+
 static void
 put (const unsigned char *s, int n)
 {
   for (int i = 0; i < n; i++)
     {
       unsigned c = s[i];
-      regs r = {{ c }};
-      if (c == '\n')
+      /* term.bs: 1 after a backspace, 2 after "backspace, space" */
+      if (term.bs == 1 && c == ' ')
 	{
-	  regs a = {{ 10 }}, b = {{ 13 }};
-	  swix_regs (OS_WriteC_, &a);
-	  swix_regs (OS_WriteC_, &b);
+	  term.bs = 2;
+	  continue;
 	}
-      else if (c == 27)
-	continue;		/* (no escape sequences: TERM=dumb asks for none) */
-      else
-	swix_regs (OS_WriteC_, &r);
+      if (term.bs == 2 && c == 8)
+	{
+	  vdu (127);
+	  term.col--;
+	  term.bs = 0;
+	  continue;
+	}
+      if (term.bs)
+	{
+	  /* (not a rub-out after all: what was held back, as it came) */
+	  vdu (8);
+	  if (term.bs == 2)
+	    vdu (' ');
+	  else
+	    term.col--;
+	  term.bs = 0;
+	}
+      /* A carriage return alone means "write over this line" (progress
+	 displays): a task window can't, so the line is rubbed out. */
+      if (term.cr)
+	{
+	  term.cr = 0;
+	  if (c == '\r')
+	    {
+	      term.cr = 1;
+	      continue;
+	    }
+	  if (c != '\n')
+	    while (term.col > 0)
+	      {
+		vdu (127);
+		term.col--;
+	      }
+	}
+      if (term.esc)
+	{
+	  /* 1: after ESC; 2: in "ESC [ ..." until its final byte; 3: in
+	     "ESC ] ..." until BEL (or the next ESC) */
+	  if (term.esc == 1)
+	    term.esc = c == '[' ? 2 : c == ']' ? 3 : 0;
+	  else if (term.esc == 2)
+	    {
+	      if (c >= 0x40 && c <= 0x7E)
+		term.esc = 0;
+	    }
+	  else if (c == 7)
+	    term.esc = 0;
+	  else if (c == 27)
+	    term.esc = 1;
+	  continue;
+	}
+      if (term.need)
+	{
+	  if ((c & 0xC0) == 0x80)
+	    {
+	      term.cp = (term.cp << 6) | (c & 0x3F);
+	      if (--term.need == 0)
+		{
+		  vdu (term.cp >= 0xA0 && term.cp <= 0xFF ? term.cp : '?');
+		  term.col++;
+		}
+	      continue;
+	    }
+	  term.need = 0;	/* (not UTF-8 after all: this byte as itself) */
+	}
+      if (c == 27)
+	term.esc = 1;
+      else if (c == '\n')
+	{
+	  vdu (10);
+	  vdu (13);
+	  term.col = 0;
+	}
+      else if (c == '\r')
+	term.cr = 1;
+      else if (c == 8)
+	{
+	  if (term.col)
+	    term.bs = 1;
+	}
+      else if (c == 7)
+	vdu (7);
+      else if (c == 9)
+	do
+	  {
+	    vdu (' ');
+	    term.col++;
+	  }
+	while (term.col & 7);
+      else if (c >= 32 && c < 127)
+	{
+	  vdu (c);
+	  term.col++;
+	}
+      else if (c >= 0xC2 && c <= 0xDF)
+	term.need = 1, term.cp = c & 0x1F;
+      else if (c >= 0xE0 && c <= 0xEF)
+	term.need = 2, term.cp = c & 0x0F;
+      else if (c >= 0xF0 && c <= 0xF4)
+	term.need = 3, term.cp = c & 0x07;
+      /* (other control codes, and stray bytes: dropped) */
     }
+}
+
+/* What is typed, for the Linux terminal: every key waiting, appended to
+   the job's input file. Return is CR, Delete and Backspace are DEL (the
+   terminal's erase), the cursor keys are their usual escape sequences
+   (the shell's history and line editing), Latin-1 goes as UTF-8. */
+static void
+type_keys (const char *in)
+{
+  unsigned char b[128];
+  int n = 0;
+  while (n < (int) sizeof b - 4)
+    {
+      regs r = {{ 129, 0, 0 }};
+      swix_regs (OS_Byte, &r);
+      if (r.r[2] != 0)
+	break;			/* (none waiting, or Escape: the caller's) */
+      unsigned c = r.r[1] & 0xFF;
+      if (c == 13)
+	b[n++] = '\r';
+      else if (c == 8 || c == 127)
+	b[n++] = 127;
+      else if (c >= 136 && c <= 139)
+	{
+	  b[n++] = 27;
+	  b[n++] = '[';
+	  b[n++] = "DCBA"[c - 136];	/* left, right, down, up */
+	}
+      else if (c < 128)
+	b[n++] = (unsigned char) c;
+      else if (c >= 0xA0)
+	{
+	  b[n++] = (unsigned char) (0xC0 | (c >> 6));
+	  b[n++] = (unsigned char) (0x80 | (c & 0x3F));
+	}
+    }
+  if (!n)
+    return;
+  int f = lsys (NR_open, (unsigned) in, O_WRONLY | O_CREAT | O_APPEND, 0644, 0, 0, 0);
+  if (f < 0)
+    return;
+  lsys (NR_write, (unsigned) f, (unsigned) b, (unsigned) n, 0, 0, 0);
+  lclose (f);
 }
 
 /* prints what's new in the output file from *pos on; 0 if none */
@@ -209,16 +377,42 @@ add (char *d, int *n, int max, const char *s)
   d[*n] = 0;
 }
 
+static int use_tty;		/* this command wants a terminal job */
+
 /* hands rol-cmd header + cmd and prints the output; *code = its rc */
 static oserror *
 run_job (const char *header, const char *cmd, int *code)
 {
   char body[1400];
   int n = 0;
+  if (use_tty)
+    {
+      /* the terminal's size: the text screen's */
+      int in[3] = { 256, 257, -1 }, sz[3] = { 79, 24, 0 };
+      regs v = {{ (unsigned) in, (unsigned) sz }};
+      char num[12];
+      swix_regs (OS_ReadVduVariables, &v);
+      add (body, &n, sizeof body, "@tty ");
+      for (int k = 0; k < 2; k++)
+	{
+	  unsigned x = (unsigned) sz[k] + 1;
+	  int d = 0;
+	  char t[12];
+	  do
+	    t[d++] = (char) ('0' + x % 10);
+	  while ((x /= 10) && d < 10);
+	  int m = 0;
+	  while (d)
+	    num[m++] = t[--d];
+	  num[m] = 0;
+	  add (body, &n, sizeof body, num);
+	  add (body, &n, sizeof body, k ? "\n" : " ");
+	}
+    }
   add (body, &n, sizeof body, header);
   add (body, &n, sizeof body, cmd);
 
-  char name[24] = "j", h[12], tmp[64], req[64], out[64], rc[64], kill[64], tok[64];
+  char name[24] = "j", h[12], tmp[64], req[64], out[64], rc[64], kill[64], tok[64], in[64];
   hex (h, now_cs ());
   cat (name + 1, h, "", "");
   hex (h, ++counter);
@@ -229,6 +423,7 @@ run_job (const char *header, const char *cmd, int *code)
   cat (rc, DIR, name, ".rc");
   cat (kill, DIR, name, ".kill");
   cat (tok, DIR, name, ".tok");
+  cat (in, DIR, name, ".in");
 
   int f = lsys (NR_open, (unsigned) tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600, 0, 0, 0);
   if (f < 0)
@@ -238,31 +433,69 @@ run_job (const char *header, const char *cmd, int *code)
   memset (body, 0, sizeof body);
   lsys (NR_rename, (unsigned) tmp, (unsigned) req, 0, 0, 0, 0);
 
-  unsigned pos = 0, t0 = now_cs ();
-  int escaped = 0;
+  unsigned pos = 0, t0 = now_cs (), last_esc = 0;
+  int escaped = 0, had_esc = 0, cursor = -1;
+  memset (&term, 0, sizeof term);
+  if (use_tty)
+    {
+      /* the cursor keys as keys (codes 136 to 139), not cursor editing */
+      regs a = {{ 4, 1, 0 }};
+      swix_regs (OS_Byte, &a);
+      cursor = (int) (a.r[1] & 0xFF);
+    }
   for (;;)
     {
       drain (out, &pos);
       if ((*code = read_rc (rc)) >= 0)
 	break;
+      if (use_tty && !escaped)
+	type_keys (in);
       if (!escaped && escape_state ())
 	{
 	  regs a = {{ 126 }};
 	  swix_regs (OS_Byte, &a);	/* acknowledge it */
-	  int k = lsys (NR_open, (unsigned) kill, O_WRONLY | O_CREAT | O_TRUNC, 0644, 0, 0, 0);
-	  if (k >= 0)
-	    lclose (k);
-	  escaped = 1;
+	  /* on a terminal Escape is Ctrl-C, the program's to act on; a
+	     second one within a second and a half stops the job */
+	  if (use_tty && !(had_esc && now_cs () - last_esc < 150))
+	    {
+	      int k = lsys (NR_open, (unsigned) in, O_WRONLY | O_CREAT | O_APPEND, 0644, 0, 0, 0);
+	      if (k >= 0)
+		{
+		  lsys (NR_write, (unsigned) k, (unsigned) "\003", 1, 0, 0, 0);
+		  lclose (k);
+		}
+	      had_esc = 1;
+	      last_esc = now_cs ();
+	    }
+	  else
+	    {
+	      int k = lsys (NR_open, (unsigned) kill, O_WRONLY | O_CREAT | O_TRUNC, 0644, 0, 0, 0);
+	      if (k >= 0)
+		lclose (k);
+	      escaped = 1;
+	    }
 	}
       /* nobody took it in 5 seconds: no rol-cmd */
       if (pos == 0 && now_cs () - t0 > 500 && lsys (NR_access, (unsigned) req, 0, 0, 0, 0, 0) == 0)
 	{
 	  lsys (NR_unlink, (unsigned) req, 0, 0, 0, 0, 0);
+	  lsys (NR_unlink, (unsigned) in, 0, 0, 0, 0, 0);
+	  if (cursor >= 0)
+	    {
+	      regs a = {{ 4, (unsigned) cursor, 0 }};
+	      swix_regs (OS_Byte, &a);
+	    }
 	  return ERR (no_daemon);
 	}
       nap ();
     }
   drain (out, &pos);
+  if (cursor >= 0)
+    {
+      regs a = {{ 4, (unsigned) cursor, 0 }};
+      swix_regs (OS_Byte, &a);
+    }
+  lsys (NR_unlink, (unsigned) in, 0, 0, 0, 0, 0);
   /* a token for next time? */
   f = lsys (NR_open, (unsigned) tok, 0, 0, 0, 0, 0);
   if (f >= 0)
@@ -374,6 +607,7 @@ mod_command (int index, const char *tail, int argc)
     return ERR (no_linux);
   int code;
   oserror *e;
+  use_tty = index != 1;
   if (index == 1)
     {
       /* *LinuxPassword: the current password (rol-cmd asks), then the new */
@@ -409,7 +643,8 @@ mod_command (int index, const char *tail, int argc)
     e = authorised (cmd, "", &code);
   if (e)
     return e;
-  if (code != 0)
+  /* (a shell's exit status is its last command's: nothing to report) */
+  if (code != 0 && n > 1)
     {
       write0 ("(exit status ");
       write_dec ((unsigned) code);

@@ -59,11 +59,11 @@ cat > "$BOOT/config.txt" <<'CFG'
 # start EFI/BOOT/BOOTAA64.EFI instead.)
 arm_64bit=1
 kernel=kernel8.img
+dtparam=audio=on
 dtoverlay=vc4-kms-v3d
 max_framebuffers=2
 disable_overscan=1
 disable_splash=1
-dtparam=audio=on
 [pi4]
 arm_boost=1
 [all]

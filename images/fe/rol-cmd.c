@@ -13,6 +13,29 @@
  *   NAME.kill  RISC OS asks for the command to be stopped (Escape)
  * (RISC OS may add a filetype suffix such as ",ffd" to any of its files.)
  *   NAME.tok   (after a password) a session token for the next commands
+ *   NAME.in    (terminal jobs, below) what the user types, appended to
+ *
+ * A terminal job. A request whose first line is "@tty COLUMNS ROWS" gets a
+ * terminal (a pty) of that size instead of no input and a plain file:
+ * programs that ask questions, read passwords or edit a line work, and
+ * Ctrl-C reaches them. What RISC OS appends to NAME.in is typed into the
+ * terminal; what the terminal shows is appended to NAME.out. With no
+ * command, the job is an interactive shell (bash, else sh). Who runs it
+ * is as for any other request: root after the password, or RISC OS's own
+ * user with "@user" (the "@tty" line comes before those). Requests
+ * without "@tty" are run exactly as before (!Updates reads apt's output
+ * as a file's). NAME.in is only read if it is a plain file of RISC OS's
+ * own user (never through a link).
+ *
+ * For a terminal program (RiSH), three more things. "@tty COLUMNS ROWS
+ * NAME" sets TERM to NAME (letters, digits, - and + only; without it TERM
+ * is "dumb", as LinuxShell wants). NAME.size, holding "COLUMNS ROWS",
+ * changes the terminal's size (the program on it is told, SIGWINCH).
+ * NAME.trim, holding a decimal count, says RISC OS has read that much of
+ * NAME.out: the disc space under it is given back (the file keeps its
+ * length, so the places RISC OS reads from don't move), so that a session
+ * left open for days doesn't fill the disc. Both are only obeyed as plain
+ * files of RISC OS's own user, for terminal jobs, and are removed.
  *
  * The root password. Commands run as root, so each needs root's
  * password, or a token from one given in the last 5 minutes. The request
@@ -58,6 +81,8 @@
 #include <unistd.h>
 #include <grp.h>
 #include <sys/prctl.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 
 #define DIR_PATH "/riscos/cmd"
 #define TOKEN_IDLE 300		/* seconds a token lasts unused */
@@ -67,9 +92,11 @@
 #define RC_WAIT 79
 #define RO_UID 1000		/* RISC OS's own Linux user (init: protected RISC OS) */
 #define RO_GID 1000
-#define MAXJOBS 8
+#define MAXJOBS 16
 
-static struct job { pid_t pid; char name[64]; } jobs[MAXJOBS];
+/* master: a terminal job's pty (-1: none), out: its output file, inpos:
+   how much of NAME.in has been typed into it */
+static struct job { pid_t pid; char name[64]; int master, out; off_t inpos; } jobs[MAXJOBS];
 
 static void
 path (char *p, size_t n, const char *name, const char *ext)
@@ -337,6 +364,64 @@ authorise (char *req, char **rest, const char *name)
   return 0;
 }
 
+static char term_name[32];	/* "@tty"'s TERM, if it gave one */
+
+/* in the child, on its terminal: the command, or with none a shell */
+static void
+run_on_tty (const char *run)
+{
+  if (term_name[0])
+    {
+      /* a real terminal: programs may ask their questions on it */
+      setenv ("TERM", term_name, 1);
+      unsetenv ("DEBIAN_FRONTEND");
+      unsetenv ("APT_LISTCHANGES_FRONTEND");
+    }
+  if (*run)
+    execl ("/bin/sh", "sh", "-c", run, (char *) NULL);
+  else
+    {
+      if (access ("/bin/bash", X_OK) == 0)
+	execl ("/bin/bash", "bash", "-i", (char *) NULL);
+      execl ("/bin/sh", "sh", "-i", (char *) NULL);
+    }
+  _exit (127);
+}
+
+/* a terminal job's traffic: what its terminal shows goes on the end of
+   NAME.out, and what RISC OS has added to NAME.in is typed into it */
+static void
+pump (struct job *j)
+{
+  char buf[4096];
+  ssize_t n;
+  if (j->master < 0)
+    return;
+  while ((n = read (j->master, buf, sizeof buf)) > 0)
+    if (j->out >= 0)
+      {
+	ssize_t w = write (j->out, buf, (size_t) n);
+	(void) w;
+      }
+  char ip[160];
+  path (ip, sizeof ip, j->name, "in");
+  int f = open (ip, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  if (f < 0)
+    return;
+  struct stat st;
+  if (fstat (f, &st) == 0 && S_ISREG (st.st_mode) && st.st_uid == RO_UID && st.st_size > j->inpos)
+    {
+      n = pread (f, buf, sizeof buf, j->inpos);
+      if (n > 0)
+	{
+	  ssize_t w = write (j->master, buf, (size_t) n);
+	  if (w > 0)
+	    j->inpos += w;	/* (the rest next time, if the terminal was full) */
+	}
+    }
+  close (f);
+}
+
 static void
 start (const char *file, const char *name)
 {
@@ -360,26 +445,45 @@ start (const char *file, const char *name)
   if (n < 0)
     n = 0;
   cmd[n] = 0;
+  /* "@tty COLUMNS ROWS" first: a terminal job */
+  char *req = cmd;
+  int tty = 0;
+  unsigned cols = 80, rows = 25;
+  if (!strncmp (req, "@tty", 4) && (req[4] == ' ' || req[4] == '\n' || req[4] == '\r'))
+    {
+      tty = 1;
+      term_name[0] = 0;
+      sscanf (req + 4, "%u %u %31[A-Za-z0-9+-]", &cols, &rows, term_name);
+      if (cols < 20 || cols > 500)
+	cols = 80;
+      if (rows < 5 || rows > 300)
+	rows = 25;
+      char *nl = strchr (req, '\n');
+      req = nl ? nl + 1 : req + strlen (req);
+    }
   char *run;
   int arc, asuser = 0;
   /* "@info" alone: rol-info (installed RISC OS on Linux packages, updates
      apt last found), which tells nothing secret: no password needed */
   static char info[] = "/usr/lib/riscos/rol-info";
-  if (!strncmp (cmd, "@info", 5) && (cmd[5] == 0 || cmd[5] == '\n' || cmd[5] == '\r'))
+  if (!strncmp (req, "@info", 5) && (req[5] == 0 || req[5] == '\n' || req[5] == '\r'))
     run = info, arc = 0;
-  else if (!strncmp (cmd, "@user", 5) && (cmd[5] == '\n' || cmd[5] == '\r'))
+  else if (!strncmp (req, "@user", 5) && (req[5] == '\n' || req[5] == '\r'))
     {
       /* as RISC OS's own user: no password */
-      run = cmd + 6;
+      run = req + 6;
       while (*run == '\n' || *run == '\r')
 	run++;
       arc = 0, asuser = 1;
     }
   else
-    arc = authorise (cmd, &run, name);
+    arc = authorise (req, &run, name);
   if (run >= cmd && run < cmd + sizeof cmd)
     memset (cmd, 0, (size_t) (run - cmd));	/* (the password: gone) */
-  if (arc || !*run)
+  n = (ssize_t) strlen (run);
+  while (n > 0 && (run[n - 1] == '\n' || run[n - 1] == '\r'))
+    run[--n] = 0;
+  if (arc || (!*run && !tty))
     {
       char rcp[160], t[16];
       path (rcp, sizeof rcp, name, "rc");
@@ -387,25 +491,74 @@ start (const char *file, const char *name)
       write_file (rcp, t);
       return;
     }
-  n = (ssize_t) strlen (run);
-  while (n > 0 && (run[n - 1] == '\n' || run[n - 1] == '\r'))
-    run[--n] = 0;
   char op[160];
   path (op, sizeof op, name, "out");
+  /* a terminal job: the pty, and the output file this daemon fills from it */
+  int master = -1, tout = -1;
+  char slave[64] = "";
+  if (tty)
+    {
+      master = posix_openpt (O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK);
+      if (master < 0 || grantpt (master) || unlockpt (master) || ptsname_r (master, slave, sizeof slave))
+	{
+	  if (master >= 0)
+	    close (master);
+	  master = -1, tty = 0;	/* (no ptys: as a plain job) */
+	}
+      else
+	{
+	  struct winsize ws = { (unsigned short) rows, (unsigned short) cols, 0, 0 };
+	  ioctl (master, TIOCSWINSZ, &ws);
+	  unlink (op);
+	  tout = open (op, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_APPEND | O_CLOEXEC, 0644);
+	}
+      if (!tty && !*run)
+	{
+	  char rcp[160];
+	  path (rcp, sizeof rcp, name, "rc");
+	  write_file (rcp, "127\n");
+	  return;
+	}
+    }
   pid_t p = fork ();
   if (p == 0)
     {
       setsid ();
-      int null = open ("/dev/null", O_RDONLY);
-      unlink (op);
-      int out = open (op, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_APPEND, 0644);
-      dup2 (null, 0);
-      dup2 (out, 1);
-      dup2 (out, 2);
-      if (null > 2)
-	close (null);
-      if (out > 2)
-	close (out);
+      if (tty)
+	{
+	  /* signals as a terminal's programs expect them (this daemon ignores
+	     SIGPIPE, and may itself have been started with others ignored) */
+	  signal (SIGINT, SIG_DFL);
+	  signal (SIGQUIT, SIG_DFL);
+	  signal (SIGPIPE, SIG_DFL);
+	  signal (SIGHUP, SIG_DFL);
+	  signal (SIGTSTP, SIG_DFL);
+	  /* the pty's other end: this session's terminal */
+	  int t = open (slave, O_RDWR);
+	  if (t < 0)
+	    _exit (126);
+	  ioctl (t, TIOCSCTTY, 0);
+	  if (asuser && fchown (t, RO_UID, (gid_t) -1) != 0)
+	    { /* (programs that reopen their terminal by name can't: not fatal) */ }
+	  dup2 (t, 0);
+	  dup2 (t, 1);
+	  dup2 (t, 2);
+	  if (t > 2)
+	    close (t);
+	}
+      else
+	{
+	  int null = open ("/dev/null", O_RDONLY);
+	  unlink (op);
+	  int out = open (op, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_APPEND, 0644);
+	  dup2 (null, 0);
+	  dup2 (out, 1);
+	  dup2 (out, 2);
+	  if (null > 2)
+	    close (null);
+	  if (out > 2)
+	    close (out);
+	}
       clearenv ();
       if (asuser)
 	{
@@ -419,6 +572,8 @@ start (const char *file, const char *name)
 	  setenv ("LANG", "C.UTF-8", 1);
 	  if (chdir ("/riscos/HardDisc4") != 0 && chdir ("/riscos") != 0 && chdir ("/") != 0)
 	    _exit (126);
+	  if (tty)
+	    run_on_tty (run);
 	  if (access ("/usr/bin/stdbuf", X_OK) == 0)
 	    execl ("/usr/bin/stdbuf", "stdbuf", "-oL", "-eL", "/bin/sh", "-c", run, (char *) NULL);
 	  execl ("/bin/sh", "sh", "-c", run, (char *) NULL);
@@ -432,6 +587,8 @@ start (const char *file, const char *name)
       setenv ("APT_LISTCHANGES_FRONTEND", "none", 1);
       if (chdir ("/root") != 0 && chdir ("/") != 0)
 	_exit (126);
+      if (tty)
+	run_on_tty (run);
       /* Line-buffered output (stdbuf, inherited by everything the command
 	 runs: apt, dpkg, the maintainer scripts), so that the output file,
 	 which Updates shows as it grows, fills a line at a time rather than
@@ -446,9 +603,16 @@ start (const char *file, const char *name)
       char rcp[160];
       path (rcp, sizeof rcp, name, "rc");
       write_file (rcp, "127\n");
+      if (master >= 0)
+	close (master);
+      if (tout >= 0)
+	close (tout);
       return;
     }
   jobs[slot].pid = p;
+  jobs[slot].master = master;
+  jobs[slot].out = tout;
+  jobs[slot].inpos = 0;
   snprintf (jobs[slot].name, sizeof jobs[slot].name, "%s", name);
 }
 
@@ -463,6 +627,18 @@ reap (void)
 	{
 	  int rc = WIFEXITED (st) ? WEXITSTATUS (st) : 128 + WTERMSIG (st);
 	  char rcp[160], t[16];
+	  if (jobs[i].master >= 0)
+	    {
+	      /* the last of what it showed, before RISC OS is told it ended */
+	      pump (&jobs[i]);
+	      close (jobs[i].master);
+	      if (jobs[i].out >= 0)
+		close (jobs[i].out);
+	      jobs[i].master = jobs[i].out = -1;
+	      char ip[160];
+	      path (ip, sizeof ip, jobs[i].name, "in");
+	      unlink (ip);
+	    }
 	  path (rcp, sizeof rcp, jobs[i].name, "rc");
 	  snprintf (t, sizeof t, "%d\n", rc);
 	  write_file (rcp, t);
@@ -478,7 +654,68 @@ kill_job (const char *file, const char *name)
   unlink (p);
   for (int i = 0; i < MAXJOBS; i++)
     if (jobs[i].pid && strcmp (jobs[i].name, name) == 0)
-      kill (-jobs[i].pid, SIGTERM);
+      {
+	if (jobs[i].master >= 0)
+	  {
+	    /* a terminal job: an interactive shell ignores SIGTERM, and
+	       what it is running is in a process group of its own. Hang
+	       up on the terminal's foreground program, then end both. */
+	    pid_t fg = tcgetpgrp (jobs[i].master);
+	    if (fg > 0 && fg != jobs[i].pid)
+	      {
+		kill (-fg, SIGHUP);
+		kill (-fg, SIGKILL);
+	      }
+	    kill (-jobs[i].pid, SIGHUP);
+	    kill (-jobs[i].pid, SIGKILL);
+	  }
+	else
+	  kill (-jobs[i].pid, SIGTERM);
+      }
+}
+
+/* NAME.size ("COLUMNS ROWS") and NAME.trim ("BYTES"): see the top */
+static void
+tty_request (const char *file, const char *name, int trim)
+{
+  char p[300], t[64];
+  snprintf (p, sizeof p, DIR_PATH "/%s", file);
+  int f = open (p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  ssize_t n = -1;
+  struct stat st;
+  if (f >= 0)
+    {
+      if (fstat (f, &st) == 0 && S_ISREG (st.st_mode) && st.st_uid == RO_UID)
+	n = read (f, t, sizeof t - 1);
+      close (f);
+    }
+  unlink (p);
+  if (n <= 0)
+    return;
+  t[n] = 0;
+  for (int i = 0; i < MAXJOBS; i++)
+    if (jobs[i].pid && jobs[i].master >= 0 && strcmp (jobs[i].name, name) == 0)
+      {
+	if (trim)
+	  {
+	    long long to = atoll (t);
+	    off_t len = jobs[i].out >= 0 ? lseek (jobs[i].out, 0, SEEK_END) : 0;
+	    if (to > len)
+	      to = len;
+	    to &= ~4095LL;
+	    if (to > 0)
+	      fallocate (jobs[i].out, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, to);
+	  }
+	else
+	  {
+	    unsigned cols = 0, rows = 0;
+	    if (sscanf (t, "%u %u", &cols, &rows) == 2 && cols >= 20 && cols <= 500 && rows >= 5 && rows <= 300)
+	      {
+		struct winsize ws = { (unsigned short) rows, (unsigned short) cols, 0, 0 };
+		ioctl (jobs[i].master, TIOCSWINSZ, &ws);
+	      }
+	  }
+      }
 }
 
 static void
@@ -504,6 +741,16 @@ sweep (void)
 	  kill_job (e->d_name, name);
 	  continue;
 	}
+      if (job_name (e->d_name, "size", name, sizeof name))
+	{
+	  tty_request (e->d_name, name, 0);
+	  continue;
+	}
+      if (job_name (e->d_name, "trim", name, sizeof name))
+	{
+	  tty_request (e->d_name, name, 1);
+	  continue;
+	}
       char p[300];
       struct stat s;
       snprintf (p, sizeof p, DIR_PATH "/%s", e->d_name);
@@ -518,11 +765,23 @@ main (void)
 {
   mkdir (DIR_PATH, 0755);
   signal (SIGPIPE, SIG_IGN);
-  for (;;)
+  for (int i = 0; i < MAXJOBS; i++)
+    jobs[i].master = jobs[i].out = -1;
+  /* requests are looked for every 100 ms; a terminal job's typing and
+     output are carried every 10 ms while there is one */
+  for (unsigned tick = 0;; tick++)
     {
+      int ttys = 0;
+      for (int i = 0; i < MAXJOBS; i++)
+	if (jobs[i].pid && jobs[i].master >= 0)
+	  {
+	    pump (&jobs[i]);
+	    ttys++;
+	  }
       reap ();
-      sweep ();
-      struct timespec t = { 0, 100 * 1000 * 1000 };
+      if (!ttys || tick % 10 == 0)
+	sweep ();
+      struct timespec t = { 0, (ttys ? 10 : 100) * 1000 * 1000 };
       nanosleep (&t, NULL);
     }
 }

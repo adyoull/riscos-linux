@@ -99,6 +99,7 @@ Every item, in full: [What RISC OS on Linux adds to his port](docs/what-we-added
 | `qemu-arm-riscos` (RISC OS on machines without 32-bit ARM) | `qemu/` (patch to QEMU 8.2.2, `build.sh`) | GPL-2.0-or-later, as QEMU |
 | RISC OS modules: NativeSupport, VFPSupport, ARMEABISupport, LinuxAudio, LinuxShell (`*Linux`), USBDriver, KVMWheel, Iconv, LinuxCodec and the VideoCore stand-ins (VCHIQ, BCMSupport, PCI), SoundControl, WindowScroll | `modules/` | MIT, except RISC OS Open's code where marked (`LICENCES.md`) |
 | Desktop parts: Configure's Updates, Linux network and Scroll wheel plug-ins, the hard disc icon, CaCertificates, PackMan's sources | `harddisc/extras/` (and `harddisc/fetch.sh`, which builds HardDisc4 from RISC OS Open's) | MIT; Mozilla's certificates MPL-2.0 |
+| RiSH, the RISC Shell (the Linux terminal in Apps) | `apps/RiSH/` | MIT; the built program is linked with UnixLib (`licences/UnixLib-COPYING`) |
 | ROBench | `robench/` | MIT |
 | Linux 7.2 for UEFI machines and the Pinebooks | `kernel/generic-7.2/` (patches to mainline v7.2, config) | GPL-2.0 |
 | Linux 7.2 for the Windows Dev Kit 2023 | `kernel/wdk2023-7.2/` (the same patches, config) | GPL-2.0 |

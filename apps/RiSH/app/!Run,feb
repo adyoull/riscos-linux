@@ -1,0 +1,7 @@
+| RiSH, the RISC Shell: a Linux terminal for RISC OS on Linux
+| Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
+Set RiSH$Dir <Obey$Dir>
+IconSprites <RiSH$Dir>.!Sprites
+RMEnsure SharedUnixLibrary 0.00 Error RiSH needs the SharedUnixLibrary module
+WimpSlot -min 1024K
+Run <RiSH$Dir>.!RunImage %*0

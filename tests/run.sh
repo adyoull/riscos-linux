@@ -94,6 +94,13 @@ check ixfs-bigfile 0 '^bigfile ok' 120 '' -- \
 # IXFS's free space (OS_FSControl 49 and 55): needs RISC OS 5.31-11
 check ixfs-freespace 0 '^freespace ok' 60 '' -- \
   -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.freespace/bas'
+# IXFS's disc name, ROL (canonical IXFS::ROL.$.path): needs RISC OS 5.31-16
+check ixfs-discname 0 '^discname ok' 60 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.discname/bas'
+# GPIO HAL devices (RISC OS 5.31-17): a Pi 3 or 4's, through /dev/gpiomem;
+# none elsewhere (here), and looking for them must not go wrong
+check gpio-devices 0 '^gpio (ok|none)$' 60 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.gpiocheck/bas'
 # *IXRun (RISC OS 5.31-14): rol-cmd's @user request, as on the images, so
 # a host rol-cmd (images/fe/rol-cmd.c, built here) takes it from
 # /riscos/cmd. It needs root (it runs @user commands as uid 1000) and
@@ -219,6 +226,10 @@ elif [ ${#want[@]} -eq 0 ]; then
 fi
 check cxx 0 '^PASS$' 60 '' -- "$T/t_cxx"
 check mmap 0 '^PASS$' 120 '' -- "$T/t_mmap"
+check memory-access 0 '^PASS$' 60 '' -- "$T/t_access"
+# Flags, GE, registers, VFP and ITSTATE kept across UnixLib thread switches
+# (ARM and Thumb-2 blocks, 3 threads, 15 s)
+check psr-keep 0 '^PASS$' 90 '' -- "$T/t_psrkeep" 15
 check iconv 0 '^PASS$' 60 '' -- "$T/t_iconv"
 check system 0 '^PASS$' 60 '' -- "$T/t_system"
 check files 0 '^PASS$' 60 '' -- "$T/t_files"

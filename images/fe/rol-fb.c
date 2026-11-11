@@ -126,7 +126,28 @@ static uint32_t *last_src;			/* copy of what was drawn */
 static size_t last_len;
 
 /* input */
-static struct { int fd; char name[32]; int absmax_x, absmax_y; } inputs[MAX_INPUTS];
+/* A touchpad (a laptop's: Pinebook Pro) reports where the finger is on
+   the pad (ABS_X/Y), as a tablet does, but moves the pointer like a mouse:
+   by how far the finger moves. Its state while touched: */
+struct touchpad
+{
+  int res_x, res_y;		/* units a millimetre */
+  int touching, fingers, maxf;	/* fingers: BTN_TOOL_FINGER etc. */
+  int x, y, lx, ly, have_last;
+  double fx, fy, sx, sy;	/* moves and scrolls not yet passed on */
+  long t0;			/* when the touch began */
+  int travel;			/* how far it has moved (units) */
+  int pressed;			/* the pad's button: which RISC OS button */
+  int clicked;			/* pressed during this touch (no tap) */
+  unsigned pressed_bit;
+};
+static struct
+{
+  int fd; char name[32]; int absmax_x, absmax_y;
+  int touchpad; struct touchpad tp;
+} inputs[MAX_INPUTS];
+static long now_ms (void);
+static long last_key_ms;		/* typing: a touch then is a palm */
 static int ninputs;
 static int mx, my;				/* pointer, RISC OS pixels from top left */
 static unsigned buttons;			/* bit 0 select, 1 menu, 2 adjust */
@@ -1530,9 +1551,29 @@ scan_inputs (void)
       snprintf (inputs[ninputs].name, sizeof inputs[ninputs].name, "%s", e->d_name);
       inputs[ninputs].absmax_x = ax.maximum;
       inputs[ninputs].absmax_y = ay.maximum;
+      /* a touchpad: fingers (BTN_TOOL_FINGER), not a screen (DIRECT) or
+         a pen (tablets with a pen place the pointer where it is) */
+      unsigned long props[1] = { 0 }, keys[KEY_MAX / (8 * sizeof (long)) + 1];
+      memset (keys, 0, sizeof keys);
+      ioctl (fd, EVIOCGPROP (sizeof props), props);
+      ioctl (fd, EVIOCGBIT (EV_KEY, sizeof keys), keys);
+#define HAS(b, n) (((b)[(n) / (8 * sizeof (long))] >> ((n) % (8 * sizeof (long)))) & 1)
+      int tp = ax.maximum > 0 && ay.maximum > 0 && HAS (keys, BTN_TOOL_FINGER)
+	       && !HAS (keys, BTN_TOOL_PEN) && !HAS (props, INPUT_PROP_DIRECT);
+      memset (&inputs[ninputs].tp, 0, sizeof inputs[ninputs].tp);
+      inputs[ninputs].touchpad = tp;
+      if (tp)
+	{
+	  /* without a resolution, take the pad as 100 mm by 60 mm */
+	  inputs[ninputs].tp.res_x = ax.resolution > 0 ? ax.resolution
+				     : ax.maximum / 100 > 0 ? ax.maximum / 100 : 1;
+	  inputs[ninputs].tp.res_y = ay.resolution > 0 ? ay.resolution
+				     : ay.maximum / 60 > 0 ? ay.maximum / 60 : 1;
+	}
       char nm[128] = "";
       ioctl (fd, EVIOCGNAME (sizeof nm), nm);
-      fprintf (stderr, "rol-fb: input %s: %s\n", e->d_name, nm);
+      fprintf (stderr, "rol-fb: input %s: %s%s\n", e->d_name, nm,
+	       tp ? " (touchpad)" : "");
       set_leds (fd);			/* a keyboard plugged in: RISC OS's LEDs */
       ninputs++;
     }
@@ -1641,6 +1682,141 @@ button (int key, unsigned bit, int down)
     buttons &= ~bit;
 }
 
+/* The wheel, as key numbers &1F0-&1F3 (up, down, left, right) that the
+   KVMWheel module turns into PointerV WheelChange */
+static void
+wheel_key (int key, int count)
+{
+  for (int c = count; c > 0 && c <= 8; c--)
+    {
+      send_report (R_KEYDOWN, key, 0, 0);
+      send_report (R_KEYUP, key, 0, 0);
+    }
+}
+
+/* A touchpad's report (at SYN_REPORT): one finger moves the pointer, two
+   scroll; a quick touch is a click (one finger Select, two Menu, three
+   Adjust). Moves go to RISC OS as a mouse's would, so its mouse speed
+   applies; slow moves are finer than fast ones (acceleration). */
+static void
+touchpad_report (struct touchpad *t, int *rel_dx, int *rel_dy, int *mx, int *my,
+		 int *moved, int w, int h)
+{
+  if (!t->touching || !t->fingers)
+    {
+      t->have_last = 0;
+      return;
+    }
+  if (!t->have_last)
+    {
+      t->lx = t->x, t->ly = t->y, t->have_last = 1;
+      t->sx = t->sy = 0;
+      return;
+    }
+  int dx = t->x - t->lx, dy = t->y - t->ly;
+  t->lx = t->x, t->ly = t->y;
+  t->travel += abs (dx) + abs (dy);
+  double mmx = (double) dx / t->res_x, mmy = (double) dy / t->res_y;
+  if (t->fingers >= 2)
+    {
+      /* scrolling: a notch every 4 mm */
+      t->sy += mmy, t->sx += mmx;
+      while (t->sy >= 4)
+	wheel_key (0x1F1, 1), t->sy -= 4;
+      while (t->sy <= -4)
+	wheel_key (0x1F0, 1), t->sy += 4;
+      while (t->sx >= 4)
+	wheel_key (0x1F3, 1), t->sx -= 4;
+      while (t->sx <= -4)
+	wheel_key (0x1F2, 1), t->sx += 4;
+      return;
+    }
+  /* about 8 mouse counts a millimetre when slow, up to 3 times that fast
+     (the report rate is about 100 a second) */
+  double v = mmx * mmx + mmy * mmy, gain = 8;
+  if (v > 0.25)
+    gain = 8 * (v >= 9 ? 3 : 1 + 2 * (v - 0.25) / 8.75);
+  t->fx += mmx * gain, t->fy += mmy * gain;
+  int ix = (int) t->fx, iy = (int) t->fy;
+  t->fx -= ix, t->fy -= iy;
+  if (!ix && !iy)
+    return;
+  if (ro_version >= 3)
+    *rel_dx += ix, *rel_dy += iy, rel_mouse = 1;
+  else
+    {
+      *mx = clampi (*mx + ix, 0, w - 1);
+      *my = clampi (*my + iy, 0, h - 1);
+      *moved = 1;
+    }
+}
+
+/* A touchpad's buttons and fingers; 1 if the event was its */
+static int
+touchpad_key (struct touchpad *t, int code, int down)
+{
+  switch (code)
+    {
+    case BTN_TOUCH:
+      if (down && !t->touching)
+	{
+	  t->touching = 1, t->t0 = now_ms (), t->travel = 0, t->maxf = 0;
+	  t->clicked = t->pressed_bit != 0;
+	  t->have_last = 0;
+	}
+      else if (!down && t->touching)
+	{
+	  t->touching = 0;
+	  long held = now_ms () - t->t0;
+	  /* a tap: short, hardly moved, no button pressed, not while typing */
+	  if (held < 200 && t->travel < 2 * t->res_x && t->maxf
+	      && !t->clicked && now_ms () - last_key_ms > 300)
+	    {
+	      int key = t->maxf >= 3 ? RO_ADJUST : t->maxf == 2 ? RO_MENU : RO_SELECT;
+	      unsigned bit = t->maxf >= 3 ? 1 : t->maxf == 2 ? 2 : 4;
+	      button (key, bit, 1);
+	      button (key, bit, 0);
+	    }
+	  t->fingers = 0;
+	}
+      return 1;
+    case BTN_TOOL_FINGER:
+    case BTN_TOOL_DOUBLETAP:
+    case BTN_TOOL_TRIPLETAP:
+    case BTN_TOOL_QUADTAP:
+      {
+	int n = code == BTN_TOOL_FINGER ? 1 : code == BTN_TOOL_DOUBLETAP ? 2
+		: code == BTN_TOOL_TRIPLETAP ? 3 : 4;
+	if (down)
+	  t->fingers = n;
+	else if (t->fingers == n)
+	  t->fingers = 0;
+	if (t->fingers > t->maxf)
+	  t->maxf = t->fingers;
+	t->have_last = 0;	/* the position may jump to another finger */
+	return 1;
+      }
+    case BTN_LEFT:
+      /* the pad's button (a clickpad: the whole pad): with two fingers
+	 on it Menu, three Adjust */
+      if (down && !t->pressed_bit)
+	{
+	  int f = t->fingers;
+	  t->pressed = f >= 3 ? RO_ADJUST : f == 2 ? RO_MENU : RO_SELECT;
+	  t->pressed_bit = f >= 3 ? 1 : f == 2 ? 2 : 4;
+	  t->clicked = 1;
+	  button (t->pressed, t->pressed_bit, 1);
+	}
+      else if (!down && t->pressed_bit)
+	{
+	  button (t->pressed, t->pressed_bit, 0);
+	  t->pressed_bit = 0;
+	}
+      return 1;
+    }
+  return 0;
+}
+
 static void
 read_input (int i)
 {
@@ -1658,6 +1834,10 @@ read_input (int i)
 	      int down = e->value != 0;
 	      if (e->value == 2)
 		continue;		/* autorepeat: RISC OS repeats itself */
+	      if (inputs[i].touchpad && touchpad_key (&inputs[i].tp, e->code, down))
+		continue;
+	      if (e->code < BTN_MISC)
+		last_key_ms = now_ms ();
 	      switch (e->code)
 		{
 		case KEY_LEFTCTRL: ctrl_l = down; break;
@@ -1742,13 +1922,18 @@ read_input (int i)
 		     KVMWheel module turns into PointerV WheelChange */
 		  int key = e->code == REL_WHEEL ? (e->value > 0 ? 0x1F0 : 0x1F1)
 						 : (e->value > 0 ? 0x1F3 : 0x1F2);
-		  for (int c = abs (e->value); c > 0 && c <= 8; c--)
-		    {
-		      send_report (R_KEYDOWN, key, 0, 0);
-		      send_report (R_KEYUP, key, 0, 0);
-		    }
+		  wheel_key (key, abs (e->value));
 		}
 	    }
+	  else if (e->type == EV_ABS && inputs[i].touchpad)
+	    {
+	      if (e->code == ABS_X)
+		inputs[i].tp.x = e->value;
+	      else if (e->code == ABS_Y)
+		inputs[i].tp.y = e->value;
+	    }
+	  else if (e->type == EV_SYN && e->code == SYN_REPORT && inputs[i].touchpad)
+	    touchpad_report (&inputs[i].tp, &rel_dx, &rel_dy, &mx, &my, &moved, w, h);
 	  else if (e->type == EV_ABS)
 	    {
 	      if (e->code == ABS_X && inputs[i].absmax_x > 0)
