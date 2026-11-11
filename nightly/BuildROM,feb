@@ -51,6 +51,11 @@ SetEval SOURCE_DATE_EPOCH 0
 X Do SetEval ROOL$MaxJobs 1
 
 Set ROLSrc$DDECLib <CLIB$Path>
+| DDE 32d's !SetPaths reaches its tools through Tools: (Tools$Dir), which
+| Env.!Common below points at ROLSrc's Library instead: amu, cc and the
+| rest were then "not found". So put the DDE's tool folders on Run$Path
+| by name (31d did this itself).
+Set Run$Path <Run$Path>,<SetPaths$Dir>.Lib32.,<SetPaths$Dir>.Lib32.Build.,<SetPaths$Dir>.Lib32.Unix.
 Obey <ROLSrc$Dir>.RiscOS.Env.ROOL.Linux
 | Host tools (built and run on this machine during the build) link with
 | Build$HostLibs. RISC OS Open's build fills Library.Acorn.HostLibs from a

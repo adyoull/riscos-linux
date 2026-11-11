@@ -6,6 +6,13 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-23 (being built)
+
+- **BuildROM works with DDE 32d.** Its !SetPaths reaches the tools through
+  `Tools:`, which the build's own set-up repoints at ROLSrc's Library, so
+  amu was "not found". BuildROM now puts the DDE's tool folders on
+  Run$Path by name. DDE 31d is unaffected. No change to the ROM's source.
+
 ## 5.31-22 (to be built)
 
 The number after 5.31 now counts builds: each ROM built and tested gets
