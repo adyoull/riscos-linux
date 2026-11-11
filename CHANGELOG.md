@@ -6,7 +6,21 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-23 (being built)
+## 5.31-24 (to be built)
+
+- **A new dynamic area goes where it would on any other RISC OS machine:**
+  at the lowest free address, working upwards (first fit through the area
+  list, from the RMA up), as the kernel does everywhere else. The Linux
+  build let Linux choose, which packs areas from the top down, each new
+  one directly below the last: running off the end of an area then read
+  or wrote the area made before it, where real RISC OS aborts (the owner's
+  MemCompare2 logs, native against ROL, 11 Nov 2026; the web browser
+  project's report). Areas also no longer start at top-bit-set addresses.
+  If Linux has something at a candidate address the search moves up 1MB;
+  after 64 refusals, or past &C0000000, Linux chooses as before.
+  `Kernel/s/ChangeDyn` (AllocateAreaAddress, GetNextRange).
+
+## 5.31-23 (built 11 Nov 2026)
 
 - **BuildROM works with DDE 32d.** Its !SetPaths reaches the tools through
   `Tools:`, which the build's own set-up repoints at ROLSrc's Library, so
