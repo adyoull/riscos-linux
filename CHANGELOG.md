@@ -8,6 +8,23 @@ RISC OS 5.31-24 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### RISC OS 5.31-28: FileCore's compaction, pointers past the extent (11 Nov 2026; riscos-rom 5.31-28)
+
+- Chris Gransden: a ROM build on a 2 GB RAM disc failed after seconds,
+  then "FileCore in use". The web browser project: OS_Args 1 past the
+  extent doesn't extend the file on IXFS and aborts on a RAM disc.
+- One cause for the aborts: FileCore's CompactZone keeps its tables in
+  ScratchSpace and was written for ScratchSpace at &4000 (bit addresses
+  as address * 16 in 32 bits; reads a word or two past the end, into
+  application space). On RISC OS on Linux ScratchSpace is at &20000000
+  with nothing after it. Fixed in the ROM source (FileCore32; the HAL
+  maps the page after ScratchSpace); IXSupport extends a file when its
+  pointer is set past the extent. The detail is in the ROM's CHANGELOG.
+- New test `tests/programs/ramdisc.bas` (check `ramdisc`): fails on
+  5.31-24 (IXFS extent 0; abort at &209B029C), passes on 5.31-28.
+- ROM builds over an earlier build: Edit must be relinked (BuildROM now
+  does). 5.31-25 to 5.31-27 were test builds.
+
 ### RiSH 0.04: the system font's size is put back as it was (11 Nov 2026; riscos-harddisc 1.0.0049-1)
 
 - Found testing a paste from Edit into RiSH under QEMU: after RiSH had

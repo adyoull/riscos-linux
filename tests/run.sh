@@ -97,6 +97,11 @@ check ixfs-freespace 0 '^freespace ok' 60 '' -- \
 # IXFS's disc name, ROL (canonical IXFS::ROL.$.path): needs RISC OS 5.31-16
 check ixfs-discname 0 '^discname ok' 60 '' -- \
   -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.discname/bas'
+
+# FileCore's compaction with ScratchSpace at &20000000, and pointers set
+# past the extent (IXFS and RAM disc): RISC OS 5.31-28
+check ramdisc 0 '^ramdisc ok' 600 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.ramdisc/bas'
 # GPIO HAL devices (RISC OS 5.31-17): a Pi 3 or 4's, through /dev/gpiomem;
 # none elsewhere (here), and looking for them must not go wrong
 check gpio-devices 0 '^gpio (ok|none)$' 60 '' -- \
