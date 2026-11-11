@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-28 (not yet built)
+## 5.31-28 (built 11 Nov 2026; released as riscos-rom 5.31-28)
 
 - **FileCore's zone compaction no longer aborts** (RAM discs, and SCSI
   discs in FileCore format): two places in `CompactZone`
@@ -38,6 +38,16 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   the file can't be extended (open for reading). The web browser
   project's report (UnixLib's lseek and SQLite behaved differently here
   and on a Pi).
+- **BuildROM relinks Edit every time:** Edit is linked for its address in
+  the ROM, and its makefile doesn't notice when that address moves in a
+  build over an earlier one (5.31-26: "ROM application !Edit cannot be
+  RAM loaded", and no Edit). BuildROM removes `EditApp.linked.!RunImage`
+  first.
+- Tested under QEMU (DDE 32d build): the testbed's new `ramdisc.bas`
+  (pointer past the extent on IXFS and a RAM disc; 600 steps of files
+  written, extended, checked and deleted on an 8 MB RAM disc) fails on
+  5.31-24 as reported and passes; 1,644 files copied to a 512 MB RAM
+  disc; Edit, Draw and Paint start.
 - 5.31-25 (the first FileCore fix only) and 5.31-26 (both FileCore fixes
   and IXFS, without the page after ScratchSpace) were test builds; not
   packaged. 5.31-27 mapped the page at the wrong address (ADDRESS is the

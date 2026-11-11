@@ -76,6 +76,12 @@ Echo Host tools use <Build$HostLibs>
 | RISC OS Open's srcbuild itself (not any srcbuild wrapper earlier on the path).
 | The phases are written out in full: srcbuild doesn't expand <variables>
 | in its arguments.
+| Edit is linked for its address in the ROM, and its makefile doesn't
+| relink it when that address moves in a build over an earlier one (the
+| ROM then says "ROM application !Edit cannot be RAM loaded"). So it is
+| linked afresh every time.
+X Remove <ROLSrc$Dir>.RiscOS.Sources.Apps.EditApp.linked.!RunImage
+X Remove <ROLSrc$Dir>.RiscOS.Sources.Apps.EditApp.linked.!RunImage_sym
 Spool <ROLSrc$Dir>.BuildLog
 If "%*0" = "" Then /<ROLSrc$Dir>.RiscOS.Library.Build.srcbuild -s export_hdrs export_libs resources rom install_rom join
 If "%*0" <> "" Then /<ROLSrc$Dir>.RiscOS.Library.Build.srcbuild -s %*0
