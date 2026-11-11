@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-24 (to be built)
+## 5.31-24 (built 11 Nov 2026; released as riscos-rom 5.31-24)
 
 - **A new dynamic area goes where it would on any other RISC OS machine:**
   at the lowest free address, working upwards (first fit through the area
