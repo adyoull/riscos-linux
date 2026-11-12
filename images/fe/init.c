@@ -1012,6 +1012,18 @@ cmd_up (void)
       execl ("/opt/riscos/rol-discd", "rol-discd", (char *) NULL);
       _exit (127);
     }
+  /* rol-3d: draws for RISC OS programs on Linux's graphics driver (the
+     Linux3D driver of RISC3D); it gives up root itself */
+  if (access ("/opt/riscos/rol-3d", X_OK) == 0 && fork () == 0)
+    {
+      int null = open ("/dev/null", O_RDWR);
+      dup2 (null, 0);
+      dup2 (null, 1);
+      dup2 (null, 2);
+      setsid ();
+      execl ("/opt/riscos/rol-3d", "rol-3d", (char *) NULL);
+      _exit (127);
+    }
 }
 
 /* A forgotten root password: a file RESETPW (or RESETPW.TXT) on the card's

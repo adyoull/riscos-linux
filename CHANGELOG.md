@@ -8,6 +8,23 @@ RISC OS 5.31-24 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Pi kernel 6.6.78-9: the GPU's driver, v3d (12 Nov 2026; riscos-kernel-pi 6.6.78-9)
+
+- CONFIG_DRM_V3D=y (images/kernel-6.6-pi.config): Linux's driver for the
+  Pi 4 and 5's 3D hardware. It was off, so Linux had the display (vc4)
+  but no 3D: nothing could draw on the GPU. Needed by the RISC3D
+  prototype's Linux3D driver; nothing in the images uses it yet. The
+  device trees and overlays are unchanged (dtoverlay=vc4-kms-v3d already
+  enables the node).
+- Built (6.6.78-v8+ #12); v3d's symbols are in System.map. **Not booted:**
+  no Pi here, and this kernel doesn't boot under QEMU's virt machine.
+
+### init starts rol-3d, if it is there (12 Nov 2026; not packaged)
+
+- For the RISC3D prototype (its own repository, risc3d): init starts
+  `/opt/riscos/rol-3d` beside rol-usbd and rol-discd when the file
+  exists. No image or package has the file yet.
+
 ### Internal FileCore discs (12 Nov 2026; riscos-support 1.0.0046-1, riscos-harddisc 1.0.0050-1)
 
 - Open since 2 Nov (the owner then: rol-usbd shouldn't watch internal
