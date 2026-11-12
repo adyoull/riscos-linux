@@ -26,7 +26,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"SCSILinux"
-help:	.asciz	"SCSILinux\t0.01 (02 Nov 2026) FileCore discs through Linux, for SCSIFS"
+help:	.asciz	"SCSILinux\t0.02 (12 Nov 2026) FileCore discs through Linux, for SCSIFS"
 	.align	2
 commands:
 	.asciz	"SCSILinux"

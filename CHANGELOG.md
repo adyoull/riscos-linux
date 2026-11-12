@@ -8,6 +8,34 @@ RISC OS 5.31-24 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Internal FileCore discs (12 Nov 2026; riscos-support 1.0.0046-1, riscos-harddisc 1.0.0050-1)
+
+- Open since 2 Nov (the owner then: rol-usbd shouldn't watch internal
+  drives). The owner's choice now: automatic at start-up, read-write.
+- **rol-discd** (new, `images/fe/rol-discd.c`; init starts it beside
+  rol-usbd): looks once at start-up at every disc that isn't rol-usbd's
+  (not on USB, not removable, not an SD card in a slot): NVMe, SATA,
+  eMMC, virtio. A disc that is FileCore as a whole is given whole;
+  otherwise each partition that is. Never the partition Linux runs from,
+  anything mounted or swap, or Linux's own disc as a whole (a FileCore
+  partition beside Linux's is given). The same boot block test as
+  rol-usbd's. Lists them in /riscos/mediactl/filecore-internal (not
+  removable) and serves "OPEN dev" on the abstract socket
+  "rol-discd-discs" (O_RDWR, O_EXCL, O_DSYNC); it exits if there are
+  none.
+- **SCSILinux 0.02:** reads both lists and asks the right daemon.
+  Internal discs are fixed discs: SCSI::4 onwards, with hard disc icons.
+- **Tested** under QEMU (ROM 5.31-28) with extra virtio discs: a 64 MB
+  FileCore image as a whole disc (vdb) and the same inside an MBR
+  partition (vdc1): both listed "fixed", catalogued, a hard disc icon
+  each; a file copied on is byte for byte in the host's image at the
+  right place (partition: 1 MB further on); an application directory
+  copied with its types and dates; the root disc (vda1, vda2) is not
+  offered. Two discs with the same name and contents confuse FileCore
+  (as on any RISC OS machine): tested one at a time.
+- **Not tested:** real NVMe, SATA or eMMC; a FileCore partition on the
+  disc Linux runs from; discs over 2 GB; 4K-sector discs.
+
 ### NativeSupport 0.46: a review's findings (12 Nov 2026; riscos-support 1.0.0045-1)
 
 An outside review of header.s and native.c 0.45 (the owner passed it on).

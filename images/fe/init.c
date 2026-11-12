@@ -1000,6 +1000,18 @@ cmd_up (void)
       execl ("/opt/riscos/rol-usbd", "rol-usbd", (char *) NULL);
       _exit (127);
     }
+  /* rol-discd: gives RISC OS the machine's internal discs that are in
+     RISC OS's own format (it looks once, and stays only if there are any) */
+  if (access ("/opt/riscos/rol-discd", X_OK) == 0 && fork () == 0)
+    {
+      int null = open ("/dev/null", O_RDWR);
+      dup2 (null, 0);
+      dup2 (null, 1);
+      dup2 (null, 2);
+      setsid ();
+      execl ("/opt/riscos/rol-discd", "rol-discd", (char *) NULL);
+      _exit (127);
+    }
 }
 
 /* A forgotten root password: a file RESETPW (or RESETPW.TXT) on the card's

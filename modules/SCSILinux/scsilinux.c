@@ -105,16 +105,19 @@ file_size (int fd)
   return r;
 }
 
-/* ask rol-usbd for device DEV: the open disc, or -1 */
+/* ask rol-usbd (or, for an internal disc, rol-discd) for device DEV: the
+   open disc, or -1 */
 static int
-ask_rolusbd (const char *dev, int *ro)
+ask_rolusbd (const char *dev, int *ro, int internal)
 {
   int s = lsys (NR_socket, 1 /* AF_UNIX */, 5 /* SOCK_SEQPACKET */ | O_CLOEXEC, 0, 0, 0, 0);
   if (s < 0)
     return -1;
   static const char addr[] = "\1\0\0rol-usbd-discs";	/* abstract name */
+  static const char addr_int[] = "\1\0\0rol-discd-discs";
   int fd = -1;
-  if (lsys (NR_connect, (unsigned) s, (unsigned) addr, 2 + 15, 0, 0, 0) == 0)
+  if (lsys (NR_connect, (unsigned) s, (unsigned) (internal ? addr_int : addr),
+	    internal ? 2 + 16 : 2 + 15, 0, 0, 0) == 0)
     {
       char req[48] = "OPEN ";
       size_t l = strlen (dev);
@@ -184,7 +187,7 @@ dev_remove (struct dev *d)
 
 /* a disc listed (or the test file): add it if it's new */
 static void
-dev_seen (const char *src, const char *name, int test, int removable)
+dev_seen (const char *src, const char *name, int test, int removable, int internal)
 {
   for (int i = 0; i < MAXDEV; i++)
     if (devs[i].used && streq (devs[i].src, src))
@@ -210,7 +213,7 @@ dev_seen (const char *src, const char *name, int test, int removable)
 	}
     }
   else
-    fd = ask_rolusbd (src, &ro);
+    fd = ask_rolusbd (src, &ro, internal);
   if (fd < 0)
     return;
   memset (d, 0, sizeof *d);
@@ -237,16 +240,13 @@ dev_seen (const char *src, const char *name, int test, int removable)
   dev_register (d);
 }
 
-/* every second (a callback): the discs rol-usbd lists, and the test file */
-void
-c_poll (void)
+/* the discs one list names: rol-usbd's (USB discs and cards) or
+   rol-discd's (0.02: the machine's internal discs) */
+static void
+list_poll (const char *list, int internal)
 {
-  if (!started)
-    return;
-  for (int i = 0; i < MAXDEV; i++)
-    devs[i].seen = 0;
   static char buf[1024];
-  int fd = lsys (NR_open, (unsigned) "/riscos/mediactl/filecore", O_CLOEXEC, 0, 0, 0, 0);
+  int fd = lsys (NR_open, (unsigned) list, O_CLOEXEC, 0, 0, 0, 0);
   if (fd >= 0)
     {
       int n = lsys (NR_read, (unsigned) fd, (unsigned) buf, sizeof buf - 1, 0, 0, 0);
@@ -280,18 +280,30 @@ c_poll (void)
 		nl = sizeof name - 1;
 	      memcpy (name, t2 + 1, nl);
 	      name[nl] = 0;
-	      dev_seen (dev, name, 0, removable);
+	      dev_seen (dev, name, 0, removable, internal);
 	    }
 	  p = *e ? e + 1 : e;
 	}
     }
+}
+
+/* every second (a callback): the discs listed, and the test file */
+void
+c_poll (void)
+{
+  if (!started)
+    return;
+  for (int i = 0; i < MAXDEV; i++)
+    devs[i].seen = 0;
+  list_poll ("/riscos/mediactl/filecore", 0);
+  list_poll ("/riscos/mediactl/filecore-internal", 1);
   /* the test file */
   char path[64];
   regs v = {{ (unsigned) "SCSILinux$Test", (unsigned) path, sizeof path - 1, 0, 0 }};
   if (!swix_regs (OS_ReadVarVal, &v) && v.r[2] > 0)
     {
       path[v.r[2]] = 0;
-      dev_seen (path, "Test", 1, 1);
+      dev_seen (path, "Test", 1, 1, 0);
     }
   for (int i = 0; i < MAXDEV; i++)
     if (devs[i].used && !devs[i].seen)
