@@ -8,6 +8,44 @@ RISC OS 5.31-24 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### NativeSupport 0.46: a review's findings (12 Nov 2026; riscos-support 1.0.0045-1)
+
+An outside review of header.s and native.c 0.45 (the owner passed it on).
+Each point checked against the source and, where it could be, run:
+
+- **Real, fixed: patched words in a file written in pieces.** A copy of
+  a patched instruction at the first or last word of a write was left as
+  its UDF marker (orig_word wanted both neighbours inside the write).
+  The neighbours now come from memory when they are outside it (read
+  safely, only compared). Test: LinuxAudio's code copied to a buffer and
+  written in pieces of 4 to 20 bytes: 0.45 left 4, 4, 4, 3 and 2
+  markers in the file; 0.46 none.
+- **Real, fixed: an emulated LDM/STM ^ or SWP that faults is a data
+  abort.** It went to RISC OS as an undefined instruction (and, a site,
+  was put back for 10 s since 0.45). The fault the emulation took now
+  goes to the port's abort handler with the instruction's registers
+  (abort_instead); such a site is not put back. Test: LDMIA r0,{r1,r2}^
+  at &1F000000 in SVC mode: "undefined instruction" on 0.45, "abort on
+  data transfer" on 0.46. *NativeSupport counts them.
+- **Real, fixed: a Linux call on every SWI while a site is put back.**
+  ns_fixups_run read the clock each time, for 10 s; now on one SWI in
+  256. Measured under QEMU (OS_ReadMonotonicTime in a loop for 2 s):
+  0.45 34,744 while put back against 54,287 after; 0.46 no slower.
+- **Not a bug: aeabi_clamp's 0.** RISC OS never has a clamp of 0
+  (OS_DynamicArea 8 ignores anything under 1 MB, and they start at the
+  RAM limit), so 0 can only mean "none saved".
+- **Not a bug: ns_und_fast and the flags.** The kernel's fast entry
+  changes only the pc and r0-r2; ns_und_fast uses no flag-setting
+  instruction, so the vector is entered with the interrupted flags, as
+  on hardware.
+- **True, left: LOWSTUBS is unused** since application space went to
+  UDF sites only (deliberately: a copied branch can't be told from any
+  other). One spare 4 KB mapping; to be removed with the next change
+  there. SUSPEND_MAX full leaves the ninth site's UDF showing: by
+  design. The three tentative `debug` declarations: tidied later.
+- Checked after: the desktop, Edit, Draw, Paint and RiSH start; failure
+  counts 0 apart from the test's own fault.
+
 ### RISC OS 5.31-28: FileCore's compaction, pointers past the extent (11 Nov 2026; riscos-rom 5.31-28)
 
 - Chris Gransden: a ROM build on a 2 GB RAM disc failed after seconds,

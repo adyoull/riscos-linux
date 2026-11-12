@@ -162,7 +162,7 @@ static struct
   unsigned cp15_barriers, cp15_rewritten, abtdump_sw;
   unsigned da_low, da_high, da_over;
   int tchk_ok;
-  unsigned patched, patched_rom, patched_sync, syncs, full_syncs, flush_sites, stubbed, full, probe_faults, in_full, imb_full, emul_psr, emul_priv, getdents, mem0, mem24,
+  unsigned patched, patched_rom, patched_sync, syncs, full_syncs, flush_sites, stubbed, full, probe_faults, emul_aborts, in_full, imb_full, emul_psr, emul_priv, getdents, mem0, mem24,
     pmp_swis, ioc, aborts, kpmp_ops, reports, sync_jit, aeabi105;
 } ns;
 
@@ -1618,6 +1618,11 @@ void ns_fixups_run (void);
 void
 ns_fixups_run (void)
 {
+  /* (0.46) the clock is a Linux call, and this runs on every SWI while a
+     site is put back (10 s): look at it on one SWI in 256 */
+  static unsigned calls;
+  if (++calls & 255)
+    return;
   unsigned now = linux_cs (), k = 0;
   for (unsigned i = 0; i < nsuspended; i++)
     {
@@ -1636,6 +1641,30 @@ ns_fixups_run (void)
 
 static void ill_body (int sig, void *si, void *uc);
 static void fault_body (int sig, void *si, void *uc);
+
+/* (0.46) An emulated LDM/STM ^ or SWP that stops on a memory fault is a
+   data abort, as the instruction's own fault would be, not an undefined
+   instruction: the fault the emulation took (kept by fault_body) goes to
+   the port's handler with the instruction's own registers. */
+static unsigned pfault_addr;
+static int pfault_code, pfault_sig;
+
+static int
+abort_instead (unsigned w, unsigned faults_before, void *si, void *uc)
+{
+  if (ns.probe_faults == faults_before || !pfault_sig
+      || !((w & 0x0e400000u) == 0x08400000u || (w & 0x0fb00ff0u) == 0x01000090u))
+    return 0;
+  unsigned si2[32];
+  memcpy (si2, si, sizeof si2);
+  si2[0] = pfault_sig;
+  si2[1] = 0;
+  si2[2] = pfault_code;
+  si2[3] = pfault_addr;
+  ns.emul_aborts++;
+  chain (pfault_sig == SIGBUS_ ? &ns.old_bus : &ns.old_segv, pfault_sig, si2, uc);
+  return 1;
+}
 
 /* The signal handlers: the event kept, the check, then the work */
 static void
@@ -1892,6 +1921,7 @@ ill_body (int sig, void *si, void *uc)
 	      return;
 	    }
 	  unsigned vm0 = *(volatile uint8_t *) (get_tls () + VCPU_CPSR);
+	  unsigned pf = ns.probe_faults;
 	  dbg ("psr", pc, orig, vm0 | R[13] << 8);
 	  if (probe (p_psr, R, orig))
 	    {
@@ -1906,7 +1936,12 @@ ill_body (int sig, void *si, void *uc)
 	  /* it can't be done here (a privileged instruction in user mode,
 	     say): RISC OS gets it as an undefined instruction - the
 	     instruction itself, not the site's UDF */
-	  if (s->kind == KIND_PSR && s->addr == pc)
+	  /* (0.46) not when the emulation stopped on a memory fault (an
+	     LDM or STM ^ on a bad address): that instruction can be done,
+	     and put back it would run unemulated the next time */
+	  if (abort_instead (orig, pf, si, uc))
+	    return;
+	  if (s->kind == KIND_PSR && s->addr == pc && ns.probe_faults == pf)
 	    site_suspend (s);
 	}
       else if (pc_emulated (pc) && priv_form (w))
@@ -1916,6 +1951,7 @@ ill_body (int sig, void *si, void *uc)
 	      R[15] = pc + 4;
 	      return;
 	    }
+	  unsigned pf = ns.probe_faults;
 	  if ((w & 0x0fb00ff0u) == 0x01000090u ? probe (p_swp, R, w)
 					       : probe (p_priv, R, w))
 	    {
@@ -1923,6 +1959,8 @@ ill_body (int sig, void *si, void *uc)
 	      ns.emul_priv++;
 	      return;
 	    }
+	  if (abort_instead (w, pf, si, uc))
+	    return;
 	}
     }
   if (debug)
@@ -2933,9 +2971,22 @@ orig_word (unsigned a, unsigned w, unsigned lo, unsigned hi, unsigned *orig)
 	  *orig = t->orig;
 	  return 1;
 	}
-      if (a - 4 < lo || a + 8 > hi || !safe_rd (t->addr, &x) || x != w
-	  || !safe_rd (t->addr - 4, &y) || y != *(volatile unsigned *) (a - 4)
-	  || !safe_rd (t->addr + 4, &z) || z != *(volatile unsigned *) (a + 4))
+      /* (0.46) the words either side come from memory when they are
+	 outside what is being written (a copy at the first or last word
+	 of a write: one made in pieces left the UDF in the file); they
+	 are only compared, and read safely */
+      unsigned before, after;
+      if (a - 4 >= lo)
+	before = *(volatile unsigned *) (a - 4);
+      else if (!safe_rd (a - 4, &before))
+	return 0;
+      if (a + 8 <= hi)
+	after = *(volatile unsigned *) (a + 4);
+      else if (!safe_rd (a + 4, &after))
+	return 0;
+      if (!safe_rd (t->addr, &x) || x != w
+	  || !safe_rd (t->addr - 4, &y) || y != before
+	  || !safe_rd (t->addr + 4, &z) || z != after)
 	return 0;
       *orig = t->orig;
       return 1;
@@ -3402,6 +3453,9 @@ fault_body (int sig, void *si, void *uc)
       R[15] = (unsigned) probe_recover;
       R[16] &= ~CPSR_T;
       ns.probe_faults++;
+      pfault_addr = addr;
+      pfault_code = code;
+      pfault_sig = sig;
       return;
     }
   if (emulate_ioc (R, addr))
@@ -5368,6 +5422,7 @@ mod_command (int index, const char *tail, int argc)
   line_out ("Aborts passed to handlers: ", ns.aborts);
   line_out ("IOC timer reads: ", ns.ioc);
   line_out ("Faults in emulations (failed): ", ns.probe_faults);
+  line_out ("  of them passed on as data aborts: ", ns.emul_aborts);
   line_out ("Sites in use (of 16384): ", nsites);
   line_out ("Sites used again (the same instruction at the same address): ", sites_reused);
   line_out ("Instructions that couldn't be done, shown to RISC OS as themselves: ", sites_suspended);
