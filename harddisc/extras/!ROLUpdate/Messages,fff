@@ -2,7 +2,7 @@
 _TaskName:Updates
 _Purpose:Updates RISC OS on Linux and the Linux under it
 _Author:Andrew Youll, 2026
-_Version:1.01 (06-Nov-26)
+_Version:1.02 (12-Nov-26)
 _ConfigText:Updates
 _ConfigHelp:Click SELECT to check for and install new builds of RISC OS, its Linux side and kernel, and Debian's updates, or to go back to the RISC OS you had before.
 _ConfigSprite:co_rolupdate

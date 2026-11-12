@@ -72,6 +72,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -307,6 +308,69 @@ forget_tokens (void)
   memset (tokens, 0, sizeof tokens);
 }
 
+/* A line in /var/log/rol-cmd.log (root's alone) about a password set or
+   refused: never the password. From the reports of a password set at the
+   first use of Updates and refused later: this says what arrived. */
+static void
+pw_log (const char *fmt, ...)
+{
+  struct stat st;
+  int fd = open ("/var/log/rol-cmd.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+  if (fd < 0)
+    return;
+  if (fstat (fd, &st) == 0 && st.st_size > 65536 && ftruncate (fd, 0)) { }
+  char line[300];
+  time_t now = time (NULL);
+  struct tm tm;
+  gmtime_r (&now, &tm);
+  size_t n = strftime (line, 40, "%Y-%m-%d %H:%M:%S UTC ", &tm);
+  va_list ap;
+  va_start (ap, fmt);
+  vsnprintf (line + n, sizeof line - n - 1, fmt, ap);
+  va_end (ap);
+  strcat (line, "\n");
+  if (write (fd, line, strlen (line)) < 0) { }
+  close (fd);
+}
+
+static int
+pw_top (const char *pw)
+{
+  int n = 0;
+  for (; *pw; pw++)
+    n += (unsigned char) *pw >= 128;
+  return n;
+}
+
+/* a refused password: its length, and whether it would have been right
+   with the letters' case the other way (typed with Caps Lock on, or set
+   with it on) */
+static void
+pw_refused (const char *pw)
+{
+  char alt[200];
+  size_t n = strlen (pw);
+  int letters = 0;
+  const char *swapped = "no letters";
+  if (n < sizeof alt)
+    {
+      for (size_t i = 0; i <= n; i++)
+	{
+	  char c = pw[i];
+	  if (c >= 'a' && c <= 'z')
+	    c -= 32, letters = 1;
+	  else if (c >= 'A' && c <= 'Z')
+	    c += 32, letters = 1;
+	  alt[i] = c;
+	}
+      if (letters)
+	swapped = check_password (alt) ? "YES" : "no";
+      memset (alt, 0, sizeof alt);
+    }
+  pw_log ("password refused: %d characters, %d of them not ASCII; right with the letters' case swapped: %s",
+	  (int) n, pw_top (pw), swapped);
+}
+
 /* the request's header lines: 0 to run the command (rest), else an answer
    code; a new token goes to NAME.tok */
 static int
@@ -339,6 +403,8 @@ authorise (char *req, char **rest, const char *name)
 	ok = 2, fails = 0;
       else
 	{
+	  if (have_password ())
+	    pw_refused (pw);
 	  sleep (1);		/* (slows guessing) */
 	  if (++fails >= 5)
 	    fail_until = now + 60, fails = 0;
@@ -350,6 +416,7 @@ authorise (char *req, char **rest, const char *name)
       /* the first password needs nothing; a new one, the old one */
       if ((have_password () && ok != 2) || strlen (npw) < 1 || set_password (npw))
 	return have_password () ? RC_AUTH : RC_NOPASS;
+      pw_log ("password set: %d characters, %d of them not ASCII", (int) strlen (npw), pw_top (npw));
       forget_tokens ();
       ok = 2;
     }

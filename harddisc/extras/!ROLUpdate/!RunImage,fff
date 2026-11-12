@@ -17,7 +17,7 @@ REM Copyright (c) 2026 Andrew Youll. MIT licence.
 ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
 DIM blk% 4096, ind% 8192, buf% 4100
 MAXL%=800 : DIM line$(MAXL%)
-NP%=4 : DIM pk$(NP%), pkname$(NP%), inst$(NP%), avail$(NP%), ic%(40)
+NP%=4 : DIM pk$(NP%), pkname$(NP%), inst$(NP%), avail$(NP%), ic%(42)
 pk$(1)="riscos-rom" : pkname$(1)="RISC OS"
 pk$(2)="riscos-support" : pkname$(2)="Linux side"
 REM the kernel this machine starts (rol-info's "@machine": pi, wdk2023
@@ -31,7 +31,7 @@ MAXCL%=600 : DIM cl$(MAXCL%) : ncl%=0
 nl%=0 : cur$="" : indp%=0 : task%=0 : quit%=FALSE
 job$="" : pos%=0 : mode%=0 : sect$="" : ndeb%=0 : neterr%=FALSE
 busy$="" : crpend%=FALSE : rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
-tok$="" : pendcmd$="" : pendm%=0 : sentpw%=FALSE : pwmode%=0 : chain%=0
+tok$="" : pendcmd$="" : pendm%=0 : sentpw%=FALSE : pwmode%=0 : pwshow%=FALSE : pwcaps%=-1 : chain%=0
 closing%=FALSE
 dir$="IXFS:$.riscos.cmd."
 LH%=40 : LW%=1600 : BL%=10
@@ -47,11 +47,12 @@ PROCbuttons
 ON ERROR PROCerror
 PROCinfo
 REPEAT
-  IF job$<>"" THEN mask%=&3830 ELSE mask%=&3831
+  IF job$<>"" OR pwmode%<>0 THEN mask%=&3830 ELSE mask%=&3831
   SYS "OS_ReadMonotonicTime" TO t%
   SYS "Wimp_PollIdle",mask%,blk%,t%+25 TO reason%
   CASE reason% OF
-    WHEN 0 : PROCpoll_job
+    WHEN 0 : IF pwmode%<>0 THEN PROCpwcaps
+      PROCpoll_job
     WHEN 1 : PROCredraw(blk%!0)
     WHEN 2 : SYS "Wimp_OpenWindow",,blk%
     WHEN 3 : IF blk%!0=win% THEN PROCwantquit ELSE IF blk%!0=pww% THEN PROCpwcancel ELSE SYS "Wimp_CloseWindow",,blk%
@@ -221,15 +222,19 @@ SYS "Wimp_SetExtent",win%,b%
 logw%=FNwin(200,120,LW%,560,600,&FF000002,"Updates: details")
 chw%=FNwin(240,160,LW%,640,640,&FF000002,"Updates: changes")
 REM the password dialogue: ic%(37) says what's wanted, ic%(38)/ic%(40)
-REM the password (twice when choosing one; ic%(39) labels the second)
-pww%=FNwin(340,500,1000,300,300,&87000012,"Root password")
+REM the password (twice when choosing one; ic%(39) labels the second);
+REM ic%(41) the Show option (the fields show stars until it is on),
+REM ic%(42) says when Caps Lock is on
+pww%=FNwin(340,500,1000,348,348,&87000012,"Root password")
 ic%(37)=FNicon(pww%,16,-72,984,-20,&17000111,"","",120)
 ic%(38)=FNwritable(pww%,300,984,-84)
 ic%(36)=FNicon(pww%,16,-136,290,-84,&17000111,"Password","",40)
 ic%(39)=FNicon(pww%,16,-200,290,-148,&17000111,"","",40)
 ic%(40)=FNwritable(pww%,300,984,-148)
-pwok%=FNbutton(pww%,760,984,-220,"OK")
-pwcan%=FNbutton(pww%,560,744,-220,"Cancel")
+ic%(41)=FNicon(pww%,16,-264,290,-212,&17003113,"Show","Soptoff,opton",8)
+ic%(42)=FNicon(pww%,300,-264,984,-212,&17000111,"","",40)
+pwok%=FNbutton(pww%,760,984,-268,"OK")
+pwcan%=FNbutton(pww%,560,744,-268,"Cancel")
 ENDPROC
 
 REM Configure starts plug-ins with "-openat x y"
@@ -381,6 +386,7 @@ DEF PROCclick(w%,i%,b%)
 IF w%=pww% THEN
   IF i%=pwok% THEN PROCpwok
   IF i%=pwcan% THEN PROCpwcancel
+  IF i%=ic%(41) THEN PROCpwshow(NOT pwshow%)
 ENDIF
 IF w%<>win% THEN ENDPROC
 CASE i% OF
@@ -813,6 +819,8 @@ ELSE
   PROCplace(FALSE)
 ENDIF
 PROCseti(pww%,ic%(38),"") : PROCseti(pww%,ic%(40),"")
+PROCpwshow(FALSE)
+pwcaps%=-1 : PROCpwcaps
 PROCopen(pww%)
 SYS "Wimp_SetCaretPosition",pww%,ic%(38),0,0,-1,0
 ENDPROC
@@ -823,7 +831,35 @@ LOCAL d%
 IF on% THEN d%=0 ELSE d%=-4000
 SYS "Wimp_ResizeIcon",pww%,ic%(39),16+d%,-200,290+d%,-148
 SYS "Wimp_ResizeIcon",pww%,ic%(40),300+d%,-200,984+d%,-148
-SYS "Wimp_ForceRedraw",pww%,0,-300,1000,0
+SYS "Wimp_ForceRedraw",pww%,0,-348,1000,0
+ENDPROC
+
+REM the fields as typed (on%) or as stars: their validation strings are
+REM "D*", or empty; and the option's tick
+DEF PROCpwshow(on%)
+LOCAL i%
+pwshow%=on%
+FOR i%=38 TO 40 STEP 2
+  blk%!0=pww% : blk%!4=ic%(i%)
+  SYS "Wimp_GetIconState",,blk%
+  IF on% THEN ?(blk%!32)=13 ELSE ?(blk%!32)=ASC"D"
+  blk%!0=pww% : blk%!4=ic%(i%) : blk%!8=0 : blk%!12=0
+  SYS "Wimp_SetIconState",,blk%
+NEXT
+blk%!0=pww% : blk%!4=ic%(41) : blk%!12=&200000
+IF on% THEN blk%!8=&200000 ELSE blk%!8=0
+SYS "Wimp_SetIconState",,blk%
+ENDPROC
+
+REM Caps Lock on is said (the keyboard status byte's bit 4 is set when it
+REM is off): a password typed unseen with it on is a different password
+DEF PROCpwcaps
+LOCAL s%
+SYS "OS_Byte",202,0,255 TO ,s%
+s%=((s% AND 16)=0)
+IF s%=pwcaps% THEN ENDPROC
+pwcaps%=s%
+IF s% THEN PROCseti(pww%,ic%(42),"Caps Lock is on") ELSE PROCseti(pww%,ic%(42),"")
 ENDPROC
 
 DEF PROCkey(w%,i%,k%)

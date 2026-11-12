@@ -475,8 +475,65 @@ static unsigned veneer_psr;	/* sites found by the TEQ pc, pc rule */
 static int debug, debug_faults;
 static void dbg (const char *what, unsigned a, unsigned b, unsigned c);
 static unsigned mrs_flags_left;		/* _swix's flags-only MRS, not patched */
+
+/* (0.47) A word that an instruction near it loads as a literal is data:
+     ldr  rX, [pc, #n]      (the word itself)
+     ldf/stf/ldc [pc, #n]   (a double's or extended's first, second or
+			     third word)
+   A compiler's literal pool sits in the code, between AL instructions,
+   which the rules below take for the sign of an instruction. ChartDraw and
+   MultiPlot have 256000.0 there (draw units): its first word, &410F4000,
+   is MRSMI r4, CPSR. Patched to a UDF, the number loaded was something
+   else, and each stopped as it started with "Floating point exception:
+   invalid operation". Both ways are looked at, as far as such a load can
+   reach (4K; coprocessor loads 1K). */
+static unsigned literals_left;
+static int
+literal_word (const unsigned *p, const unsigned *lo, const unsigned *hi)
+{
+  const unsigned *a = p - 1026 > lo && p - 1026 < p ? p - 1026 : lo;
+  const unsigned *b = p + 1026 < hi && p + 1026 > p ? p + 1026 : hi;
+  for (const unsigned *q = a; q < b; q++)
+    {
+      unsigned x = *q;
+      if ((x >> 28) == 15 || q == p)
+	continue;
+      if ((x & 0x0f7f0000u) == 0x051f0000u)		/* LDR rX, [pc, #+-n] */
+	{
+	  unsigned off = x & 0xfff;
+	  const unsigned *t = (const unsigned *) ((unsigned) (q + 2) + (x & 0x800000u ? off : 0u - off));
+	  if (t == p && !(off & 3))
+	    return 1;
+	}
+      else if ((x & 0x0f1f0000u) == 0x0d1f0000u)	/* LDC [pc, #+-n] (LDF) */
+	{
+	  unsigned off = (x & 0xff) * 4;
+	  const unsigned *t = (const unsigned *) ((unsigned) (q + 2) + (x & 0x800000u ? off : 0u - off));
+	  if (p >= t && p <= t + 2)
+	    return 1;
+	}
+    }
+  return 0;
+}
+
+static int psr_insn_1 (const unsigned *p, const unsigned *lo, const unsigned *hi);
 static int
 psr_insn (const unsigned *p, const unsigned *lo, const unsigned *hi)
+{
+  if (!psr_insn_1 (p, lo, hi))
+    return 0;
+  if (literal_word (p, lo, hi))
+    {
+      literals_left++;
+      if (debug_faults)
+	dbg ("fault-literal-left", (unsigned) p, *p, p - lo);
+      return 0;
+    }
+  return 1;
+}
+
+static int
+psr_insn_1 (const unsigned *p, const unsigned *lo, const unsigned *hi)
 {
   unsigned w = *p, cond = w >> 28;
   if ((w & 0xfff1fe20u) == 0xf1000000u)			/* CPS */
@@ -485,6 +542,19 @@ psr_insn (const unsigned *p, const unsigned *lo, const unsigned *hi)
 	 matches CPS easily) */
       if (!((w & 0x000e0000u) != 0 && (!(w & 0x20000u) || valid_mode (w))))
 	return 0;
+      /* (0.48) and a CPS the processor would take: interrupts enabled or
+	 disabled name at least one of A, I, F; a mode change alone names
+	 none; without a mode change the mode bits are zero. OvationPro's
+	 image has &F10C0098 and &F10C0099 in a table (CPSID with mode
+	 bits and no mode change): patched while it was being unsqueezed,
+	 they spoiled the compressed data and it stopped as it started,
+	 "undefined instruction at &8070". */
+      {
+	unsigned imod = (w >> 18) & 3, m = (w >> 17) & 1, aif = (w >> 6) & 7;
+	if (imod == 1 || (imod >= 2 ? aif == 0 : (!m || aif != 0))
+	    || (!m && (w & 0x1f)))
+	  return 0;
+      }
       for (int d = -2; d <= 2; d++)
 	if (d && p + d >= lo && p + d < hi && (p[d] >> 28) == 14)
 	  return 1;
@@ -932,7 +1002,7 @@ patch_range (unsigned lo, unsigned hi)
   unsigned n = 0;
   unsigned *a = (unsigned *) (lo & ~3u), *b = (unsigned *) (hi & ~3u);
   for (unsigned *p = a; p < b; p++)
-    if (userbank_insn (p, a, b))
+    if (userbank_insn (p, a, b) && !literal_word (p, a, b))
       n += site_add (p, KIND_PSR);
     else if (psr_insn (p, a, b))
       {
@@ -2891,6 +2961,19 @@ sync_patch (unsigned lo, unsigned hi)
      decompressor synchronises again). What's there now is compressed
      data - which can look like CPS and the like: patched, it unsqueezed
      to garbage (NetSurf). */
+  /* (0.48) Or one that UnSqueezeAIF (the ROM's module, for programs
+     squeezed by old versions of squeeze) is having unsqueezed: it puts
+     "ldr pc, [pc, #-4]" and its own address at &800C to get control back,
+     so the header doesn't read as squeezed any more, and that squeeze's
+     decompressor synchronises the whole of application space before it
+     has finished. FileSwitch synchronises the program afterwards. */
+  if (skipsqueezed && lo <= 0x8000u && hi > 0x8014u
+      && *(volatile unsigned *) 0x800cu == 0xe51ff004u
+      && *(volatile unsigned *) 0x8010u - ROM_LO < ROM_HI - ROM_LO)
+    {
+      ns.squeezed_skipped++;
+      return;
+    }
   if (skipsqueezed && lo <= 0x8000u && hi > 0x8014u && aif_squeezed ())
     {
       ns.squeezed_skipped++;
@@ -5431,6 +5514,7 @@ mod_command (int index, const char *tail, int argc)
   line_out ("Trapped instructions whose condition failed (skipped): ", ns.cond_skipped);
   line_out ("Never-run privileged instructions (TEQ pc, pc; LDMNE ^) made NOPs: ", ns.cond_nopped);
   line_out ("MRS reading only the flags (_swix) left to run: ", mrs_flags_left);
+  line_out ("Words loaded as literals left (data, not instructions): ", literals_left);
   line_out ("CP15 barriers emulated: ", ns.cp15_barriers);
   line_out ("Abort register dumps switched back without a stack: ", ns.abtdump_sw);
   line_out ("CP15 barriers replaced by ARMv7 ones: ", ns.cp15_rewritten);

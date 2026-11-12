@@ -1,12 +1,217 @@
 # Changelog
 
-## Since images 1.0.0020 (9 to 11 November 2026; through Updates)
+## Since images 1.0.0020 (9 to 12 November 2026; through Updates)
 
-RISC OS 5.31-24 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
-0.45, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
+RISC OS 5.31-28 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
+0.48, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
 `*IXRun`, the Pi kernel's fan driver and the Pi's headphone socket.
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
+
+### NativeSupport 0.48: OvationPro starts (12 Nov 2026; riscos-support 1.0.0051-1)
+
+OvationPro (the demo, 2.xx of 06-Apr-2010, from the owner) stopped as it
+started with "Internal error: undefined instruction at &00008070", with
+0.47 too; with `*NativeSupport SyncPatch Off` it ran.
+
+- **Cause.** It is squeezed by an old squeeze, so the ROM's UnSqueezeAIF
+  has it unsqueezed under its control: it puts `ldr pc, [pc, #-4]` and its
+  own address at &800C, and that squeeze's decompressor synchronises the
+  whole of application space (&8000 to &1A4000) while the image is being
+  unsqueezed. The header no longer read as squeezed (the word at &8010
+  wasn't SWI OS_Exit), so the range was scanned, and two words of it,
+  &F10C0098 and &F10C0099 (a table), passed for CPS beside an AL
+  instruction and were made UDF markers. The decompressed image came out
+  16 bytes out below them: the header's zero-initialising loop at &8070
+  was the text "(06-Apr-2010)".
+- **Fixes.**
+  1. A synchronisation over a program at &8000 that UnSqueezeAIF has in
+     hand (&800C is `ldr pc, [pc, #-4]` and &8010 an address in the ROM)
+     is left, as a squeezed program's is: FileSwitch synchronises the
+     unsqueezed program afterwards (seen: &8000 to &1391B4).
+  2. CPS is patched only if the processor would take it: enabling or
+     disabling names at least one of A, I, F; a mode change alone names
+     none; with no mode change the mode bits are zero.
+- With the fault log on, the trace was: sync &8000-&A9313 (squeezed,
+  FileSwitch), &A9160-&A916C and &800C-&8018 (UnSqueezeAIF's pokes),
+  &8000-&1A4000 (the decompressor's: sites at &52E94 and &619A4), then
+  &8000-&1391B4.
+- Tested in the native VM with 0.48: OvationPro starts and opens a new
+  document; ChartDraw beside it. `literal` has the two table words.
+- Also with 0.48 in the native VM: Draw, Paint, Edit, Alarm, Chars, Help,
+  Maestro, SciCalc, RiSH, MultiPlot running together; ROBench (52 checks,
+  0 failed); Iris starts and shows its home page; CloseUp, Squash.
+- The suite natively: the same 8 failures as 0.47 (that VM's own), and
+  two time-outs (fp-conformance-exact, desktop-window) while a second VM
+  was running ROBench on the build machine: both pass run alone (28 s,
+  25 s).
+- Seen and not looked into: Iris started while RiSH is running gives
+  "There are still clients using ARMEABISupport".
+- Photodesk (George's fourth) still not tried.
+
+### NativeSupport 0.47: a number in a literal pool is not an instruction (12 Nov 2026; riscos-support 1.0.0050-1)
+
+George Greenfield's report: ChartDraw 3.54 and MultiPlot 3.02 (Chris
+Johnson's) didn't start on RISC OS on Linux; Photodesk 3.22 and OvationPro
+neither.
+
+- **Cause** (ChartDraw and MultiPlot, reproduced natively in the test VM):
+  "Floating point exception: invalid operation" as each starts, in
+  ChartDraw's `linewidth_du`: `ldfd f3, [pc, #28]; mufd f0, f2, f3;
+  fixz r0, f0` with 256000.0 (draw units) as the literal. Its first word,
+  &410F4000, is `MRSMI r4, CPSR`; it sits after the function's return, so
+  between AL instructions, which the scan of a starting program took for
+  the sign of an instruction: patched to a UDF marker, the number loaded
+  was &E7F104FE.. and the FIX was invalid.
+- **Fix:** `literal_word()`: a candidate (MRS, MSR, CPS forms; LDM/STM ^)
+  that an instruction within reach loads pc-relative is data and is left:
+  `ldr rX, [pc, #n]` (the word), `ldf/ldc [pc, #n]` (a double's or
+  extended's first, second or third word). Looked for 1026 words either
+  way, only for candidates. Counted ("Words loaded as literals left" in
+  *NativeSupport's report; `fault-literal-left` with fault reports on).
+- This doesn't make the scan able to tell every piece of data from an
+  instruction (NativeSupport$Leave is still there for a module with
+  tables of instructions); it removes the commonest case, a compiler's
+  literal pool.
+- The suite natively (tools/native-vm) with 0.47: 61 pass, 8 fail; the 8
+  are that VM's own (its ROM and network: bigfile, freespace, discname,
+  ramdisc, hal-counter, select-timeout, sockopt, mimetype) and the four
+  of them tried again with 0.46 fail the same way, where `literal` also
+  fails with 0.46 and passes with 0.47.
+- Test: `tests/programs/literal.bas`, `check literal`. In the native VM
+  with 0.47: ChartDraw and MultiPlot start, ChartDraw opens its example
+  Finance chart. Photodesk and OvationPro (commercial) not tried: 256000
+  is a usual constant in such programs, so the same cause is likely.
+
+### init starting rol-3d is packaged (12 Nov 2026; riscos-support 1.0.0049-1)
+
+- init from this tree (2da3406: rol-3d started at start-up if
+  /opt/riscos/rol-3d is there, as rol-discd is) is in riscos-support
+  1.0.0049-1. Until now the package's init was the one before that
+  commit. The same binary has been the QEMU test image's init since it
+  was written (it starts rol-3d there). Not yet started on a Pi.
+
+### rol-fb overlays: the Pi 4's results, and planes set without waiting (12 Nov 2026; riscos-support 1.0.0048-1)
+
+- **The first test build on the owner's Pi 4 (kernel 6.6.78-9, 1920x1200):**
+  16 overlay planes, each taking YUV420, XRGB, ARGB, XBGR and ABGR, zpos
+  1 to 16 (the primary 0, the cursor 17). RGB overlays showed, stacked in
+  slot order under the desktop and through the key colour. But SETPLANE
+  waits for the display's next frame (13.7 ms a SHOW): one overlay ran at
+  58.7 frames a second, two at 28.1 each, three at 15.7 each, and rol-fb
+  did nothing else meanwhile.
+- **Planes are now set by atomic commits that don't wait**
+  (DRM_CLIENT_CAP_ATOMIC; DRM_MODE_ATOMIC_NONBLOCK with a page-flip
+  event): every SHOW that is waiting goes into one commit, and each is
+  answered when the display's event says it is on screen, with that time.
+  One SHOW at a time on a connection (-EBUSY before the last is
+  answered). The old way is kept for a driver without atomic commits, if
+  a commit fails, or if /riscos/overlay-legacy exists. Before anything
+  still set the old way (a mode, a plane off, zpos) the commit that is
+  out is waited for. Video (LinuxCodec) goes the same way.
+- **Build 3 on the Pi 4** (atomic commits in use): 56.1 frames a second
+  with one overlay, 27.9 each with two, 26.0 each with three. A commit
+  was made as soon as one SHOW came, so the others' went into the next
+  frame's, and they took turns. **Build 4: a commit waits** until every
+  overlay that is showing has asked, or until 5 ms before the next frame
+  is due (from the last flip's time and the mode's refresh rate).
+- **Build 4 on the Pi 4:** 58.5 with one, 50.8 each with two, 40.2 each
+  with three (the test program drew every overlay's picture itself, in
+  turn, inside the frame: `ovtest show` is now a process for each), and a
+  black flash as the first overlay opened. **Build 5: no flash**: when
+  the desktop's buffer is remade at the same size (with or without an
+  alpha channel) the picture is copied into the new one before it is
+  shown, and the old buffer is let go only after the new one is up
+  (letting it go first turned its plane off).
+- **Build 5 on the Pi 4** (a process per overlay): 58.6 frames a second
+  with one overlay; 56.0 and 55.4 with two; 56.5, 57.1 and 56.5 with
+  three. About 15.5 ms from SHOW to the screen.
+- **Checked by the owner on the Pi 4:** video as before (build 4);
+  with RISC3D's kit 12 on build 5: several GL windows at once, a menu or
+  window over one, dragging, a mode change while running. Build 5's
+  rol-fb is riscos-support 1.0.0048-1's.
+- **A window part of the way off the screen** shows the part that is on:
+  rol-fb cuts the destination and the source to the screen; wholly off,
+  the plane goes off and the SHOW is answered as shown.
+- SHOW's `[10]` bit 8 (tests): no key, the rectangle shows through the
+  desktop whatever is there. `ovtest show N` uses it (add `key` for the
+  key), and now asks for every overlay's frame before taking the answers.
+- **Tested:** QEMU test mode only ("ovtest ok"; the desktop starts with
+  the atomic capability on). **The atomic path has not run on any real
+  plane:** PlaneTest-3.
+
+### Passwords: Show, a Caps Lock warning, and a log (12 Nov 2026; riscos-support 1.0.0047-1, riscos-harddisc 1.0.0051-1)
+
+The report (George Greenfield, Raik: the password chosen at the first use
+of Updates refused after the first update) isn't reproduced and its cause
+isn't found; what is left is that different characters were typed the
+second time, which stars hide. So:
+
+- **Updates 1.02** (harddisc/extras/!ROLUpdate): the password window has a
+  **Show** option (the fields' "D*" validation off and on; off each time
+  the window opens) and says **"Caps Lock is on"** while it is (OS_Byte
+  202, read on null events while the window is open).
+- **rol-cmd** (images/fe/rol-cmd.c): `/var/log/rol-cmd.log` (mode 600,
+  emptied past 64K) gets a line for each password set and each refused:
+  the length, how many characters aren't ASCII, and for a refused one
+  whether it would have been right with the letters' case swapped. Never
+  the password.
+- Nothing in how a password is stored (root's entry in /etc/shadow) or
+  checked has changed: existing passwords are untouched.
+- riscos-support 1.0.0047-1 has this rol-cmd and **1.0.0046's rol-fb**
+  (the several-overlays rol-fb below waits for its Pi test).
+- Tested under QEMU: set, a case-swapped try (refused, logged YES), a
+  wrong one, the right one; the window with stars, shown, Caps Lock on.
+
+### rol-fb: several overlays at once, and RGB ones (12 Nov 2026; test build 1; in riscos-support 1.0.0048-1 as built above)
+
+For RISC3D (its handoff of 12 Nov): a GL window's frames shown straight
+from the GPU's buffers on a hardware plane, as video is, instead of read
+back and copied three times.
+
+- **Each connection to "rol-fb-overlay" is an overlay with a plane of its
+  own**, up to 4, freed when the connection closes. Before, there was one
+  overlay and a new connection replaced it. A second *video* still takes
+  over from the first (LinuxCodec's behaviour is unchanged: it sends no
+  kind or version and gets the replies it always did).
+- **RGB overlays**: OPEN with kind 1 picks a plane that takes XRGB8888,
+  ARGB8888, XBGR8888 or ABGR8888 and says which; ADDBUF takes those
+  fourccs and, optionally, a format modifier.
+- **Stacking**: the overlays from the bottom in the order of their slots,
+  the desktop above them all (on the Pi: overlays at zpos 1 to 4, the
+  desktop's plane at 5; where a driver won't have that, one overlay at a
+  time as before). The key colour clips every overlay, so no clip
+  rectangles are needed.
+- **SHOW's reply to a version 1 client** has the time the plane was set
+  and how long setting it took. On vc4 that call waits for the display's
+  next frame, so the reply paces a client to the display. Two overlays
+  animating at once may therefore get half the display's rate each: the
+  Pi test measures it, and atomic commits (several planes in one) are the
+  answer if so.
+- **Planes logged at start-up** (type, formats, zpos), and each overlay's
+  average time to set its plane every 600 frames.
+- A dmabuf's handle is closed when its last framebuffer here goes (it was
+  closed with each).
+- `tools/ovtest.c`: a Linux client. `ovtest` tests the protocol (three
+  overlays at once, a video taking over, an old client, a fifth
+  connection refused); `ovtest show N` shows N RGB overlays of moving
+  bars for 10 seconds and prints the frame rate.
+- **Tested:** under QEMU in rol-fb's test mode (/riscos/overlay-test; the
+  virtual display has no overlay planes): "ovtest ok". **Not tested: any
+  real plane** (the stacking, RGB buffers, and video as before): that is
+  the PlaneTest kit for a Pi 4 or 5.
+
+### Test: BPUT# of two strings, read back (12 Nov 2026)
+
+- tests/programs/bput.bas, `check bput`: a new file written as Updates
+  writes rol-cmd's requests (a password line, then the command with its
+  newline), 9000 times with every write read back. From the report that
+  the root password set at the first use of Updates was refused after
+  the first update (George Greenfield, Raik): a lost first line would
+  read to rol-cmd as no password. Passes under QEMU and natively
+  (tools/native-vm, NativeSupport 0.46 with SWI stubs), so that isn't
+  the cause; rol-cmd itself sets and checks a password with Latin-1
+  characters correctly. The cause isn't found yet.
 
 ### Pi kernel 6.6.78-9: the GPU's driver, v3d (12 Nov 2026; riscos-kernel-pi 6.6.78-9)
 

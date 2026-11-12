@@ -102,6 +102,16 @@ check ixfs-discname 0 '^discname ok' 60 '' -- \
 # past the extent (IXFS and RAM disc): RISC OS 5.31-28
 check ramdisc 0 '^ramdisc ok' 600 '' -- \
   -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.ramdisc/bas'
+# BPUT# of two strings to a new file, 9000 times, read back (how Updates
+# sends rol-cmd its password line and command; natively the write's SWI
+# site gets its stub on the way)
+check bput 0 '^bput ok' 600 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.bput/bas'
+# a literal pool's number that reads as MRSMI r4, CPSR (256000.0) and one
+# that reads as MSR CPSR_c, r0 are loaded as they are (natively:
+# NativeSupport 0.47 leaves a word that a pc-relative load reads)
+check literal 0 '^literal ok' 60 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.literal/bas'
 # GPIO HAL devices (RISC OS 5.31-17): a Pi 3 or 4's, through /dev/gpiomem;
 # none elsewhere (here), and looking for them must not go wrong
 check gpio-devices 0 '^gpio (ok|none)$' 60 '' -- \

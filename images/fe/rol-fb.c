@@ -163,17 +163,78 @@ send_report (int reason, uint32_t a, uint32_t b, uint32_t c)
 
 #define OV_KEY 0x080008u
 #define OV_BUFS 32
-static int ov_listen = -1, ov_client = -1;
-static uint32_t ov_plane, prim_plane, ov_zpos_ok;
+#define OV_MAX 4			/* overlays at once: one connection each */
+#define OV_PLANES 32
+/* what a plane takes */
+#define OVF_YUV 1u
+#define OVF_XRGB 2u
+#define OVF_ARGB 4u
+#define OVF_XBGR 8u
+#define OVF_ABGR 16u
+#define OVF_RGB (OVF_XRGB | OVF_ARGB | OVF_XBGR | OVF_ABGR)
+struct ov
+{
+  int fd;				/* the connection; -1: not in use */
+  int open;				/* OPEN done: it has a plane (or the test's none) */
+  int kind;				/* 0 video (YUV), 1 RGB (RISC3D's rol-3d) */
+  int version;				/* the client's (OPEN's [2]); 0: before 1.0.0047 */
+  uint32_t plane;
+  int shown;				/* index on screen, or -1 */
+  int x, y, w, h;			/* RISC OS pixels: the key area */
+  int lx, ly, lw, lh;			/* as last drawn round */
+  int colours;
+  unsigned nshow;
+  unsigned long show_us;		/* from SHOW to on screen (logged now and then) */
+  int nokey;				/* a test's: shows whatever the desktop has there */
+  /* a SHOW not yet on screen: asked for (pend), then in a commit (infl) */
+  int pend, infl, prev;
+  int p_i, p_x, p_y, p_w, p_h;
+  int32_t p_src[4];
+  struct timespec p_t0;
+  uint32_t pid[10];			/* the plane's properties (ov_pnames) */
+  struct { uint32_t fb, handle; } buf[OV_BUFS];
+};
+static struct ov ovs[OV_MAX];
+static struct { uint32_t id; unsigned fmt; } ov_pl[OV_PLANES];
+static int ov_npl, ov_multi;
+/* (1.0.0048) Planes are set by atomic commits that don't wait: setting a
+   plane the old way (SETPLANE) waits for the display's next frame, so
+   every SHOW held rol-fb up for most of a frame, and two overlays got
+   half the display's rate each, three a third (measured on a Pi 4: 58.7,
+   28.1, 15.7 frames a second). Now every SHOW waiting goes into one
+   commit, and each is answered when the display says it is on screen.
+   Off (the old way) if the driver hasn't atomic commits, one fails, or
+   /riscos/overlay-legacy exists. */
+static int ov_atomic, flip_busy, ov_retry;
+/* One commit a frame has to carry every overlay's SHOW, or they take
+   turns: a commit made as soon as one SHOW came left the others for the
+   next frame (a Pi 4: 56 frames a second with one overlay, 28 each with
+   two, 26 with three). So a commit waits, until every overlay that is
+   showing has asked, or until OV_MARGIN before the next frame is due. */
+#define OV_MARGIN 5000			/* microseconds */
+static struct timespec last_flip;
+static int ov_wait;			/* SHOWs held for the others */
+static long long ov_deadline;		/* CLOCK_MONOTONIC microseconds */
+
+static long long
+mono_us (void)
+{
+  struct timespec t;
+  clock_gettime (CLOCK_MONOTONIC, &t);
+  return (long long) t.tv_sec * 1000000 + t.tv_nsec / 1000;
+}
+static const char *const ov_pnames[10] = { "FB_ID", "CRTC_ID", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H",
+					   "SRC_X", "SRC_Y", "SRC_W", "SRC_H" };
+static unsigned ov_base;		/* zpos of the first overlay */
+static int ov_listen = -1;
+static uint32_t prim_plane, ov_zpos_ok;
 /* Drivers whose primary plane must stay at the bottom (the Pi's vc4: zpos
    0, fixed; every overlay above it): with a video, the desktop goes on a
    second overlay plane above the video's, and the primary shows black. */
 static uint32_t desk_plane, blk_fb, blk_handle;
 static int desk_on;
 static int ov_fake;			/* /riscos/overlay-test: no plane, log only */
-static int ov_need, ov_shown = -1;		/* ARGB desktop; index on screen */
-static int ov_x, ov_y, ov_w, ov_h;		/* RISC OS pixels: the key area */
-static struct { uint32_t fb, handle; } ov_buf[OV_BUFS];
+static int ov_need;			/* ARGB desktop (an overlay is open) */
 static struct drm_mode_modeinfo cur_mode;
 static int have_cur_mode;
 
@@ -297,13 +358,36 @@ drm_hide_cursor (void)
 static void ov_under (void);
 static void blk_free (void);
 
+static void ov_flush (void);
+
+static void
+drm_old (uint32_t old_fb, uint32_t old_handle, unsigned char *old_map, size_t old_size)
+{
+  if (old_map && old_map != MAP_FAILED)
+    munmap (old_map, old_size);
+  if (old_fb)
+    ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &old_fb);
+  if (old_handle)
+    {
+      struct drm_mode_destroy_dumb d = { .handle = old_handle };
+      ioctl (drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+    }
+}
+
 static int
 drm_setup (const struct drm_mode_modeinfo *mode)
 {
-  drm_release ();
+  ov_flush ();
+  /* (the buffer on screen stays until the new one is: letting it go first
+     turns its plane off, a black frame or two) */
+  uint32_t old_fb = drm_fb, old_handle = drm_handle;
+  unsigned char *old_map = fb;
+  size_t old_size = fb_size;
+  drm_fb = drm_handle = 0;
+  fb = NULL;
   struct drm_mode_create_dumb cd = { .width = mode->hdisplay, .height = mode->vdisplay, .bpp = 32 };
   if (ioctl (drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd))
-    return -1;
+    { drm_old (old_fb, old_handle, old_map, old_size); return -1; }
   drm_handle = cd.handle;
   if (ov_need)
     {
@@ -313,7 +397,7 @@ drm_setup (const struct drm_mode_modeinfo *mode)
       f2.handles[0] = cd.handle;
       f2.pitches[0] = cd.pitch;
       if (ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB2, &f2))
-	return -1;
+	{ drm_old (old_fb, old_handle, old_map, old_size); return -1; }
       drm_fb = f2.fb_id;
     }
   else
@@ -321,26 +405,39 @@ drm_setup (const struct drm_mode_modeinfo *mode)
       struct drm_mode_fb_cmd fc = { .width = cd.width, .height = cd.height, .pitch = cd.pitch,
 				    .bpp = 32, .depth = 24, .handle = cd.handle };
       if (ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB, &fc))
-	return -1;
+	{ drm_old (old_fb, old_handle, old_map, old_size); return -1; }
       drm_fb = fc.fb_id;
     }
   cur_mode = *mode;
   have_cur_mode = 1;
   struct drm_mode_map_dumb md = { .handle = cd.handle };
   if (ioctl (drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md))
-    return -1;
+    { drm_old (old_fb, old_handle, old_map, old_size); return -1; }
   fb_size = cd.size;
   fb = mmap (NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, md.offset);
   if (fb == MAP_FAILED)
-    return -1;
+    { drm_old (old_fb, old_handle, old_map, old_size); return -1; }
   memset (fb, 0, fb_size);
+  /* The same size as before (the desktop's buffer remade with or without
+     an alpha channel, when the first overlay opens or the last closes):
+     the picture goes into the new buffer before it is shown, or the
+     screen is black until the next redraw (a flash at each). */
+  int same = back && fb_bpp == 32 && fb_w == (int) mode->hdisplay && fb_h == (int) mode->vdisplay;
+  if (same)
+    for (int y = 0; y < fb_h; y++)
+      {
+	const uint32_t *row = back + (size_t) y * fb_w;
+	uint32_t *d32 = (uint32_t *) (fb + (size_t) y * cd.pitch);
+	for (int x = 0; x < fb_w; x++)
+	  d32[x] = row[x] | 0xFF000000u;
+      }
   struct drm_mode_crtc cr = { .crtc_id = drm_crtc, .fb_id = drm_fb,
 			      .set_connectors_ptr = (uintptr_t) &drm_conn, .count_connectors = 1,
 			      .mode = *mode, .mode_valid = 1 };
   if (ioctl (drm_fd, DRM_IOCTL_MODE_SETCRTC, &cr))
     {
       perror ("rol-fb: SETCRTC");
-      return -1;
+      { drm_old (old_fb, old_handle, old_map, old_size); return -1; }
     }
   drm_hide_cursor ();
   if (desk_plane && !ov_need && desk_on)
@@ -353,12 +450,16 @@ drm_setup (const struct drm_mode_modeinfo *mode)
     }
   if (ov_need)
     ov_under ();
+  drm_old (old_fb, old_handle, old_map, old_size);
   fb_w = mode->hdisplay;
   fb_h = mode->vdisplay;
   fb_stride = cd.pitch;
   fb_bpp = 32;
-  free (back);
-  back = calloc ((size_t) fb_w * fb_h, 4);
+  if (!same)
+    {
+      free (back);
+      back = calloc ((size_t) fb_w * fb_h, 4);
+    }
   map_valid = 0;
   fprintf (stderr, "rol-fb: display %dx%d (DRM)\n", fb_w, fb_h);
   return back ? 0 : -1;
@@ -472,9 +573,24 @@ drm_match_mode (int w, int h)
    transparent, so windows and menus on top of the video still show. If the
    driver can't put the plane underneath (no zpos), it goes on top.
 
+   (1.0.0047) More than one overlay, and RGB ones: each connection is an
+   overlay with a plane of its own (up to OV_MAX), freed when it closes.
+   RISC3D's rol-3d (a Linux program) shows a GL window's buffers this way:
+   OPEN with kind 1, ADDBUF with an RGB fourcc. A second video takes over
+   from the first, as before. Overlays stack in the order of their slots,
+   all under the desktop, so the key clips every one of them.
+
    Messages: 16 words, [0] = command, replies 16 words, [0] = 0 or -errno.
-     1 OPEN                       -> [1] key colour 0x00RRGGBB, [2] under (1/0)
+     1 OPEN kind version          -> [1] key colour 0x00RRGGBB, [2] under (1/0)
+                                  kind 0 video, 1 RGB; version 0 (neither
+                                  given: LinuxCodec) or 1, which also gets
+                                  [3] 1, [4] the plane's RGB formats (bit 0
+                                  XRGB8888, 1 ARGB, 2 XBGR, 3 ABGR), [5] [6]
+                                  the screen's size in RISC OS pixels.
+                                  -ENODEV: no such plane; -EBUSY: all in use
      2 ADDBUF index w h fourcc pitch0 off0 pitch1 off1 pitch2 off2 (+ fd)
+                                  [13] bit 0: [11] [12] are the buffer's
+                                  format modifier (low, high)
      3 SHOW index x y w h sx sy sw sh  (RISC OS pixels from the top left;
                                        source rectangle in picture pixels)
                                   -> [1] the index shown before (now free) or -1
@@ -484,7 +600,13 @@ drm_match_mode (int w, int h)
                                   VideoOverlay through LinuxOverlay)
                                   -> [1] size, [2..7] pitch/offset of each
                                      plane (+ its dmabuf fd, to map)
-   SHOW's [10]: bit 0 BT.709 (else 601), bit 1 full range (else video). */
+   SHOW's [10]: bit 0 BT.709 (else 601), bit 1 full range (else video);
+   bit 8 (tests): no key, the whole rectangle shows through the desktop.
+   One SHOW at a time on a connection: -EBUSY before the last is answered.
+   SHOW's reply comes when the picture is on screen (the display's next
+   frame: frames are paced by it); to a version 1 client it also has [3] [4]
+   the time then (CLOCK_MONOTONIC seconds, microseconds) and [5] the
+   microseconds from the SHOW. */
 static int
 prop_id (uint32_t obj, const char *name, uint64_t *value)
 {
@@ -520,12 +642,25 @@ set_prop (uint32_t obj, const char *name, uint64_t value)
   return ioctl (drm_fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &sp);
 }
 
-/* An overlay plane for our CRTC that takes YUV 4:2:0, and the primary */
+static struct ov *
+ov_first (void)
+{
+  for (struct ov *c = ovs; c < ovs + OV_MAX; c++)
+    if (c->fd >= 0 && c->open && c->plane)
+      return c;
+  return NULL;
+}
+
+/* Our CRTC's overlay planes and what each takes, the primary, and the
+   plane the desktop moves to where the primary can't go on top */
 static void
 ov_find_planes (void)
 {
   struct drm_set_client_cap cap = { DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1 };
   ioctl (drm_fd, DRM_IOCTL_SET_CLIENT_CAP, &cap);
+  struct drm_set_client_cap acap = { DRM_CLIENT_CAP_ATOMIC, 1 };
+  ov_atomic = access ("/riscos/overlay-legacy", F_OK) != 0
+    && ioctl (drm_fd, DRM_IOCTL_SET_CLIENT_CAP, &acap) == 0;
   uint32_t crtcs[16];
   struct drm_mode_card_res res = { .crtc_id_ptr = (uintptr_t) crtcs, .count_crtcs = 16 };
   if (ioctl (drm_fd, DRM_IOCTL_MODE_GETRESOURCES, &res))
@@ -540,7 +675,9 @@ ov_find_planes (void)
   struct drm_mode_get_plane_res pr = { .plane_id_ptr = (uintptr_t) planes, .count_planes = 64 };
   if (ioctl (drm_fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr))
     return;
-  ov_plane = prim_plane = desk_plane = 0;
+  uint32_t first_yuv = 0;
+  prim_plane = desk_plane = 0;
+  ov_npl = 0;
   for (uint32_t i = 0; i < pr.count_planes && i < 64; i++)
     {
       uint32_t fmts[128];
@@ -551,30 +688,93 @@ ov_find_planes (void)
       prop_id (planes[i], "type", &type);
       if (type == 1 /* primary */ && !prim_plane)
 	prim_plane = planes[i];
-      if (type != 0 /* overlay */)
-	continue;
-      int yuv = 0, argb = 0;
+      unsigned fmt = 0;
       for (uint32_t f = 0; f < gp.count_format_types && f < 128; f++)
-	{
-	  yuv |= fmts[f] == DRM_FORMAT_YUV420;
-	  argb |= fmts[f] == DRM_FORMAT_ARGB8888;
-	}
-      if (yuv && !ov_plane)
-	ov_plane = planes[i];
-      else if (argb && !desk_plane)
+	fmt |= fmts[f] == DRM_FORMAT_YUV420 ? OVF_YUV
+	  : fmts[f] == DRM_FORMAT_XRGB8888 ? OVF_XRGB
+	  : fmts[f] == DRM_FORMAT_ARGB8888 ? OVF_ARGB
+	  : fmts[f] == DRM_FORMAT_XBGR8888 ? OVF_XBGR
+	  : fmts[f] == DRM_FORMAT_ABGR8888 ? OVF_ABGR : 0;
+      uint64_t zpos = 0;
+      int has_zpos = prop_id (planes[i], "zpos", &zpos) != 0;
+      fprintf (stderr, "rol-fb: plane %u %s:%s%s%s%s%s%s zpos %s%d\n", planes[i],
+	       type == 1 ? "primary" : type == 2 ? "cursor" : "overlay",
+	       fmt & OVF_YUV ? " YUV420" : "", fmt & OVF_XRGB ? " XRGB" : "",
+	       fmt & OVF_ARGB ? " ARGB" : "", fmt & OVF_XBGR ? " XBGR" : "",
+	       fmt & OVF_ABGR ? " ABGR" : "", fmt ? "" : " (none of ours)",
+	       has_zpos ? "" : "none ", (int) zpos);
+      if (type != 0 /* overlay */ || !fmt)
+	continue;
+      if ((fmt & OVF_YUV) && !first_yuv)
+	first_yuv = planes[i];
+      else if ((fmt & OVF_ARGB) && !desk_plane)
 	desk_plane = planes[i];
+      if (ov_npl < OV_PLANES)
+	{
+	  ov_pl[ov_npl].id = planes[i];
+	  ov_pl[ov_npl++].fmt = fmt;
+	}
     }
-  if (ov_plane)
-    fprintf (stderr, "rol-fb: video overlay plane %u (primary %u, desktop over video %u)\n",
-	     ov_plane, prim_plane, desk_plane);
+  if (ov_npl)
+    fprintf (stderr, "rol-fb: %d overlay plane%s (first for video %u, primary %u, desktop over overlays %u), %s\n",
+	     ov_npl, ov_npl == 1 ? "" : "s", first_yuv, prim_plane, desk_plane,
+	     ov_atomic ? "atomic commits" : "set one at a time");
+}
+
+/* A free plane that takes what this kind of overlay shows (never the one
+   kept for the desktop) */
+static uint32_t
+ov_plane_for (const struct ov *c)
+{
+  unsigned need = c->kind ? OVF_RGB : OVF_YUV;
+  for (int i = 0; i < ov_npl; i++)
+    {
+      if (!(ov_pl[i].fmt & need) || ov_pl[i].id == desk_plane)
+	continue;
+      int used = 0;
+      for (const struct ov *o = ovs; o < ovs + OV_MAX; o++)
+	used |= o != c && o->fd >= 0 && o->plane == ov_pl[i].id;
+      if (!used)
+	return ov_pl[i].id;
+    }
+  return 0;
+}
+
+static unsigned
+ov_formats (uint32_t plane)
+{
+  for (int i = 0; i < ov_npl; i++)
+    if (ov_pl[i].id == plane)
+      return ov_pl[i].fmt;
+  return 0;
+}
+
+/* Every open overlay's plane at its place in the stack: base, or with
+   multi base + its slot. 0 if all were set. */
+static int
+ov_stack (unsigned base, int multi)
+{
+  int r = 0;
+  for (struct ov *c = ovs; c < ovs + OV_MAX; c++)
+    if (c->fd >= 0 && c->open && c->plane)
+      r |= set_prop (c->plane, "zpos", base + (multi ? (unsigned) (c - ovs) : 0)) != 0;
+  return r;
+}
+
+static struct ov *ov_cur;		/* whose message is being answered */
+
+static void
+ov_reply_m (const int32_t *m)
+{
+  if (ov_cur && ov_cur->fd >= 0)
+    send (ov_cur->fd, m, 16 * sizeof (int32_t), MSG_NOSIGNAL);
 }
 
 static void
 ov_reply (int32_t a, int32_t b, int32_t c)
 {
   int32_t m[16] = { a, b, c };
-  if (ov_client >= 0)
-    send (ov_client, m, sizeof m, MSG_NOSIGNAL);
+  ov_reply_m (m);
 }
 
 /* A reply carrying a file descriptor */
@@ -589,49 +789,69 @@ ov_reply_fd (const int32_t *m, int fd)
   c->cmsg_type = SCM_RIGHTS;
   c->cmsg_len = CMSG_LEN (sizeof (int));
   memcpy (CMSG_DATA (c), &fd, sizeof fd);
-  if (ov_client >= 0)
-    sendmsg (ov_client, &msg, MSG_NOSIGNAL);
+  if (ov_cur && ov_cur->fd >= 0)
+    sendmsg (ov_cur->fd, &msg, MSG_NOSIGNAL);
 }
 
 /* The colours of what's on the overlay: BT.601/709, video/full range */
 static void
-ov_colours (int flags)
+ov_colours (struct ov *c, int flags)
 {
-  static int now = -1;
-  if (flags == now || !ov_plane)
+  if (flags == c->colours || !c->plane || c->kind)
     return;
-  now = flags;
-  set_prop (ov_plane, "COLOR_ENCODING", flags & 1 ? 1 : 0);
-  set_prop (ov_plane, "COLOR_RANGE", flags & 2 ? 1 : 0);
+  c->colours = flags;
+  set_prop (c->plane, "COLOR_ENCODING", flags & 1 ? 1 : 0);
+  set_prop (c->plane, "COLOR_RANGE", flags & 2 ? 1 : 0);
+}
+
+static void ov_flush (void);
+static void ov_answer (struct ov *c, int err, const struct timespec *t);
+
+/* (a dmabuf given twice, or to two overlays, has one handle: closed when
+   its last user here lets go) */
+static void
+ov_drop_buf (struct ov *c, int i)
+{
+  if (c->buf[i].fb)
+    ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &c->buf[i].fb);
+  uint32_t h = c->buf[i].handle;
+  c->buf[i].fb = c->buf[i].handle = 0;
+  if (!h)
+    return;
+  for (const struct ov *o = ovs; o < ovs + OV_MAX; o++)
+    for (int j = 0; j < OV_BUFS; j++)
+      if (o->buf[j].handle == h)
+	return;
+  struct drm_gem_close gc = { .handle = h };
+  ioctl (drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
 }
 
 static void
-ov_forget (void)
+ov_forget (struct ov *c)
 {
   for (int i = 0; i < OV_BUFS; i++)
-    {
-      if (ov_buf[i].fb)
-	ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &ov_buf[i].fb);
-      if (ov_buf[i].handle)
-	{
-	  struct drm_gem_close gc = { .handle = ov_buf[i].handle };
-	  ioctl (drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
-	}
-      ov_buf[i].fb = ov_buf[i].handle = 0;
-    }
+    ov_drop_buf (c, i);
 }
 
 static int
-ov_hide (void)
+ov_hide (struct ov *c)
 {
-  int prev = ov_shown;
-  if (ov_plane && ov_shown >= 0)
+  int prev = c->shown;
+  ov_flush ();
+  if (c->pend)
     {
-      struct drm_mode_set_plane sp = { .plane_id = ov_plane, .crtc_id = drm_crtc };
-      ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp);
+      /* (a SHOW that never got to the screen: answered so) */
+      c->pend = 0;
+      ov_answer (c, -ECANCELED, NULL);
     }
-  ov_shown = -1;
-  ov_w = ov_h = 0;
+  if (c->plane && c->shown >= 0)
+    {
+      struct drm_mode_set_plane sp = { .plane_id = c->plane, .crtc_id = drm_crtc };
+      ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp);
+      map_valid = 0;
+    }
+  c->shown = -1;
+  c->w = c->h = 0;
   return prev;
 }
 
@@ -666,7 +886,12 @@ desk_setup (void)
   if (ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB, &fc))
     return -1;
   blk_fb = fc.fb_id;
-  if (set_prop (ov_plane, "zpos", 1) || set_prop (desk_plane, "zpos", 2))
+  /* the overlays from 1 up and the desktop above them all; where the
+     driver won't have that, one overlay at 1 and the desktop at 2 */
+  ov_base = 1;
+  if (ov_stack (1, 1) == 0 && set_prop (desk_plane, "zpos", OV_MAX + 1) == 0)
+    ov_multi = 1;
+  else if (ov_stack (1, 0) || set_prop (desk_plane, "zpos", 2))
     return -1;
   struct drm_mode_set_plane sp = { .plane_id = desk_plane, .crtc_id = drm_crtc, .fb_id = drm_fb,
 				   .crtc_w = cur_mode.hdisplay, .crtc_h = cur_mode.vdisplay,
@@ -697,14 +922,18 @@ static void
 ov_under (void)
 {
   ov_zpos_ok = 0;
-  if (!ov_plane)
+  ov_multi = 0;
+  ov_base = 0;
+  if (!ov_first ())
     return;
-  if (prim_plane && set_prop (ov_plane, "zpos", 0) == 0 && set_prop (prim_plane, "zpos", 1) == 0)
+  if (prim_plane && ov_stack (0, 1) == 0 && set_prop (prim_plane, "zpos", OV_MAX) == 0)
+    ov_zpos_ok = ov_multi = 1;
+  else if (prim_plane && ov_stack (0, 0) == 0 && set_prop (prim_plane, "zpos", 1) == 0)
     ov_zpos_ok = 1;
   else
     ov_zpos_ok = desk_setup () == 0;
-  fprintf (stderr, "rol-fb: video %s the desktop%s\n", ov_zpos_ok ? "under" : "over",
-	   desk_on ? " (the desktop on its own plane)" : "");
+  fprintf (stderr, "rol-fb: overlays %s the desktop%s%s\n", ov_zpos_ok ? "under" : "over",
+	   desk_on ? " (the desktop on its own plane)" : "", ov_multi ? "" : ", one at a time");
 }
 
 /* The desktop's plane needs an alpha channel for the key: remake it */
@@ -719,49 +948,414 @@ ov_want_alpha (int on)
   map_valid = 0;
 }
 
+/* A SHOW (c's p_ fields) is on screen, or wasn't to be: answered */
 static void
-ov_message (void)
+ov_answer (struct ov *c, int err, const struct timespec *t)
+{
+  int32_t r[16];
+  memset (r, 0, sizeof r);
+  r[0] = err;
+  r[1] = err ? -1 : c->prev == c->p_i ? -1 : c->prev;
+  if (!err)
+    {
+      long us = (long) (t->tv_sec - c->p_t0.tv_sec) * 1000000 + (t->tv_nsec - c->p_t0.tv_nsec) / 1000;
+      c->show_us += (unsigned long) us;
+      if (++c->nshow % 600 == 0)
+	{
+	  fprintf (stderr, "rol-fb: overlay %d: %u shown, %lu us each from SHOW to the screen\n",
+		   (int) (c - ovs), c->nshow, c->show_us / 600);
+	  c->show_us = 0;
+	}
+      if (c->version)
+	{
+	  r[3] = (int32_t) t->tv_sec;
+	  r[4] = (int32_t) (t->tv_nsec / 1000);
+	  r[5] = (int32_t) us;
+	}
+    }
+  struct ov *was = ov_cur;
+  ov_cur = c;
+  ov_reply_m (r);
+  ov_cur = was;
+}
+
+/* Where c's picture goes on the display (d: x y w h) and what of its
+   buffer shows (q: x y w h, 16.16), from RISC OS pixels as the desktop is
+   scaled, cut to the screen: a window part of the way off it shows the
+   part that is on. 0 if none of it is. */
+static int
+ov_place (const struct ov *c, long *d, uint64_t *q)
+{
+  if (width <= 0 || height <= 0 || !have_cur_mode || c->p_src[2] <= 0 || c->p_src[3] <= 0)
+    return 0;
+  long x0 = ox + (long) c->p_x * sw / width, y0 = oy + (long) c->p_y * sh / height;
+  long w = (long) c->p_w * sw / width, h = (long) c->p_h * sh / height;
+  if (w <= 0 || h <= 0)
+    return 0;
+  long x1 = x0 + w, y1 = y0 + h, cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0;
+  long cx1 = x1 > cur_mode.hdisplay ? cur_mode.hdisplay : x1, cy1 = y1 > cur_mode.vdisplay ? cur_mode.vdisplay : y1;
+  if (cx1 <= cx0 || cy1 <= cy0)
+    return 0;
+  int64_t sx = (int64_t) c->p_src[0] << 16, sy = (int64_t) c->p_src[1] << 16;
+  int64_t sw16 = (int64_t) c->p_src[2] << 16, sh16 = (int64_t) c->p_src[3] << 16;
+  d[0] = cx0; d[1] = cy0; d[2] = cx1 - cx0; d[3] = cy1 - cy0;
+  q[0] = (uint64_t) (sx + sw16 * (cx0 - x0) / w);
+  q[1] = (uint64_t) (sy + sh16 * (cy0 - y0) / h);
+  q[2] = (uint64_t) (sw16 * (cx1 - cx0) / w);
+  q[3] = (uint64_t) (sh16 * (cy1 - cy0) / h);
+  return q[2] >= 65536 && q[3] >= 65536;
+}
+
+/* c's SHOW has nothing on the screen (the window is off it): the plane
+   off, and answered as shown */
+static void
+ov_show_nothing (struct ov *c)
+{
+  struct timespec t;
+  c->pend = 0;
+  if (c->shown >= 0)
+    {
+      struct drm_mode_set_plane sp = { .plane_id = c->plane, .crtc_id = drm_crtc };
+      ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp);
+      map_valid = 0;
+    }
+  c->prev = c->shown;
+  c->shown = -1;
+  c->w = c->h = 0;
+  clock_gettime (CLOCK_MONOTONIC, &t);
+  ov_answer (c, 0, &t);
+}
+
+/* c's SHOW is going on screen: what is noted, and the desktop redrawn
+   with the key area when it moved or nothing was shown */
+static void
+ov_shown_now (struct ov *c)
+{
+  c->prev = c->shown;
+  c->x = c->p_x; c->y = c->p_y; c->w = c->p_w; c->h = c->p_h;
+  c->shown = c->p_i;
+  if (c->prev < 0 || c->lx != c->x || c->ly != c->y || c->lw != c->w || c->lh != c->h)
+    map_valid = 0;
+  c->lx = c->x; c->ly = c->y; c->lw = c->w; c->lh = c->h;
+}
+
+/* The old way: SETPLANE, which on vc4 returns at the display's next frame */
+static void
+ov_show_legacy (struct ov *c)
+{
+  long d[4];
+  uint64_t q[4];
+  ov_flush ();
+  if (!ov_place (c, d, q))
+    {
+      ov_show_nothing (c);
+      return;
+    }
+  c->pend = 0;
+  struct drm_mode_set_plane sp = { .plane_id = c->plane, .crtc_id = drm_crtc, .fb_id = c->buf[c->p_i].fb,
+				   .crtc_x = (int32_t) d[0], .crtc_y = (int32_t) d[1],
+				   .crtc_w = (uint32_t) d[2], .crtc_h = (uint32_t) d[3],
+				   .src_x = (uint32_t) q[0], .src_y = (uint32_t) q[1],
+				   .src_w = (uint32_t) q[2], .src_h = (uint32_t) q[3] };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp))
+    {
+      ov_answer (c, errno ? -errno : -EINVAL, NULL);
+      return;
+    }
+  struct timespec t;
+  clock_gettime (CLOCK_MONOTONIC, &t);
+  ov_shown_now (c);
+  ov_answer (c, 0, &t);
+}
+
+/* Every SHOW waiting, in one commit that doesn't wait: the display's flip
+   event (ov_events) answers them. One commit at a time: a SHOW that comes
+   while one is out waits for its event. */
+static void
+ov_commit (int now)
+{
+  ov_retry = 0;
+  if (flip_busy)
+    return;
+  if (ov_atomic && !now)
+    {
+      /* hold them if an overlay that is showing hasn't asked yet and
+	 there is time left in this frame (known from the last flip) */
+      int waiting = 0, missing = 0;
+      for (const struct ov *c = ovs; c < ovs + OV_MAX; c++)
+	if (c->fd >= 0 && c->pend)
+	  waiting++;
+	else if (c->fd >= 0 && c->open && c->shown >= 0)
+	  missing++;
+      if (!waiting)
+	{
+	  ov_wait = 0;
+	  return;
+	}
+      long period = have_cur_mode && cur_mode.vrefresh >= 20 && cur_mode.vrefresh <= 400
+	? 1000000 / (long) cur_mode.vrefresh : 16667;
+      long long t = mono_us (), flip = (long long) last_flip.tv_sec * 1000000 + last_flip.tv_nsec / 1000;
+      long long due = flip + period - OV_MARGIN;
+      if (missing && t >= flip && t < due)
+	{
+	  ov_wait = 1;
+	  ov_deadline = due;
+	  return;
+	}
+    }
+  ov_wait = 0;
+  struct ov *in[OV_MAX];
+  uint32_t objs[OV_MAX], counts[OV_MAX], props[OV_MAX * 10];
+  uint64_t vals[OV_MAX * 10];
+  int n = 0;
+  for (struct ov *c = ovs; c < ovs + OV_MAX; c++)
+    {
+      long d[4];
+      uint64_t q[4];
+      if (c->fd < 0 || !c->pend)
+	continue;
+      if (!ov_atomic || !c->pid[0])
+	{
+	  ov_show_legacy (c);
+	  continue;
+	}
+      if (!c->buf[c->p_i].fb)
+	{
+	  c->pend = 0;
+	  ov_answer (c, -EINVAL, NULL);
+	  continue;
+	}
+      if (!ov_place (c, d, q))
+	{
+	  ov_show_nothing (c);
+	  continue;
+	}
+      uint64_t v[10] = { c->buf[c->p_i].fb, drm_crtc, (uint64_t) (int64_t) d[0], (uint64_t) (int64_t) d[1],
+			 (uint64_t) d[2], (uint64_t) d[3],
+			 q[0], q[1], q[2], q[3] };
+      objs[n] = c->plane;
+      counts[n] = 10;
+      for (int k = 0; k < 10; k++)
+	{
+	  props[n * 10 + k] = c->pid[k];
+	  vals[n * 10 + k] = v[k];
+	}
+      in[n++] = c;
+    }
+  if (!n)
+    return;
+  struct drm_mode_atomic at = { .flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
+				.count_objs = (uint32_t) n, .objs_ptr = (uintptr_t) objs,
+				.count_props_ptr = (uintptr_t) counts, .props_ptr = (uintptr_t) props,
+				.prop_values_ptr = (uintptr_t) vals };
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_ATOMIC, &at) == 0)
+    {
+      flip_busy = 1;
+      for (int i = 0; i < n; i++)
+	{
+	  in[i]->pend = 0;
+	  in[i]->infl = 1;
+	  ov_shown_now (in[i]);
+	}
+      return;
+    }
+  if (errno == EBUSY)
+    {
+      /* (the last commit not quite done: again shortly) */
+      ov_retry = 1;
+      return;
+    }
+  fprintf (stderr, "rol-fb: atomic commit: %s: planes set one at a time from now\n", strerror (errno));
+  ov_atomic = 0;
+  for (int i = 0; i < n; i++)
+    ov_show_legacy (in[i]);
+}
+
+/* The display's events: a commit's pictures are on screen. Then (go) the
+   SHOWs that came meanwhile. */
+static void
+ov_events (int go)
+{
+  char buf[1024];
+  ssize_t n = read (drm_fd, buf, sizeof buf);
+  for (ssize_t o = 0; n > 0 && o + (ssize_t) sizeof (struct drm_event) <= n;)
+    {
+      struct drm_event *e = (struct drm_event *) (buf + o);
+      if (e->length < sizeof *e)
+	break;
+      if (e->type == DRM_EVENT_FLIP_COMPLETE && e->length >= sizeof (struct drm_event_vblank))
+	{
+	  struct drm_event_vblank *v = (struct drm_event_vblank *) e;
+	  struct timespec t = { .tv_sec = v->tv_sec, .tv_nsec = (long) v->tv_usec * 1000 };
+	  flip_busy = 0;
+	  last_flip = t;
+	  for (struct ov *c = ovs; c < ovs + OV_MAX; c++)
+	    if (c->fd >= 0 && c->infl)
+	      {
+		c->infl = 0;
+		ov_answer (c, 0, &t);
+	      }
+	}
+      o += e->length;
+    }
+  if (go)
+    ov_commit (0);
+}
+
+/* Before anything set the old way (a mode, a plane off, zpos): the commit
+   that is out has to be done, or the driver says busy */
+static void
+ov_flush (void)
+{
+  for (int tries = 0; flip_busy && tries < 5; tries++)
+    {
+      struct pollfd p = { drm_fd, POLLIN, 0 };
+      if (poll (&p, 1, 100) > 0)
+	ov_events (0);
+    }
+  if (flip_busy)
+    {
+      /* (no event came: the display is off, or the mode went) */
+      struct timespec t;
+      clock_gettime (CLOCK_MONOTONIC, &t);
+      flip_busy = 0;
+      for (struct ov *c = ovs; c < ovs + OV_MAX; c++)
+	if (c->fd >= 0 && c->infl)
+	  {
+	    c->infl = 0;
+	    ov_answer (c, 0, &t);
+	  }
+    }
+}
+
+/* The connection went, or is being replaced: its overlay off the screen,
+   its plane free */
+static void
+ov_close (struct ov *c)
+{
+  if (c->fd < 0)
+    return;
+  ov_hide (c);
+  ov_forget (c);
+  close (c->fd);
+  c->fd = -1;
+  c->open = 0;
+  c->plane = 0;
+  int any = 0;
+  for (const struct ov *o = ovs; o < ovs + OV_MAX; o++)
+    any |= o->fd >= 0 && o->open;
+  if (!any)
+    ov_want_alpha (0);
+  map_valid = 0;
+}
+
+static void
+ov_message (struct ov *c)
 {
   int32_t m[16];
   union { char buf[CMSG_SPACE (sizeof (int))]; struct cmsghdr align; } ctl;
   struct iovec iov = { m, sizeof m };
   struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = ctl.buf, .msg_controllen = sizeof ctl.buf };
   memset (m, 0, sizeof m);
-  ssize_t n = recvmsg (ov_client, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+  ssize_t n = recvmsg (c->fd, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
   if (n == 0 || (n < 0 && errno != EAGAIN))
     {
-      /* LinuxCodec went: take the video off the screen */
-      ov_hide ();
-      ov_forget ();
-      close (ov_client);
-      ov_client = -1;
-      ov_want_alpha (0);
+      /* its program went: take the picture off the screen */
+      ov_close (c);
       return;
     }
   if (n < 4)
     return;
   int fd = -1;
-  for (struct cmsghdr *c = CMSG_FIRSTHDR (&msg); c; c = CMSG_NXTHDR (&msg, c))
-    if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
-      memcpy (&fd, CMSG_DATA (c), sizeof fd);
+  for (struct cmsghdr *h = CMSG_FIRSTHDR (&msg); h; h = CMSG_NXTHDR (&msg, h))
+    if (h->cmsg_level == SOL_SOCKET && h->cmsg_type == SCM_RIGHTS)
+      memcpy (&fd, CMSG_DATA (h), sizeof fd);
+  ov_cur = c;
+  int slot = (int) (c - ovs);
   switch (m[0])
     {
     case 1:				/* OPEN */
-      ov_fake = (drm_fd < 0 || !ov_plane) && access ("/riscos/overlay-test", F_OK) == 0;
-      if (ov_fake)
-	{
-	  fprintf (stderr, "rol-fb: overlay test: OPEN\n");
-	  ov_reply (0, (int32_t) OV_KEY, 1);
-	  break;
-	}
-      if (drm_fd < 0 || !ov_plane)
-	{
-	  ov_reply (-ENODEV, 0, 0);
-	  break;
-	}
-      ov_want_alpha (1);
-      ov_reply (0, (int32_t) OV_KEY, (int32_t) ov_zpos_ok);
-      break;
+      {
+	int kind = m[1] == 1, version = m[2] > 0 ? 1 : 0;
+	int32_t r[16];
+	memset (r, 0, sizeof r);
+	r[1] = (int32_t) OV_KEY;
+	r[2] = 1;
+	if (version)
+	  {
+	    r[3] = 1;
+	    r[5] = width;
+	    r[6] = height;
+	  }
+	if (!kind && !(c->open && !c->kind))
+	  /* one program's video at a time: the new one takes over */
+	  for (struct ov *o = ovs; o < ovs + OV_MAX; o++)
+	    if (o != c && o->fd >= 0 && o->open && !o->kind)
+	      ov_close (o);
+	ov_fake = (drm_fd < 0 || !ov_npl) && access ("/riscos/overlay-test", F_OK) == 0;
+	if (ov_fake)
+	  {
+	    fprintf (stderr, "rol-fb: overlay test: OPEN (overlay %d, %s, version %d)\n",
+		     slot, kind ? "RGB" : "video", version);
+	    c->kind = kind;
+	    c->version = version;
+	    c->open = 1;
+	    r[4] = 15;
+	    ov_reply_m (r);
+	    break;
+	  }
+	if (c->open && c->kind == kind && c->plane)
+	  {
+	    /* (again on the same connection: as it is) */
+	    c->version = version;
+	    r[2] = (int32_t) ov_zpos_ok;
+	    r[4] = (int32_t) (ov_formats (c->plane) >> 1);
+	    ov_reply_m (r);
+	    break;
+	  }
+	int others = 0;
+	for (const struct ov *o = ovs; o < ovs + OV_MAX; o++)
+	  others |= o != c && o->fd >= 0 && o->open;
+	c->kind = kind;
+	uint32_t plane = drm_fd < 0 ? 0 : ov_plane_for (c);
+	if (!plane || (others && !ov_multi))
+	  {
+	    /* none that takes this; or all in use, or this driver stacks
+	       only one */
+	    int none = 1;
+	    for (int i = 0; i < ov_npl; i++)
+	      none &= !(ov_pl[i].fmt & (kind ? OVF_RGB : OVF_YUV)) || ov_pl[i].id == desk_plane;
+	    ov_reply (none ? -ENODEV : -EBUSY, 0, 0);
+	    break;
+	  }
+	c->plane = plane;
+	c->version = version;
+	c->open = 1;
+	c->shown = -1;
+	c->colours = -1;
+	c->nshow = 0;
+	c->show_us = 0;
+	c->pend = c->infl = 0;
+	memset (c->pid, 0, sizeof c->pid);
+	if (ov_atomic)
+	  {
+	    for (int k = 0; k < 10; k++)
+	      c->pid[k] = (uint32_t) prop_id (plane, ov_pnames[k], NULL);
+	    for (int k = 0; k < 10; k++)
+	      if (!c->pid[k])
+		c->pid[0] = 0;
+	  }
+	ov_flush ();
+	if (!ov_need)
+	  ov_want_alpha (1);		/* (and the stack: ov_under) */
+	else if (set_prop (plane, "zpos", ov_base + (ov_multi ? (unsigned) slot : 0)))
+	  fprintf (stderr, "rol-fb: overlay %d: zpos: %s\n", slot, strerror (errno));
+	fprintf (stderr, "rol-fb: overlay %d open: %s, plane %u\n", slot, kind ? "RGB" : "video", plane);
+	r[2] = (int32_t) ov_zpos_ok;
+	r[4] = (int32_t) (ov_formats (plane) >> 1);
+	ov_reply_m (r);
+	break;
+      }
     case 2:				/* ADDBUF */
       {
 	int i = m[1];
@@ -770,24 +1364,43 @@ ov_message (void)
 	    ov_reply (-EINVAL, 0, 0);
 	    break;
 	  }
-	if (ov_buf[i].fb)
-	  ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &ov_buf[i].fb);
-	ov_buf[i].fb = 0;
+	if (ov_fake)
+	  {
+	    fprintf (stderr, "rol-fb: overlay test: %d ADDBUF %d %dx%d %.4s pitch %d\n",
+		     slot, i, m[2], m[3], (char *) &m[4], m[5]);
+	    ov_reply (0, 0, 0);
+	    break;
+	  }
+	if (c->shown == i)
+	  ov_hide (c);
+	ov_drop_buf (c, i);
 	struct drm_prime_handle ph = { .fd = fd };
 	int r = ioctl (drm_fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph);
 	if (r == 0)
 	  {
 	    struct drm_mode_fb_cmd2 fc = { .width = (uint32_t) m[2], .height = (uint32_t) m[3],
 					   .pixel_format = (uint32_t) m[4] };
+	    int mod = m[13] & 1;
+	    if (mod)
+	      fc.flags = DRM_MODE_FB_MODIFIERS;
 	    for (int p = 0; p < 3; p++)
 	      {
+		/* (with modifiers the kernel wants unused planes empty) */
+		if (mod && p && !m[5 + p * 2])
+		  continue;
 		fc.handles[p] = ph.handle;
 		fc.pitches[p] = (uint32_t) m[5 + p * 2];
 		fc.offsets[p] = (uint32_t) m[6 + p * 2];
+		if (mod)
+		  fc.modifier[p] = (uint32_t) m[11] | (uint64_t) (uint32_t) m[12] << 32;
 	      }
 	    r = ioctl (drm_fd, DRM_IOCTL_MODE_ADDFB2, &fc);
-	    ov_buf[i].handle = ph.handle;
-	    ov_buf[i].fb = r == 0 ? fc.fb_id : 0;
+	    int e = errno;
+	    c->buf[i].handle = ph.handle;
+	    c->buf[i].fb = r == 0 ? fc.fb_id : 0;
+	    if (r)
+	      ov_drop_buf (c, i);
+	    errno = e;
 	  }
 	ov_reply (r ? -errno : 0, 0, 0);
 	break;
@@ -827,16 +1440,9 @@ ov_message (void)
 	    ov_reply (-EINVAL, 0, 0);
 	    break;
 	  }
-	if (ov_shown == i)
-	  ov_hide ();
-	if (ov_buf[i].fb)
-	  ioctl (drm_fd, DRM_IOCTL_MODE_RMFB, &ov_buf[i].fb);
-	if (ov_buf[i].handle)
-	  {
-	    struct drm_gem_close gc = { .handle = ov_buf[i].handle };
-	    ioctl (drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
-	  }
-	ov_buf[i].fb = ov_buf[i].handle = 0;
+	if (c->shown == i)
+	  ov_hide (c);
+	ov_drop_buf (c, i);
 	/* one 8-bit buffer: Y rows, then the chroma (each chroma row of the
 	   two 4:2:0 planes is half a Y row) */
 	uint32_t ch = (uint32_t) (h + 1) / 2;
@@ -870,8 +1476,8 @@ ov_message (void)
 	    ov_reply (-e, 0, 0);
 	    break;
 	  }
-	ov_buf[i].handle = cd.handle;
-	ov_buf[i].fb = fc.fb_id;
+	c->buf[i].handle = cd.handle;
+	c->buf[i].fb = fc.fb_id;
 	r[1] = (int32_t) cd.size;
 	for (int p = 0; p < 3; p++)
 	  {
@@ -885,61 +1491,61 @@ ov_message (void)
     case 3:				/* SHOW */
       {
 	int i = m[1];
+	int32_t r[16];
+	memset (r, 0, sizeof r);
+	r[1] = -1;
 	if (ov_fake)
 	  {
-	    static int nshow;
-	    if (nshow++ < 40 || nshow % 100 == 0)
-	      fprintf (stderr, "rol-fb: overlay test: SHOW %d (#%d) at %d,%d %dx%d from %d,%d %dx%d colours %d\n",
-		       i, nshow, m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]);
-	    ov_reply (0, -1, 0);
+	    if (c->nshow++ < 40 || c->nshow % 100 == 0)
+	      fprintf (stderr, "rol-fb: overlay test: %d SHOW %d (#%u) at %d,%d %dx%d from %d,%d %dx%d colours %d\n",
+		       slot, i, c->nshow, m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]);
+	    if (c->version)
+	      {
+		struct timespec ts;
+		clock_gettime (CLOCK_MONOTONIC, &ts);
+		r[3] = (int32_t) ts.tv_sec;
+		r[4] = (int32_t) (ts.tv_nsec / 1000);
+	      }
+	    ov_reply_m (r);
 	    break;
 	  }
-	ov_colours (m[10]);
-	if (i < 0 || i >= OV_BUFS || !ov_buf[i].fb || width <= 0 || height <= 0)
+	ov_colours (c, m[10] & 3);
+	if (!c->open || !c->plane || i < 0 || i >= OV_BUFS || !c->buf[i].fb || width <= 0 || height <= 0)
 	  {
 	    ov_reply (-EINVAL, -1, 0);
 	    break;
 	  }
-	ov_x = m[2]; ov_y = m[3]; ov_w = m[4]; ov_h = m[5];
-	/* RISC OS pixels to the display's: as the desktop is scaled */
-	long dx = ox + (long) ov_x * sw / width, dy = oy + (long) ov_y * sh / height;
-	long dw = (long) ov_w * sw / width, dh = (long) ov_h * sh / height;
-	struct drm_mode_set_plane sp = { .plane_id = ov_plane, .crtc_id = drm_crtc, .fb_id = ov_buf[i].fb,
-					 .crtc_x = (int32_t) dx, .crtc_y = (int32_t) dy,
-					 .crtc_w = (uint32_t) dw, .crtc_h = (uint32_t) dh,
-					 .src_x = (uint32_t) m[6] << 16, .src_y = (uint32_t) m[7] << 16,
-					 .src_w = (uint32_t) m[8] << 16, .src_h = (uint32_t) m[9] << 16 };
-	int prev = ov_shown;
-	if (dw <= 0 || dh <= 0 || ioctl (drm_fd, DRM_IOCTL_MODE_SETPLANE, &sp))
+	if (c->pend || c->infl)
 	  {
-	    ov_reply (-errno ? -errno : -EINVAL, -1, 0);
+	    /* (one at a time: its last SHOW hasn't been answered) */
+	    ov_reply (-EBUSY, -1, 0);
 	    break;
 	  }
-	ov_shown = i;
-	{
-	  /* redraw with the key area, when it moved or the video wasn't shown */
-	  static int lx = -1, ly, lw, lh;
-	  if (prev < 0 || lx != ov_x || ly != ov_y || lw != ov_w || lh != ov_h)
-	    map_valid = 0;
-	  lx = ov_x; ly = ov_y; lw = ov_w; lh = ov_h;
-	}
-	ov_reply (0, prev == i ? -1 : prev, 0);
+	c->nokey = (m[10] & 256) != 0;
+	c->p_i = i;
+	c->p_x = m[2]; c->p_y = m[3]; c->p_w = m[4]; c->p_h = m[5];
+	for (int k = 0; k < 4; k++)
+	  c->p_src[k] = m[6 + k];
+	clock_gettime (CLOCK_MONOTONIC, &c->p_t0);
+	c->pend = 1;
+	ov_commit (0);			/* (answers now, or at the flip) */
 	break;
       }
     case 4:				/* HIDE */
       if (ov_fake)
-	fprintf (stderr, "rol-fb: overlay test: HIDE\n");
-      ov_reply (0, ov_hide (), 0);
+	fprintf (stderr, "rol-fb: overlay test: %d HIDE\n", slot);
+      ov_reply (0, ov_hide (c), 0);
       map_valid = 0;
       break;
     case 5:				/* FORGET */
-      ov_hide ();
-      ov_forget ();
+      ov_hide (c);
+      ov_forget (c);
       ov_reply (0, 0, 0);
       break;
     default:
       ov_reply (-EINVAL, 0, 0);
     }
+  ov_cur = NULL;
   if (fd >= 0)
     close (fd);
 }
@@ -947,32 +1553,42 @@ ov_message (void)
 static void
 ov_accept (void)
 {
-  int c = accept4 (ov_listen, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
-  if (c < 0)
+  int fd = accept4 (ov_listen, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+  if (fd < 0)
     return;
-  if (ov_client >= 0)
-    {
-      /* one program's video at a time: the new one takes over */
-      ov_hide ();
-      ov_forget ();
-      close (ov_client);
-    }
-  ov_client = c;
+  for (struct ov *c = ovs; c < ovs + OV_MAX; c++)
+    if (c->fd < 0)
+      {
+	memset (c, 0, sizeof *c);
+	c->fd = fd;
+	c->shown = -1;
+	c->colours = -1;
+	return;
+      }
+  /* every overlay in use: OPEN's answer on a connection of its own */
+  int32_t m[16] = { -EBUSY };
+  send (fd, m, sizeof m, MSG_NOSIGNAL);
+  close (fd);
 }
 
 static void
 ov_start (void)
 {
+  for (struct ov *c = ovs; c < ovs + OV_MAX; c++)
+    c->fd = -1;
   if (drm_fd < 0)
     return;
   ov_find_planes ();
-  if (!ov_plane && access ("/riscos/overlay-test", F_OK) != 0)
+  int usable = 0;
+  for (int i = 0; i < ov_npl; i++)
+    usable |= ov_pl[i].id != desk_plane;
+  if (!usable && access ("/riscos/overlay-test", F_OK) != 0)
     return;
   ov_listen = socket (AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
   struct sockaddr_un a = { .sun_family = AF_UNIX };
   memcpy (a.sun_path, "\0rol-fb-overlay", 15);
   if (ov_listen < 0 || bind (ov_listen, (struct sockaddr *) &a, offsetof (struct sockaddr_un, sun_path) + 15)
-      || listen (ov_listen, 2))
+      || listen (ov_listen, 8))
     {
       perror ("rol-fb: overlay socket");
       if (ov_listen >= 0)
@@ -1138,11 +1754,18 @@ out_rect (int x0, int y0, int x1, int y1, int px, int py)
 	  else
 	    {
 	      /* opaque, but for the key colour inside the video's area */
-	      int ky = ov_shown >= 0 && ov_w > 0 && ymap[y] >= ov_y && ymap[y] < ov_y + ov_h;
+	      const struct ov *kc[OV_MAX];
+	      int nk = 0;
+	      for (const struct ov *o = ovs; o < ovs + OV_MAX; o++)
+		if (o->fd >= 0 && o->shown >= 0 && o->w > 0 && ymap[y] >= o->y && ymap[y] < o->y + o->h)
+		  kc[nk++] = o;
 	      for (int x = x0; x < x1; x++)
 		{
 		  uint32_t c = row[x];
-		  int k = ky && c == OV_KEY && xmap[x] >= ov_x && xmap[x] < ov_x + ov_w;
+		  int k = 0;
+		  for (int i = 0; i < nk; i++)
+		    k |= (c == OV_KEY || kc[i]->nokey)
+		      && xmap[x] >= kc[i]->x && xmap[x] < kc[i]->x + kc[i]->w;
 		  d32[x] = k ? 0 : c | 0xFF000000u;
 		}
 	    }
@@ -2440,22 +3063,42 @@ main (int argc, char **argv)
   long next_frame = now_ms (), next_scan = now_ms () + 2000;
   for (;;)
     {
-      struct pollfd p[4 + MAX_INPUTS];
+      struct pollfd p[4 + OV_MAX + MAX_INPUTS];
       p[0] = (struct pollfd) { sfd, POLLIN, 0 };
       p[1] = (struct pollfd) { sock, POLLIN, 0 };
       for (int i = 0; i < ninputs; i++)
 	p[2 + i] = (struct pollfd) { inputs[i].fd, POLLIN, 0 };
       int np = 2 + ninputs;
       p[np] = (struct pollfd) { ov_listen, POLLIN, 0 };
-      p[np + 1] = (struct pollfd) { ov_client, POLLIN, 0 };
+      for (int i = 0; i < OV_MAX; i++)
+	p[np + 1 + i] = (struct pollfd) { ovs[i].fd, POLLIN, 0 };
       long t = now_ms ();
       int wait = next_frame > t ? (int) (next_frame - t) : 0;
-      if (poll (p, np + 2, wait) < 0 && errno != EINTR)
+      p[np + 1 + OV_MAX] = (struct pollfd) { ov_atomic && flip_busy ? drm_fd : -1, POLLIN, 0 };
+      if (ov_retry && wait > 2)
+	wait = 2;
+      if (ov_wait)
+	{
+	  long long left = (ov_deadline - mono_us ()) / 1000;
+	  if (left < 0)
+	    left = 0;
+	  if (wait > left)
+	    wait = (int) left;
+	}
+      if (poll (p, np + 2 + OV_MAX, wait) < 0 && errno != EINTR)
 	break;
+      if (p[np + 1 + OV_MAX].fd >= 0 && (p[np + 1 + OV_MAX].revents & POLLIN))
+	ov_events (1);
+      else if (ov_retry)
+	ov_commit (1);
+      if (ov_wait && mono_us () >= ov_deadline - 500)
+	ov_commit (1);
       if (ov_listen >= 0 && (p[np].revents & POLLIN))
 	ov_accept ();
-      if (ov_client >= 0 && (p[np + 1].revents & (POLLIN | POLLHUP | POLLERR)))
-	ov_message ();
+      for (int i = 0; i < OV_MAX; i++)
+	if (ovs[i].fd >= 0 && p[np + 1 + i].fd == ovs[i].fd
+	    && (p[np + 1 + i].revents & (POLLIN | POLLHUP | POLLERR)))
+	  ov_message (&ovs[i]);
       if (p[1].revents & POLLIN)
 	read_messages ();
       if (mode_changed && width > 0 && height > 0)
