@@ -160,15 +160,157 @@ choose_card (struct card *c)
   return 0;
 }
 
+#define MAX_SETS 32
+static struct { char name[64], value[64]; } sets[MAX_SETS];
+static int nsets;
+
 static void
 read_config (void)
 {
   char buf[1024];
   if (read_file (config_path, buf, sizeof buf) <= 0)
     return;
+  nsets = 0;
   for (char *l = strtok (buf, "\r\n"); l; l = strtok (NULL, "\r\n"))
     if (!strncmp (l, "device=", 7))
       snprintf (want_card, sizeof want_card, "%s", l + 7);
+    else if (!strncmp (l, "set=", 4) && nsets < MAX_SETS && strrchr (l + 4, '='))
+      {
+	/* set=Control's name=value */
+	char *v = strrchr (l + 4, '=');
+	snprintf (sets[nsets].name, sizeof sets[nsets].name, "%.*s", (int) (v - (l + 4)), l + 4);
+	snprintf (sets[nsets].value, sizeof sets[nsets].value, "%s", v + 1);
+	nsets++;
+      }
+}
+
+/* --- the card's mixer ----------------------------------------------------
+
+   Some sound chips start with their outputs switched off or not joined to
+   anything, and stay silent until a program sets their controls: Linux
+   distributions restore a saved state for each (alsactl). This sets the
+   few that matter on the chips of the supported machines, each time the
+   card is opened. The values are those of Armbian's saved states
+   (packages/blobs/asound.state: asound.state.pinebook-pro, .pinebook-next),
+   but for the Pinebook Pro's headphone amplifier, which is -12 dB here
+   (Armbian's has it at its lowest, -48 dB; the speakers are fed from it).
+   Each is for the card whose names (id, driver, name) have the first word
+   in them, so a USB sound device's controls of the same name are left be.
+   /riscos/sound/config can add to it or change it:
+     set=Headphone Playback Volume=3
+   (a number; on/off; or one of an enumerated control's names). */
+
+static const struct { const char *card, *name, *value; } mixer_defaults[] = {
+  /* Pinebook Pro (Everest ES8316; the speaker amplifier is fed from the
+     headphone output) */
+  { "es8316", "Left Headphone Mixer Left DAC Switch", "on" },
+  { "es8316", "Right Headphone Mixer Right DAC Switch", "on" },
+  { "es8316", "Speaker Switch", "on" },
+  { "es8316", "DAC Playback Volume", "192" },
+  { "es8316", "Headphone Mixer Volume", "11" },
+  { "es8316", "Headphone Playback Volume", "2" },
+  /* Pinebook (Allwinner A64's codec: the speakers are on Line Out) */
+  { "sun50i", "AIF1 Slot 0 Digital DAC Playback Switch", "on" },
+  { "sun50i", "DAC Playback Switch", "on" },
+  { "sun50i", "Line Out Playback Switch", "on" },
+  { "sun50i", "Line Out Playback Volume", "28" },
+#ifdef ROL_SND_MIXER_TEST	/* for a test under QEMU with its usb-audio */
+  { "usb", "Audio Output Volume Control Playback Volume", "50" },
+  { "es8316", "Audio Output Volume Control Playback Switch", "off" },
+#endif
+};
+
+static int
+mixer_set (int fd, const struct snd_ctl_elem_id *id, const char *value)
+{
+  struct snd_ctl_elem_info info;
+  memset (&info, 0, sizeof info);
+  info.id = *id;
+  if (ioctl (fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0
+      || !(info.access & SNDRV_CTL_ELEM_ACCESS_WRITE) || info.count > 16)
+    return -1;
+  struct snd_ctl_elem_value v;
+  memset (&v, 0, sizeof v);
+  v.id = *id;
+  int on = !strcasecmp (value, "on") || !strcasecmp (value, "true");
+  int off = !strcasecmp (value, "off") || !strcasecmp (value, "false");
+  if (info.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN)
+    for (unsigned i = 0; i < info.count; i++)
+      v.value.integer.value[i] = on ? 1 : off ? 0 : atoi (value) != 0;
+  else if (info.type == SNDRV_CTL_ELEM_TYPE_INTEGER)
+    {
+      long n = on ? info.value.integer.max : off ? info.value.integer.min : atol (value);
+      if (n < info.value.integer.min)
+	n = info.value.integer.min;
+      if (n > info.value.integer.max)
+	n = info.value.integer.max;
+      for (unsigned i = 0; i < info.count; i++)
+	v.value.integer.value[i] = n;
+    }
+  else if (info.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+    {
+      unsigned items = info.value.enumerated.items, item = items;
+      for (unsigned i = 0; i < items && item == items; i++)
+	{
+	  struct snd_ctl_elem_info e;
+	  memset (&e, 0, sizeof e);
+	  e.id = *id;
+	  e.value.enumerated.item = i;
+	  if (ioctl (fd, SNDRV_CTL_IOCTL_ELEM_INFO, &e) == 0 && !strcasecmp (e.value.enumerated.name, value))
+	    item = i;
+	}
+      if (item == items)
+	return -1;
+      for (unsigned i = 0; i < info.count; i++)
+	v.value.enumerated.item[i] = item;
+    }
+  else
+    return -1;
+  return ioctl (fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v) < 0 ? -1 : 0;
+}
+
+static void
+mixer_setup (int card)
+{
+  char path[64];
+  snprintf (path, sizeof path, "/dev/snd/controlC%d", card);
+  int fd = open (path, O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  static struct snd_ctl_elem_id ids[512];
+  struct snd_ctl_elem_list list;
+  memset (&list, 0, sizeof list);
+  list.space = 512;
+  list.pids = ids;
+  struct snd_ctl_card_info ci;
+  char names[256] = "";
+  memset (&ci, 0, sizeof ci);
+  if (ioctl (fd, SNDRV_CTL_IOCTL_CARD_INFO, &ci) == 0)
+    snprintf (names, sizeof names, "%.16s %.16s %.32s %.80s %.80s", (char *) ci.id, (char *) ci.driver,
+	      (char *) ci.name, (char *) ci.longname, (char *) ci.mixername);
+  if (ioctl (fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) == 0)
+    {
+      int done = 0;
+      for (unsigned i = 0; i < list.used; i++)
+	{
+	  const char *name = (const char *) ids[i].name, *value = NULL;
+	  for (size_t k = 0; k < sizeof mixer_defaults / sizeof mixer_defaults[0]; k++)
+	    if (!strcmp (name, mixer_defaults[k].name) && strcasestr (names, mixer_defaults[k].card))
+	      value = mixer_defaults[k].value;
+	  for (int k = 0; k < nsets; k++)
+	    if (!strcmp (name, sets[k].name))
+	      value = sets[k].value;
+	  if (!value)
+	    continue;
+	  int r = mixer_set (fd, &ids[i], value);
+	  if (verbose || r)
+	    logmsg ("mixer: %s = %s%s", name, value, r ? ": not set" : "");
+	  done += r == 0;
+	}
+      if (done)
+	logmsg ("mixer: %d control%s set on card %d", done, done == 1 ? "" : "s", card);
+    }
+  close (fd);
 }
 
 /* --- ALSA, through the kernel's interface ------------------------------- */
@@ -242,6 +384,7 @@ pcm_open (unsigned rate)
       return -1;
     }
   char path[64];
+  mixer_setup (pcm.card.num);
   snprintf (path, sizeof path, "/dev/snd/pcmC%dD%dp", pcm.card.num, pcm.card.dev);
   int fd = open (path, O_RDWR | O_CLOEXEC);
   if (fd < 0)

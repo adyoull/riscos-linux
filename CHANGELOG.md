@@ -8,6 +8,38 @@ RISC OS 5.31-28 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Sound: the sound chip's mixer is set (Pinebook Pro, Pinebook) (13 Nov 2026; riscos-support 1.0.0053-1)
+
+Raik's Pinebook Pro: Configure shows the sound device, and nothing is
+heard. Looking at what Armbian does for the board (armbian/build:
+config/boards/pinebook-pro.conf, packages/blobs/asound.state): it
+restores a saved mixer state for the ES8316 codec, whose DAC isn't
+joined to its headphone output (which also feeds the speaker amplifier)
+until two switches are on. rol-snd plays through the kernel's PCM
+interface and never touched a mixer, and there is no alsactl here.
+
+- **rol-snd** sets a card's mixer controls each time it opens the card:
+  a table for the Pinebook Pro's ES8316 (the two Headphone Mixer DAC
+  switches and Speaker Switch on, DAC Playback Volume 192, Headphone
+  Mixer Volume 11, Headphone Playback Volume 2) and the Pinebook's A64
+  codec (AIF1 Slot 0 Digital DAC, DAC and Line Out switches on, Line Out
+  Playback Volume 28): Armbian's values, but Headphone Playback Volume,
+  which Armbian has at 0 (-48 dB by the driver's table) and is 2
+  (-12 dB) here. Each entry is for the card whose id, driver or name has
+  "es8316" or "sun50i" in it, so another card's control of the same name
+  (a USB DAC's "DAC Playback Volume") is left alone.
+- `set=Control's name=value` lines in /riscos/sound/config add to the
+  table or change it, for any card (a number, on/off, or an enumerated
+  control's item by name). What was set is in /riscos/log.txt
+  ("rol-snd: mixer: ...").
+- Tested under QEMU with its usb-audio device and a test build
+  (-DROL_SND_MIXER_TEST): a table entry for "usb" sets the card's volume
+  (240 to 50), one for "es8316" doesn't touch it, and set lines turn its
+  switch off and set its volume; a control that isn't there is passed
+  over. **Not tested on a Pinebook Pro or a Pinebook** (none here): the
+  control names and values are from Armbian's files and the kernel's
+  es8316 driver.
+
 ### Wi-Fi: wifi_pmf=off, and Linux network keeps other settings (13 Nov 2026; riscos-support 1.0.0052-1, riscos-harddisc 1.0.0052-1)
 
 Raik's Pinebook Pro: with power saving off the Wi-Fi is "more stable"
