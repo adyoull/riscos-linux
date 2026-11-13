@@ -8,6 +8,26 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Compute Module 5 Lite: its device tree files in the Pi boot files (13 Nov 2026; riscos-kernel-pi 6.6.78-10)
+
+andym (ROOL forum): the 8 Nov image on a Compute Module 5, from SD and
+from NVMe, on Raspberry Pi's CM5 IO board and a Waveshare one: the
+firmware says "the installed operating system does not indicate support
+for the Raspberry Pi 5"; with `os_check=0` it starts and Linux panics
+after a second.
+
+- A CM5 that starts from SD or NVMe is a CM5 Lite (no eMMC), and the
+  firmware asks for `bcm2712-rpi-cm5l-cm5io.dtb` (or `-cm4io`). The boot
+  files had the eMMC CM5's (`cm5-cm5io`, `cm5-cm4io`) and not the Lite's:
+  the kernel build makes all four, and the list copied into the image
+  left two out. The firmware's check is for exactly that file; with the
+  check off Linux is started without the right device tree.
+- Added to the boot files (the same build's, so the kernel is
+  6.6.78-9's). **Not tried on a CM5**, and whether that is all andym's
+  board needs isn't known until he tries it.
+- The 1.0.0020 image hasn't got them: `cm5-lite-dtbs.zip` (the two
+  files) is for copying onto the card's FAT partition by hand.
+
 ### MemMapEntries 0.04: a module for OS_FindMemMapEntries, OS_SetMemMapEntries and OS_ReadMemMapEntries (13 Nov 2026; riscos-harddisc 1.0.0053-1)
 
 Photodesk 3.14 (the owner's copy; George reported 3.22) stopped at start
