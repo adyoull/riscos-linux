@@ -6,6 +6,29 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-29 (built 13 Nov 2026; released as riscos-rom 5.31-29)
+
+- **OS_RemoveTickerEvent turns interrupts off** (`Kernel/s/TickEvents`):
+  it did so with a bare `MSR CPSR_c`, which does nothing in the port's
+  user mode (the rest of the kernel uses `pvMSR`), so the ticker chain was
+  walked, unlinked and its node freed with interrupts on. A tick between
+  reading a node's link and writing it to the node before (whose own
+  ticker had just fired and been put back further down) left the chain
+  circular, and a node could be freed twice. The next
+  OS_RemoveTickerEvent for an event not in the loop never returned, with
+  no way out but Ctrl-Break: Ralph's report (RISCOSonLinux issue 3; a
+  Pi 4, some minutes after !ROBench was stopped with Escape), whose log
+  has the kernel going round at &20823180, in this loop, at every sample.
+  - Not reproduced here (the window is a few instructions wide); the fix
+    is checked by the built code, and `ticker.bas` (testbed) runs
+    OS_CallAfter and OS_RemoveTickerEvent against a firing ticker for
+    40 s as a soak test.
+- **Still to do:** the ROM has other bare `MSR CPSR_c` instructions that
+  were never converted, some of them turning interrupts off: FileCore
+  (9), the keyboard driver (1), FSLock (1), and register forms in many
+  modules. Natively NativeSupport rewrites those of disc modules and the
+  ROM's sound modules only.
+
 ## 5.31-28 (built 11 Nov 2026; released as riscos-rom 5.31-28)
 
 - **FileCore's zone compaction no longer aborts** (RAM discs, and SCSI

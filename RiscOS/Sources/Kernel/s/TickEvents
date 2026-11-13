@@ -201,7 +201,10 @@ ProcessTickEventChain  ROUT
 
 RemoveTickerEvent_Code
 ; R0 is address of code to remove, R1 the R12 value
-        MSR     CPSR_c, #SVC32_mode+I32_bit
+        ; (pvMSR: a bare MSR does nothing in the Linux port's user mode, so
+        ; the chain was walked and changed with interrupts on, and a tick
+        ; in the middle could leave it circular: the next call never ended)
+        pvMSR   CPSR_c, #SVC32_mode+I32_bit
         LDR     r10, =ZeroPage+TickNodeChain
 01
         LDR     r11, [r10]
