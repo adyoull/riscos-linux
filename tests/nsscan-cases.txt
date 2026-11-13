@@ -1,0 +1,50 @@
+# NativeSupport's scanner: which words it rewrites (tools/nsscan -t).
+# name: words in hex; * marks each word that must be rewritten (to a UDF,
+# or a branch to a stub), and no other word may be. One row is one range
+# of code. Each row is a case the scanner's rules were written for; the
+# comments in modules/NativeSupport/scan.c say more.
+
+# Instructions that are always run (condition AL) with exact encodings
+al-mrs:            E1A00000 *E10F0000 E1A00000
+al-msr-reg:        E1A00000 *E121F003 E1A00000
+al-msr-imm:        E1A00000 *E321F093 E1A00000
+mrs-spsr:          E1A00000 *E14F0000 E1A00000
+# MSR CPSR_c, #n only with a real mode; MSR of the flags alone isn't privileged
+msr-imm-bad-mode:  E1A00000 E321F085 E1A00000
+msr-flags-only:    E1A00000 E128F000 E1A00000
+
+# CPS: next to an AL instruction, and only an encoding the processor takes
+cps-real:          E1A00000 *F10C0080 E1A00000
+cps-alone:         00000000 F10C0080 00000000
+# (0.48) OvationPro's table: CPSID with mode bits and no mode change
+cps-table-opro:    E1A00000 F10C0098 F10C0099 E1A00000
+
+# A number that reads as a conditional MRS, between AL instructions, is
+# taken for one (256000.0's first word is MRSMI r4, CPSR)...
+float-next-to-al:  E1A00000 E1A0F00E *410F4000 00000000 E1A00000
+# ...(0.47) unless an instruction near it loads it as a literal: ChartDraw
+# and MultiPlot (LDFD f3, [pc, #4]), and an integer one (LDR r0, [pc])
+float-literal-ldf: ED9FB101 E1A00000 E1A0F00E 410F4000 00000000 E1A00000
+int-literal-ldr:   E59F0000 E1A0F00E E121F000 E1A00000
+
+# Thumb-2 "beq.w" read as ARM (Iris's JavaScriptCore): MSRHI CPSR, r0
+thumb2-beqw:       E1A00000 812DF000 E1A00000
+# The C libraries' _swix reads only the flags: the real MRS is right
+swix-flags:        E3A0C000 E10FC000 E33C0000 E1A00000 120CC20F
+
+# Conditional MRS/MSR with no AL instruction beside them:
+# CMHG's veneer, a few instructions after TEQ pc, pc
+cmhg-veneer:       E13F000F 01A00000 01A00000 *010F6000 03C6300F 03833003
+# a veneer made in the RMA: two or three in a row with the same condition
+rma-veneer:        01A00000 01A00000 *010F6000 *0121F003 *0121F006 01A00000 01A00000
+# two table words in Iris's libwebkit2gtk (.rodata), and one on its own
+rodata-pair:       00000000 0128F006 012FF007 00000000
+cond-mrs-alone:    01A00000 01A00000 010F1000 01A00000 01A00000
+
+# LDM/STM ^ of r13/r14 (the user-mode ones): only near another privileged
+# instruction. UnixLib's thread switch: mrseq r1, CPSR ... ldmne r0, {sp}^
+unixlib-ldm-usr:   E1A00000 *010F1000 01A00000 *18D02000 01A00000 01A00000 01A00000 01A00000 01A00000
+ldm-usr-near-msr:  *E121F003 *E8D06000 E1A00000
+ldm-usr-alone:     E1A00000 E1A00000 E1A00000 E1A00000 E8D06000 E1A00000 E1A00000 E1A00000 E1A00000
+# an exception return (LDM with pc and ^) always traps: left to the trap
+ldm-return:        E1A00000 E8FD8000 E1A00000

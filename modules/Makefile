@@ -252,7 +252,7 @@ NS_OBJS := $(OBJ)/ns-header.o $(OBJ)/ns-native.o $(OBJ)/ae-cmodule.o
 
 $(OBJ)/ns-header.o: NativeSupport/header.s common/cmodule.inc | $(OBJ)
 	$(AS) -I common -o $@ $<
-$(OBJ)/ns-native.o: NativeSupport/native.c common/cmodule.h | $(OBJ)
+$(OBJ)/ns-native.o: NativeSupport/native.c $(wildcard NativeSupport/*.c) common/cmodule.h | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ)/NativeSupport.elf: $(NS_OBJS) common/module.ld

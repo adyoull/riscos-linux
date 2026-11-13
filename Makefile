@@ -46,6 +46,16 @@ out/bin/rol-kvm: tools/rol-kvm.c
 	mkdir -p out/bin
 	$(CC) -O2 -Wall -Wextra -o $@ $<
 # rol-kvm for an aarch64 Linux: tools/native-vm runs it in its VM
+# NativeSupport's scanner as a program for the build machine (32-bit ARM,
+# run through qemu-arm): see tools/nsscan.c. "make nsscan-check" runs its
+# cases (tests/nsscan-cases.txt).
+out/bin/nsscan: tools/nsscan.c modules/NativeSupport/sites.c modules/NativeSupport/scan.c modules/NativeSupport/privform.c
+	mkdir -p out/bin
+	arm-linux-gnueabihf-gcc -O2 -marm -static -Wall -Wno-unused -o $@ $<
+nsscan-check: out/bin/nsscan
+	qemu-arm out/bin/nsscan -t tests/nsscan-cases.txt
+.PHONY: nsscan-check
+
 out/bin/rol-kvm-aarch64: tools/rol-kvm.c
 	mkdir -p out/bin
 	aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -o $@ $<

@@ -112,6 +112,10 @@ check bput 0 '^bput ok' 600 '' -- \
 # NativeSupport 0.47 leaves a word that a pc-relative load reads)
 check literal 0 '^literal ok' 60 '' -- \
   -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.literal/bas'
+# OS_CallAfter and OS_RemoveTickerEvent against a firing ticker for 40 s
+# (5.31-29: OS_RemoveTickerEvent really turns interrupts off; a soak test)
+check ticker 0 '^ticker ok' 120 '' -- \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.ticker/bas'
 # GPIO HAL devices (RISC OS 5.31-17): a Pi 3 or 4's, through /dev/gpiomem;
 # none elsewhere (here), and looking for them must not go wrong
 check gpio-devices 0 '^gpio (ok|none)$' 60 '' -- \
@@ -335,6 +339,19 @@ if [ ${#want[@]} -eq 0 ] || printf '%s\n' "${want[@]}" | grep -qx desktop-wheel;
   else
     echo "SKIP  desktop-wheel (no out/harddisc/HardDisc4: make harddisc)"
   fi
+fi
+
+# --- NativeSupport's scanner, on this machine (tools/nsscan) --------------------
+# which words it rewrites, case by case (tests/nsscan-cases.txt); needs
+# arm-linux-gnueabihf-gcc and qemu-arm
+if command -v arm-linux-gnueabihf-gcc >/dev/null && command -v qemu-arm >/dev/null; then
+  if r=$(make -s -C "$TB" nsscan-check 2>&1); then
+    echo "PASS  nsscan-cases"; pass=$((pass + 1))
+  else
+    echo "FAIL  nsscan-cases"; sed 's/^/      | /' <<<"$r" | tail -12; fail=$((fail + 1))
+  fi
+else
+  echo "SKIP  nsscan-cases (no arm-linux-gnueabihf-gcc or qemu-arm)"
 fi
 
 # --- threads and faults --------------------------------------------------------

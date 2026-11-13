@@ -2,11 +2,75 @@
 
 ## Since images 1.0.0020 (9 to 13 November 2026; through Updates)
 
-RISC OS 5.31-28 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
+RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 0.48, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
 `*IXRun`, the Pi kernel's fan driver and the Pi's headphone socket.
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
+
+### RISC OS 5.31-29: OS_RemoveTickerEvent turns interrupts off (13 Nov 2026; riscos-rom 5.31-29)
+
+Ralph's report (RISCOSonLinux issue 3; Pi 4, ROM 5.31-24): some minutes
+after stopping !ROBench with Escape the desktop stopped, and only
+Ctrl-Break worked. rol-fb's Ctrl-Break samples in his riscos-log.txt all
+have RISC OS at &20823180: the loop in the kernel's
+RemoveTickerEvent_Code that walks the ticker chain, with r0 = &54F12828
+and r1 = &24A858F4 (the event being removed), never finding it or the
+end. The chain had become circular.
+
+- **Cause:** the routine starts `MSR CPSR_c, #SVC32_mode+I32_bit`. In the
+  port a bare MSR does nothing (user mode); the kernel's other such
+  places are `pvMSR`. So the chain was walked, unlinked and the node
+  freed with interrupts on. A tick after it reads a node's link and
+  before it writes it into the node before (that one's own ticker
+  firing and going back into the chain further down) leaves a node
+  pointing at itself; a node can also be freed twice.
+- **Fix** (rol/src b26db80f7, Kernel/s/TickEvents): `pvMSR`. The built
+  ROM has the port's call before the MSR at &20823164.
+- **Tests:** not reproduced on 5.31-28 (the window is a few instructions).
+  `tests/programs/ticker.bas` (check `ticker`) is a soak test: one
+  OS_CallEvery ticker, and OS_CallAfter + OS_RemoveTickerEvent as fast as
+  they go for 40 s. Native suite on 5.31-29: 70 passed, 1 failed
+  (ramdisc, which fails the same way on 5.31-28 in this VM); the desktop
+  starts under QEMU and the test passes there (537,000 removals).
+- **Found on the way, not fixed:** the ROM has more bare `MSR CPSR_c`
+  that the port never converted and NativeSupport doesn't rewrite (it
+  does disc modules and the ROM's sound modules): turning interrupts off
+  in FileCore (9 places), the keyboard driver (1) and FSLock (1), and
+  register forms in about sixty modules. Each is a place where code that
+  believes interrupts are off runs with them on. The next ROM job.
+
+### NativeSupport: the source in parts, and its scanner as a program for the build machine (13 Nov 2026; no new package: the module is the same, byte for byte)
+
+native.c had grown to 5,564 lines, and the last two fixes (0.47, 0.48)
+were both to the same thing: telling a privileged instruction from data
+that reads like one, found one report at a time.
+
+- **modules/NativeSupport** is thirteen files by job (sys, sites, scan,
+  privform, psr, modes, aeabi, osmemory, sync, faults, kpmp, start,
+  swistubs), each saying at its top what it is for. native.c keeps the
+  description, the definitions and the list, and includes them in order:
+  still one translation unit, so nothing about the code changes.
+  **Checked: NativeSupport,ffa built from the parts is identical to
+  0.48's as released** (sha256 776247c9...), so there is no 0.49 and
+  nothing to install.
+- **tools/nsscan** (`make out/bin/nsscan`; a 32-bit ARM Linux program, run
+  through qemu-arm): the scanner's own code (sites.c, scan.c, privform.c,
+  compiled in unchanged) run over files. It lists each word NativeSupport
+  would rewrite: offset, the word, what it is, its neighbours, and for an
+  AIF or ELF file whether it is in the code at all. 788 programs, modules
+  and libraries here take 4 seconds.
+- **tests/nsscan-cases.txt** (`make nsscan-check`; in tests/run.sh as
+  nsscan-cases): 22 rows of words, one for each situation the rules were
+  written for (ChartDraw's literal, OvationPro's table, Iris's Thumb-2
+  branch, CMHG's and the RMA's veneers, UnixLib's thread switch, _swix's
+  flags...), with the words that must be rewritten marked. A change to
+  the rules that breaks an old fix now fails here.
+- **Found by the first run, to look at:** of 3,924 words it would rewrite
+  in those 788 files, 33 are in AIF images' read-write data and one is in
+  what looks like a table in Folio's !RunImage (+&120C3C8: &210F0000
+  beside &E20B0000). Whether NativeSupport ever scans those places (it
+  scans what programs synchronise) is the next thing to check.
 
 ### Sound: the sound chip's mixer is set (Pinebook Pro, Pinebook) (13 Nov 2026; riscos-support 1.0.0053-1)
 
