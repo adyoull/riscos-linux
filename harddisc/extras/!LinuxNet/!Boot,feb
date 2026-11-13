@@ -1,0 +1,3 @@
+| LinuxNet: Configure's plug-in for the network of RISC OS on Linux
+If "<LinuxNet$Dir>" = "" then Set LinuxNet$Dir <Obey$Dir>
+IconSprites <LinuxNet$Dir>.!Sprites

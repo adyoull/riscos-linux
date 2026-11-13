@@ -16,6 +16,12 @@
  *     wifi_powersave=off  on: let the Wi-Fi save power between packets.
  *                         Off by default: some Wi-Fi (the Pinebook Pro's
  *                         Broadcom) drops its connection with it on.
+ *     wifi_pmf=on         off: no protected management frames and plain
+ *                         WPA-PSK only (ieee80211w=0, no WPA-PSK-SHA256).
+ *                         To try where a network is joined and then
+ *                         dropped, over and over: some Wi-Fi chips'
+ *                         firmware (Broadcom's) and some access points
+ *                         don't agree on them.
  *
  *   status: interface, type, mac, link, state, address, netmask, gateway,
  *     dns, lease, rx, tx, ssid, signal, freq, interfaces, message, time
@@ -118,7 +124,7 @@ read_num (const char *fmt, const char *ifn)
 struct config
 {
   char interface[16], mode[16], address[32], netmask[32], gateway[32],
-       dns[100], hostname[64], ssid[64], psk[100], country[8], powersave[8];
+       dns[100], hostname[64], ssid[64], psk[100], country[8], powersave[8], pmf[8];
 };
 
 static void
@@ -157,6 +163,7 @@ config_read (struct config *c)
         { "wifi_psk", c->psk, sizeof c->psk },
         { "wifi_country", c->country, sizeof c->country },
         { "wifi_powersave", c->powersave, sizeof c->powersave },
+        { "wifi_pmf", c->pmf, sizeof c->pmf },
       };
       for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
         if (!strcmp (l, keys[i].k))
@@ -643,14 +650,14 @@ wpa_conf_text (const struct config *c, char *t, size_t n)
   hex (ssid, c->ssid);
   size_t pl = strlen (c->psk);
   int hexpsk = pl == 64 && strspn (c->psk, "0123456789abcdefABCDEF") == 64;
+  const char *km = !strcasecmp (c->pmf, "off")
+    ? "key_mgmt=WPA-PSK\n ieee80211w=0" : "key_mgmt=WPA-PSK WPA-PSK-SHA256\n ieee80211w=1";
   if (!pl)
     snprintf (t + l, n - l, "network={\n ssid=%s\n scan_ssid=1\n key_mgmt=NONE\n}\n", ssid);
   else if (hexpsk)
-    snprintf (t + l, n - l, "network={\n ssid=%s\n scan_ssid=1\n key_mgmt=WPA-PSK WPA-PSK-SHA256\n"
-              " ieee80211w=1\n psk=%s\n}\n", ssid, c->psk);
+    snprintf (t + l, n - l, "network={\n ssid=%s\n scan_ssid=1\n %s\n psk=%s\n}\n", ssid, km, c->psk);
   else
-    snprintf (t + l, n - l, "network={\n ssid=%s\n scan_ssid=1\n key_mgmt=WPA-PSK WPA-PSK-SHA256\n"
-              " ieee80211w=1\n psk=\"%s\"\n}\n", ssid, c->psk);
+    snprintf (t + l, n - l, "network={\n ssid=%s\n scan_ssid=1\n %s\n psk=\"%s\"\n}\n", ssid, km, c->psk);
 }
 
 static int

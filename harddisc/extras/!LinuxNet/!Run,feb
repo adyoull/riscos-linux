@@ -1,0 +1,7 @@
+| LinuxNet: Configure's plug-in for the network of RISC OS on Linux
+| (rol-netd, the Linux side, reads <LinuxNet$Path>config and writes
+| <LinuxNet$Path>status; LinuxNet$Path is IXFS:$.riscos.net. if unset)
+Set LinuxNet$Dir <Obey$Dir>
+IconSprites <LinuxNet$Dir>.!Sprites
+WimpSlot -min 96k -max 96k
+BASIC -quit <LinuxNet$Dir>.!RunImage %*0

@@ -1,12 +1,32 @@
 # Changelog
 
-## Since images 1.0.0020 (9 to 12 November 2026; through Updates)
+## Since images 1.0.0020 (9 to 13 November 2026; through Updates)
 
 RISC OS 5.31-28 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 0.48, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
 `*IXRun`, the Pi kernel's fan driver and the Pi's headphone socket.
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
+
+### Wi-Fi: wifi_pmf=off, and Linux network keeps other settings (13 Nov 2026; riscos-support 1.0.0052-1, riscos-harddisc 1.0.0052-1)
+
+Raik's Pinebook Pro: with power saving off the Wi-Fi is "more stable"
+but "still doesn't always work". No logs from it yet, so the cause isn't
+known; this gives him something to try.
+
+- **rol-netd:** `wifi_pmf=off` in /riscos/net/config makes the network
+  block `key_mgmt=WPA-PSK` and `ieee80211w=0` (the default stays
+  `WPA-PSK WPA-PSK-SHA256`, `ieee80211w=1`). Broadcom's FullMAC firmware
+  and some access points don't agree on protected management frames or
+  the SHA256 key type, which shows as joining and being dropped.
+- **Linux network 1.01** (harddisc/extras/!LinuxNet, now in this tree: it
+  was only in the image's root): Set rewrote the file with its own ten
+  settings, so `wifi_powersave` and any other line were lost. Lines it
+  has no field for are kept and written back.
+- Tested: the two wpa_supplicant blocks from a host build of
+  wpa_conf_text; under QEMU a config with wifi_powersave and wifi_pmf
+  lines keeps them through Set, and the wired network still comes up
+  with the new rol-netd. No Wi-Fi was tested (none under QEMU).
 
 ### NativeSupport 0.48: OvationPro starts (12 Nov 2026; riscos-support 1.0.0051-1)
 

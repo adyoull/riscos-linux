@@ -1,0 +1,8 @@
+# Messages file for LinuxNet
+_TaskName:Linux network
+_Purpose:The network of RISC OS on Linux
+_Author:Andrew Youll, 2026
+_Version:1.01 (13-Nov-26)
+_ConfigText:Linux network
+_ConfigHelp:Click SELECT to choose how RISC OS on Linux connects to the network (wired or Wi-Fi, DHCP or a manual address) and to see what it's doing.
+_ConfigSprite:co_linuxnet

@@ -1,0 +1,554 @@
+REM >!RunImage
+REM LinuxNet: Configure's plug-in for the network of RISC OS on Linux.
+REM It writes the settings for rol-netd (the Linux side) to
+REM <LinuxNet$Path>config and shows what the network is doing from
+REM <LinuxNet$Path>status, which rol-netd rewrites every two seconds.
+REM Copyright (c) 2026 Andrew Youll. MIT licence.
+ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
+DIM blk% 4096, ind% 16384, menu% 28+24*40, mtext% 40*80
+DIM ic%(40), shown$(40), net$(40), sec$(40), sig%(40), st$(30), sv$(30)
+indp%=0 : task%=0 : win%=0 : quit%=FALSE : nnets%=0 : nst%=0
+scanning%=FALSE : lastt$="" : stale%=0 : lastdns$="" : hold%=0
+path$=FNvar("LinuxNet$Path")
+IF path$="" THEN path$="IXFS:$.riscos.net."
+SYS "Wimp_Initialise",380,&4B534154,"Linux network",0 TO ,task%
+PROCwindow
+PROCload
+PROCshade
+PROCstatus
+PROCopen
+ON ERROR PROCerror
+REPEAT
+  IF scanning% THEN wait%=50 ELSE wait%=200
+  SYS "OS_ReadMonotonicTime" TO t%
+  SYS "Wimp_PollIdle",&3830,blk%,t%+wait% TO reason%
+  CASE reason% OF
+    WHEN 0 : PROCstatus : IF scanning% THEN PROCscan_check
+    WHEN 2 : SYS "Wimp_OpenWindow",,blk%
+    WHEN 3 : quit%=TRUE
+    WHEN 6 : PROCclick(blk%!8,blk%!12,blk%!16)
+    WHEN 8 : PROCkey(blk%!24)
+    WHEN 9 : PROCmenu_choice(blk%!0)
+    WHEN 17,18 : IF blk%!16=0 THEN quit%=TRUE
+  ENDCASE
+UNTIL quit%
+SYS "Wimp_CloseDown",task%,&4B534154
+END
+
+DEF PROCerror
+LOCAL e%
+e%=blk%+3000
+!e%=0 : $(e%+4)=REPORT$+" (line "+STR$ERL+")"+CHR$0
+SYS "Wimp_ReportError",e%,%10011,"Linux network" TO ,r%
+IF r%=2 THEN SYS "Wimp_CloseDown",task%,&4B534154 : END
+ENDPROC
+
+REM --- the window ------------------------------------------------------
+
+DEF FNstr(s$,len%)
+LOCAL p%
+p%=ind%+indp%
+IF len%<LEN(s$)+1 THEN len%=LEN(s$)+1
+$p%=s$
+indp%+=(len%+3) AND NOT 3
+=p%
+
+DEF FNicon(x0%,y0%,x1%,y1%,fl%,t$,v$,len%)
+LOCAL i%
+blk%!0=win% : blk%!4=x0% : blk%!8=y0% : blk%!12=x1% : blk%!16=y1%
+blk%!20=fl%
+IF len%<LEN(t$)+1 THEN len%=LEN(t$)+1
+blk%!24=FNstr(t$,len%)
+IF v$="" THEN blk%!28=-1 ELSE blk%!28=FNstr(v$,0)
+blk%!32=len%
+SYS "Wimp_CreateIcon",,blk% TO i%
+=i%
+
+REM a label, right-justified against X%
+DEF PROClabel(x0%,x1%,y%,t$)
+LOCAL i%
+i%=FNicon(x0%,y%-48,x1%,y%,&17000311,t$,"",0)
+ENDPROC
+
+DEF FNwritable(x0%,x1%,y%,len%,v$)
+IF v$="" THEN v$="Ktar;Pptr_write" ELSE v$+=";Ktar;Pptr_write"
+=FNicon(x0%,y%-52,x1%,y%,&0700F13D,"",v$,len%)
+
+DEF FNdisplay(x0%,x1%,y%)
+=FNicon(x0%,y%-52,x1%,y%,&1700013D,"","R2",120)
+
+DEF FNradio(x0%,x1%,y%,esg%,t$)
+=FNicon(x0%,y%-48,x1%,y%,&1700B113 OR (esg%<<16),t$,"Sradiooff,radioon",0)
+
+DEF FNbutton(x0%,x1%,y%,t$,def%)
+IF def% THEN =FNicon(x0%,y%-68,x1%,y%,&1700313D,t$,"R6,3",0)
+=FNicon(x0%,y%-60,x1%,y%-8,&1700313D,t$,"R5,3",0)
+
+REM a group box headed T$ from TOP% down (made first, so it's under the
+REM icons in it; PROCgroup_end sets its bottom)
+DEF FNgroup(top%,t$)
+LOCAL i%,j%
+i%=FNicon(16,top%-100,W%-16,top%,&1700011D,"","R4",0)
+j%=FNicon(48,top%-24,48+LEN(t$)*16+24,top%+24,&17000139,t$,"",0)
+=i%
+
+DEF PROCgroup_end(i%,top%,bot%)
+SYS "Wimp_ResizeIcon",win%,i%,16,bot%,W%-16,top%
+ENDPROC
+
+DEF PROCwindow
+LOCAL b%,y%,top%,L%,F%,R%
+W%=1088 : L%=24 : F%=280 : R%=W%-48
+b%=blk%+1024
+b%!0=0 : b%!4=0 : b%!8=W% : b%!12=1000
+b%!16=0 : b%!20=0 : b%!24=-1
+b%!28=&87000012
+b%?32=7 : b%?33=2 : b%?34=7 : b%?35=1 : b%?36=3 : b%?37=1 : b%?38=12 : b%?39=0
+b%!40=0 : b%!44=-1400 : b%!48=W% : b%!52=0
+b%!56=&13D : b%!60=0 : b%!64=1 : b%!68=0
+b%!72=FNstr("Linux network",0) : b%!76=-1 : b%!80=14
+b%!84=0
+SYS "Wimp_CreateWindow",,b% TO win%
+
+REM Connection
+y%=-40 : top%=y%+16 : g%=FNgroup(top%,"Connection")
+y%-=40
+PROClabel(L%,F%-12,y%,"Use")
+ic%(1)=FNradio(F%,F%+230,y%,1,"Automatic")
+ic%(2)=FNradio(F%+240,F%+410,y%,1,"Wired")
+ic%(3)=FNradio(F%+420,F%+580,y%,1,"Wi-Fi")
+ic%(4)=FNradio(F%+590,F%+720,y%,1,"Off")
+y%-=60
+PROClabel(L%,F%-12,y%,"Address")
+ic%(5)=FNradio(F%,F%+380,y%,2,"Automatic (DHCP)")
+ic%(6)=FNradio(F%+420,F%+620,y%,2,"Manual")
+y%-=64
+PROClabel(L%,F%-12,y%,"IP address")
+ic%(7)=FNwritable(F%,F%+290,y%,16,"A0-9.")
+PROClabel(F%+300,F%+470,y%,"Netmask")
+ic%(8)=FNwritable(F%+482,R%,y%,16,"A0-9.")
+y%-=64
+PROClabel(L%,F%-12,y%,"Gateway")
+ic%(9)=FNwritable(F%,F%+290,y%,16,"A0-9.")
+PROClabel(F%+300,F%+470,y%,"DNS")
+ic%(10)=FNwritable(F%+482,R%,y%,48,"A0-9., ")
+y%-=64
+PROClabel(L%,F%-12,y%,"Host name")
+ic%(11)=FNwritable(F%,F%+450,y%,64,"A0-9a-zA-Z.\-")
+y%-=72
+PROCgroup_end(g%,top%,y%)
+
+REM Wi-Fi
+y%-=56 : top%=y%+16 : g%=FNgroup(top%,"Wi-Fi")
+y%-=40
+PROClabel(L%,F%-12,y%,"Network")
+ic%(12)=FNwritable(F%,F%+360,y%,33,"")
+ic%(13)=FNbutton(F%+372,F%+552,y%+4,"Scan...",FALSE)
+PROClabel(F%+552,F%+672,y%,"Country")
+ic%(14)=FNwritable(F%+684,R%,y%,3,"Aa-zA-Z")
+y%-=64
+PROClabel(L%,F%-12,y%,"Password")
+ic%(15)=FNwritable(F%,F%+360,y%,64,"D*")
+PROClabel(F%+360,F%+700,y%,"(blank if open)")
+y%-=72
+PROCgroup_end(g%,top%,y%)
+
+REM Status
+y%-=56 : top%=y%+16 : g%=FNgroup(top%,"Status")
+y%-=40
+PROClabel(L%,F%-12,y%,"Interface") : ic%(20)=FNdisplay(F%,R%,y%)
+y%-=60
+PROClabel(L%,F%-12,y%,"Address") : ic%(21)=FNdisplay(F%,R%,y%)
+y%-=60
+PROClabel(L%,F%-12,y%,"Gateway") : ic%(22)=FNdisplay(F%,F%+290,y%)
+PROClabel(F%+300,F%+470,y%,"DNS") : ic%(23)=FNdisplay(F%+482,R%,y%)
+y%-=60
+PROClabel(L%,F%-12,y%,"Wi-Fi") : ic%(24)=FNdisplay(F%,R%,y%)
+y%-=60
+PROClabel(L%,F%-12,y%,"Traffic") : ic%(25)=FNdisplay(F%,R%,y%)
+y%-=60
+PROClabel(L%,F%-12,y%,"Hardware") : ic%(26)=FNdisplay(F%,R%,y%)
+y%-=60
+ic%(27)=FNdisplay(L%+16,R%,y%)
+y%-=72
+PROCgroup_end(g%,top%,y%)
+
+REM buttons
+y%-=24
+ic%(18)=FNbutton(W%-460,W%-260,y%,"Cancel",FALSE)
+ic%(19)=FNbutton(W%-240,W%-24,y%,"Set",TRUE)
+H%=-(y%-84)
+ext%=b%+2000
+ext%!0=0 : ext%!4=-H% : ext%!8=W% : ext%!12=0
+SYS "Wimp_SetExtent",win%,ext%
+ENDPROC
+
+DEF PROCopen
+LOCAL b%,sw%,sh%,x%,y%,a%,i%
+SYS "OS_ReadModeVariable",-1,11 TO ,,sw%
+SYS "OS_ReadModeVariable",-1,12 TO ,,sh%
+SYS "OS_ReadModeVariable",-1,4 TO ,,ex%
+SYS "OS_ReadModeVariable",-1,5 TO ,,ey%
+sw%=(sw%+1)<<ex% : sh%=(sh%+1)<<ey%
+x%=(sw%-W%)DIV2 : y%=(sh%+H%)DIV2
+IF y%>sh%-48 THEN y%=sh%-48
+REM Configure starts plug-ins with "-openat x y"
+SYS "OS_GetEnv" TO a$
+i%=INSTR(a$,"-openat ")
+IF i% THEN a$=MID$(a$,i%+8) : x%=VAL(a$) : a$=MID$(a$,INSTR(a$," ")+1) : y%=VAL(a$)
+b%=blk%
+b%!0=win% : b%!4=x% : b%!8=y%-H% : b%!12=x%+W% : b%!16=y%
+b%!20=0 : b%!24=0 : b%!28=-1
+SYS "Wimp_OpenWindow",,b%
+ENDPROC
+
+REM --- icons --------------------------------------------------------------
+
+DEF FNtext(i%)
+LOCAL p%,s$
+blk%!0=win% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+p%=blk%!28
+WHILE ?p%>=32 : s$+=CHR$?p% : p%+=1 : ENDWHILE
+=s$
+
+DEF PROCsettext(i%,s$)
+LOCAL p%,n%
+blk%!0=win% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+p%=blk%!28 : n%=blk%!36
+s$=LEFT$(s$,n%-1)
+$p%=s$ : p%?LEN(s$)=0
+blk%!0=win% : blk%!4=i% : blk%!8=0 : blk%!12=0
+SYS "Wimp_SetIconState",,blk%
+REM keep the caret in the field
+SYS "Wimp_GetCaretPosition",,blk%+64
+IF blk%!64=win% AND blk%!68=i% THEN SYS "Wimp_SetCaretPosition",win%,i%,-1,-1,-1,LEN(s$)
+ENDPROC
+
+DEF FNon(i%)
+blk%!0=win% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+=(blk%!24 AND &200000)<>0
+
+DEF PROCflag(i%,bit%,on%)
+blk%!0=win% : blk%!4=i%
+IF on% THEN blk%!8=bit% ELSE blk%!8=0
+blk%!12=bit%
+SYS "Wimp_SetIconState",,blk%
+ENDPROC
+
+DEF PROCselect(i%,on%) : PROCflag(i%,&200000,on%) : ENDPROC
+DEF PROCfade(i%,on%) : PROCflag(i%,&400000,on%) : ENDPROC
+
+DEF PROCshade
+LOCAL man%,wifi%,off%,i%
+man%=FNon(ic%(6)) : off%=FNon(ic%(4)) : wifi%=NOT FNon(ic%(2)) AND NOT off%
+FOR i%=7 TO 10 : PROCfade(ic%(i%),NOT man% OR off%) : NEXT
+FOR i%=5 TO 6 : PROCfade(ic%(i%),off%) : NEXT
+FOR i%=12 TO 15 : PROCfade(ic%(i%),NOT wifi%) : NEXT
+ENDPROC
+
+REM --- the settings -------------------------------------------------------
+
+DEF FNvar(n$)
+LOCAL l%,b%
+b%=blk%+3500
+SYS "XOS_ReadVarVal",n$,b%,255,0,3 TO ,,l%
+IF l%<0 OR l%>255 THEN =""
+b%?l%=13
+=$b%
+
+DEF PROCload
+LOCAL f%,l$,k$,v$,iface$,mode$
+iface$="auto" : mode$="dhcp"
+REM settings this window has no field for (wifi_powersave, wifi_pmf...)
+REM are kept and written back as they were
+other$=""
+PROCsettext(ic%(11),"riscos") : PROCsettext(ic%(14),"GB")
+f%=0 : SYS "XOS_Find",&4F,path$+"config" TO f% ;fl%
+IF fl% AND 1 THEN f%=0
+IF f% THEN
+  WHILE NOT EOF#f%
+    l$=GET$#f% : k$=LEFT$(l$,INSTR(l$+"=","=")-1) : v$=MID$(l$,LEN(k$)+2)
+    CASE k$ OF
+      WHEN "interface" : iface$=v$
+      WHEN "mode" : mode$=v$
+      WHEN "address" : PROCsettext(ic%(7),v$)
+      WHEN "netmask" : PROCsettext(ic%(8),v$)
+      WHEN "gateway" : PROCsettext(ic%(9),v$)
+      WHEN "dns" : PROCsettext(ic%(10),v$)
+      WHEN "hostname" : PROCsettext(ic%(11),v$)
+      WHEN "wifi_ssid" : PROCsettext(ic%(12),v$)
+      WHEN "wifi_country" : PROCsettext(ic%(14),v$)
+      WHEN "wifi_psk" : PROCsettext(ic%(15),v$)
+      OTHERWISE : IF l$<>"" AND LEN(other$)+LEN(l$)<250 THEN other$+=l$+CHR$10
+    ENDCASE
+  ENDWHILE
+  CLOSE#f%
+ENDIF
+PROCselect(ic%(1),iface$<>"wired" AND iface$<>"wifi" AND iface$<>"off")
+PROCselect(ic%(2),iface$="wired")
+PROCselect(ic%(3),iface$="wifi")
+PROCselect(ic%(4),iface$="off")
+PROCselect(ic%(5),mode$<>"manual")
+PROCselect(ic%(6),mode$="manual")
+ENDPROC
+
+DEF PROCsave
+LOCAL f%,iface$,h$
+iface$="auto"
+IF FNon(ic%(2)) THEN iface$="wired"
+IF FNon(ic%(3)) THEN iface$="wifi"
+IF FNon(ic%(4)) THEN iface$="off"
+IF FNon(ic%(6)) AND FNtext(ic%(7))="" THEN ERROR 1,"Give an IP address for a manual address (or choose Automatic)"
+f%=OPENOUT(path$+"config")
+IF f%=0 THEN ERROR 1,"Can't write "+path$+"config"
+BPUT#f%,"interface="+iface$
+IF FNon(ic%(6)) THEN BPUT#f%,"mode=manual" ELSE BPUT#f%,"mode=dhcp"
+BPUT#f%,"address="+FNtext(ic%(7))
+BPUT#f%,"netmask="+FNtext(ic%(8))
+BPUT#f%,"gateway="+FNtext(ic%(9))
+BPUT#f%,"dns="+FNtext(ic%(10))
+h$=FNtext(ic%(11)) : IF h$="" THEN h$="riscos"
+BPUT#f%,"hostname="+h$
+BPUT#f%,"wifi_ssid="+FNtext(ic%(12))
+BPUT#f%,"wifi_psk="+FNtext(ic%(15))
+BPUT#f%,"wifi_country="+FNtext(ic%(14))
+IF other$<>"" THEN BPUT#f%,other$;
+CLOSE#f%
+SYS "XOS_SetVarVal","Inet$HostName",h$,LEN(h$),0,0
+REM manual name servers: RISC OS's Resolver uses them at once
+IF FNon(ic%(6)) AND FNtext(ic%(10))<>"" THEN PROCresolvers(FNtext(ic%(10)))
+ENDPROC
+
+REM Inet$Resolvers (servers separated by spaces) and the Resolver told
+DEF PROCresolvers(d$)
+LOCAL i%
+FOR i%=1 TO LEN(d$) : IF MID$(d$,i%,1)="," THEN MID$(d$,i%,1)=" "
+NEXT
+WHILE INSTR(d$,"  ") : d$=LEFT$(d$,INSTR(d$,"  "))+MID$(d$,INSTR(d$,"  ")+2) : ENDWHILE
+IF d$="" OR d$=FNvar("Inet$Resolvers") THEN ENDPROC
+SYS "XOS_SetVarVal","Inet$Resolvers",d$,LEN(d$),0,0
+SYS "XOS_CLI","RMReInit Resolver"
+ENDPROC
+
+REM --- events -------------------------------------------------------------
+
+DEF PROCclick(b%,w%,i%)
+IF w%<>win% THEN ENDPROC
+CASE i% OF
+  WHEN ic%(1),ic%(2),ic%(3),ic%(4) : PROCradio(i%,1,4) : PROCshade
+  WHEN ic%(5),ic%(6) : PROCradio(i%,5,6) : PROCshade
+  WHEN ic%(13) : IF (b% AND 5) THEN PROCscan
+  WHEN ic%(18)
+    IF b% AND 4 THEN quit%=TRUE
+    IF b% AND 1 THEN PROCload : PROCshade
+  WHEN ic%(19)
+    IF b% AND 5 THEN PROCsave : stale%=0 : PROCstatus
+    IF b% AND 4 THEN quit%=TRUE
+ENDCASE
+ENDPROC
+
+REM one of a group of radio buttons, ic%(A%) to ic%(B%), selected
+DEF PROCradio(i%,a%,b%)
+LOCAL j%
+FOR j%=a% TO b% : PROCselect(ic%(j%),ic%(j%)=i%) : NEXT
+ENDPROC
+
+DEF PROCkey(k%)
+CASE k% OF
+  WHEN 13 : PROCsave : quit%=TRUE
+  WHEN 27 : quit%=TRUE
+  OTHERWISE : SYS "Wimp_ProcessKey",k%
+ENDCASE
+ENDPROC
+
+REM --- Wi-Fi networks ----------------------------------------------------
+
+DEF PROCscan
+LOCAL f%
+SYS "XOS_File",6,path$+"scan"
+f%=OPENOUT(path$+"request")
+IF f%=0 THEN ERROR 1,"Can't write "+path$+"request"
+BPUT#f%,"scan"
+CLOSE#f%
+scanning%=TRUE
+SYS "OS_ReadMonotonicTime" TO scant%
+PROCsettext(ic%(27),"Looking for Wi-Fi networks...")
+shown$(27)=""
+ENDPROC
+
+REM a message on the bottom line for a few seconds
+DEF PROCnote(s$)
+PROCsettext(ic%(27),s$) : shown$(27)=s$
+SYS "OS_ReadMonotonicTime" TO hold%
+hold%+=600
+ENDPROC
+
+DEF PROCscan_check
+LOCAL t%,f%,l$,a%,b%,n%,w%,p%,i%,o%
+SYS "OS_ReadMonotonicTime" TO t%
+SYS "OS_File",17,path$+"scan" TO o%
+IF o%<>1 THEN
+  IF t%-scant%>2000 THEN scanning%=FALSE : PROCnote("No answer to the scan (is rol-netd running?)")
+  ENDPROC
+ENDIF
+scanning%=FALSE
+nnets%=0 : msg$=""
+f%=OPENIN(path$+"scan")
+WHILE NOT EOF#f% AND nnets%<36
+  l$=GET$#f%
+  IF LEFT$(l$,1)="#" THEN
+    msg$=MID$(l$,3)
+  ELSE
+    a%=INSTR(l$,CHR$9) : b%=INSTR(l$,CHR$9,a%+1)
+    IF a%>0 AND b%>0 THEN
+      nnets%+=1
+      sig%(nnets%)=VAL(LEFT$(l$,a%-1))
+      sec$(nnets%)=MID$(l$,a%+1,b%-a%-1)
+      net$(nnets%)=MID$(l$,b%+1)
+    ENDIF
+  ENDIF
+ENDWHILE
+CLOSE#f%
+IF nnets%=0 THEN
+  IF msg$="" OR LEFT$(msg$,2)="0 " THEN msg$="No Wi-Fi networks found"
+  PROCnote(msg$)
+  ENDPROC
+ENDIF
+PROCnote(STR$nnets%+" Wi-Fi networks found: choose one")
+REM the menu: "name   -50 dBm WPA2"
+w%=0 : p%=mtext%
+$menu%=LEFT$("Networks",11)+CHR$0
+menu%?12=7 : menu%?13=2 : menu%?14=7 : menu%?15=0
+menu%!20=44 : menu%!24=0
+FOR i%=1 TO nnets%
+  l$=LEFT$(net$(i%),32)+"  "+STR$sig%(i%)+" dBm "+sec$(i%)
+  IF LEN(l$)>w% THEN w%=LEN(l$)
+  n%=menu%+28+24*(i%-1)
+  n%!0=0 : IF i%=nnets% THEN n%!0=&80
+  n%!4=-1 : n%!8=&07000121
+  $p%=l$ : p%?LEN(l$)=0
+  n%!12=p% : n%!16=-1 : n%!20=LEN(l$)+1
+  p%+=LEN(l$)+1
+NEXT
+menu%!16=w%*16+32
+blk%!0=win% : blk%!4=ic%(13)
+SYS "Wimp_GetIconState",,blk%
+blk%!100=win%
+SYS "Wimp_GetWindowState",,blk%+100
+x%=blk%!104-blk%!120+blk%!8 : y%=blk%!116-blk%!124+blk%!12
+SYS "Wimp_CreateMenu",,menu%,x%,y%
+ENDPROC
+
+DEF PROCmenu_choice(i%)
+LOCAL b%
+IF i%<0 OR i%>=nnets% THEN ENDPROC
+PROCsettext(ic%(12),net$(i%+1))
+IF sec$(i%+1)="Open" THEN PROCsettext(ic%(15),"")
+IF FNon(ic%(2)) OR FNon(ic%(4)) THEN PROCradio(ic%(1),1,4)
+PROCshade
+IF sec$(i%+1)="WPA3" THEN PROCnote("That network is WPA3-only, which this doesn't support yet")
+IF sec$(i%+1)="Enterprise" THEN PROCnote("That network needs a user name (WPA Enterprise), which this doesn't support yet")
+REM the password next, unless it's open
+IF sec$(i%+1)<>"Open" THEN SYS "Wimp_SetCaretPosition",win%,ic%(15),-1,-1,-1,LEN(FNtext(ic%(15)))
+ENDPROC
+
+REM --- the status -------------------------------------------------------
+
+DEF FNs(k$)
+LOCAL i%
+FOR i%=1 TO nst%
+  IF st$(i%)=k$ THEN =sv$(i%)
+NEXT
+=""
+
+DEF FNsize(v)
+IF v<0 THEN ="-"
+IF v<1024 THEN =STR$INT(v)+" bytes"
+IF v<1048576 THEN =STR$INT(v/1024+0.5)+" KB"
+IF v<1073741824 THEN =FNtenths(v/104857.6)+" MB"
+=FNtenths(v/107374182.4)+" GB"
+
+DEF FNtenths(v)
+LOCAL n%
+n%=INT(v+0.5)
+=STR$(n%DIV10)+"."+STR$(n%MOD10)
+
+DEF PROCshow(n%,s$)
+IF s$=shown$(n%) THEN ENDPROC
+shown$(n%)=s$
+PROCsettext(ic%(n%),s$)
+ENDPROC
+
+DEF PROCstatus
+LOCAL f%,l$,k$,s$,t$,lease%,fl%,t%
+nst%=0 : f%=0
+SYS "XOS_Find",&4F,path$+"status" TO f% ;fl%
+IF fl% AND 1 THEN f%=0
+IF f%=0 THEN
+  PROCshow(20,"") : PROCshow(21,"") : PROCshow(22,"") : PROCshow(23,"")
+  PROCshow(24,"") : PROCshow(25,"") : PROCshow(26,"")
+  PROCshow(27,"No status from Linux ("+path$+"status): is rol-netd running?")
+  ENDPROC
+ENDIF
+WHILE NOT EOF#f% AND nst%<30
+  l$=GET$#f% : k$=LEFT$(l$,INSTR(l$+"=","=")-1)
+  nst%+=1 : st$(nst%)=k$ : sv$(nst%)=MID$(l$,LEN(k$)+2)
+ENDWHILE
+CLOSE#f%
+REM rol-netd rewrites it every 2 seconds: the same time for 10 is stale
+IF FNs("time")=lastt$ THEN stale%+=1 ELSE stale%=0 : lastt$=FNs("time")
+IF FNs("interface")="" THEN
+  s$=FNs("message")
+ELSE
+  s$=FNs("interface")
+  IF FNs("type")="wifi" THEN s$+=" (Wi-Fi)" ELSE s$+=" (wired)"
+  IF FNs("link")="up" THEN s$+=", connected" ELSE s$+=", not connected"
+ENDIF
+IF FNs("interfaces")<>"" THEN s$+="   [all: "+FNs("interfaces")+"]"
+PROCshow(20,s$)
+s$=FNs("address")
+IF s$<>"" THEN
+  s$+=" / "+FNs("netmask")
+  IF FNs("mode")="manual" THEN
+    s$+="  (manual)"
+  ELSE
+    lease%=VAL(FNs("lease"))
+    IF lease%>7200 THEN t$=STR$(lease%DIV3600)+" hours" ELSE t$=STR$(lease%DIV60)+" min"
+    s$+="  (DHCP, lease "+t$+")"
+  ENDIF
+ELSE
+  CASE FNs("state") OF
+    WHEN "dhcp" : s$="Waiting for a DHCP server..."
+    WHEN "associating" : s$="Joining the Wi-Fi network..."
+    WHEN "nolink" : s$="No link"
+    WHEN "off" : s$="The network is off"
+    OTHERWISE : s$="None"
+  ENDCASE
+ENDIF
+PROCshow(21,s$)
+PROCshow(22,FNs("gateway"))
+PROCshow(23,FNs("dns"))
+IF FNs("ssid")<>"" THEN
+  s$=FNs("ssid")
+  IF FNs("signal")<>"" THEN s$+=", signal "+FNs("signal")+" dBm"
+  IF FNs("freq")<>"" THEN
+    IF VAL(FNs("freq"))>5000 THEN s$+=", 5 GHz" ELSE s$+=", 2.4 GHz"
+    s$+=" ("+FNs("freq")+" MHz)"
+  ENDIF
+ELSE
+  IF FNs("type")="wifi" THEN s$="Not connected" ELSE s$="-"
+ENDIF
+PROCshow(24,s$)
+PROCshow(25,"Received "+FNsize(VAL(FNs("rx")))+", sent "+FNsize(VAL(FNs("tx"))))
+IF FNs("mac")<>"" AND FNs("mac")<>"00:00:00:00:00:00" THEN s$="MAC address "+FNs("mac") ELSE s$="-"
+PROCshow(26,s$)
+s$=FNs("message")
+IF stale%>=5 THEN s$="rol-netd isn't updating the status (is it running?)"
+SYS "OS_ReadMonotonicTime" TO t%
+IF NOT scanning% AND t%-hold%>=0 THEN PROCshow(27,s$)
+REM name servers from DHCP for RISC OS's Resolver
+IF FNs("dns")<>"" AND FNs("dns")<>lastdns$ THEN lastdns$=FNs("dns") : IF NOT FNon(ic%(6)) THEN PROCresolvers(lastdns$)
+ENDPROC

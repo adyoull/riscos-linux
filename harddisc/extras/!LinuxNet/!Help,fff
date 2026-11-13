@@ -1,0 +1,44 @@
+Linux network 1.00
+==================
+
+RISC OS on Linux's network, from Configure.
+
+RISC OS on Linux (the UTM and Raspberry Pi images) uses Linux's network:
+a small Linux program, rol-netd, sets up the network interfaces. This
+plug-in tells rol-netd what to do and shows what it is doing.
+
+Connection
+  Use        Automatic: the wired network if it has a cable plugged in,
+             otherwise Wi-Fi if a network is chosen.
+             Wired or Wi-Fi: only that one. Off: no network.
+  Address    Automatic (DHCP), or Manual: the IP address, netmask,
+             gateway and name servers (DNS: up to three, separated by
+             commas or spaces).
+  Host name  The machine's name (Linux's, and Inet$HostName).
+
+Wi-Fi (on a Raspberry Pi 4, 5, 500 or CM4/CM5; the Pi 400's Wi-Fi chip
+isn't supported)
+  Network    The network's name. Scan... lists the networks in range:
+             choose one from the menu.
+  Password   The network's password (WPA or WPA2 Personal), or nothing for
+             an open network. WPA3-only networks aren't supported yet.
+  Country    Two letters (GB, US, DE...), for the radio channels allowed.
+
+Status shows the interface in use and its link, the address and where it
+came from, the gateway and name servers, the Wi-Fi network and its signal,
+the traffic, the MAC address, and what rol-netd is doing. It updates every
+two seconds.
+
+Set (or Return) saves the settings and closes the window; Set with ADJUST
+saves them and leaves it open. Cancel closes it; Cancel with ADJUST puts
+back the settings saved. The settings take effect at once, and are kept
+in the Linux file /riscos/net/config (with the Wi-Fi password, in plain
+text: anyone who can read the SD card can read it).
+
+RISC OS's Resolver is given the name servers (Inet$Resolvers) when RISC
+OS starts and when they change while this window is open.
+
+The icon is RISC OS Open's Network icon (InetSetup; Apache 2.0 licence)
+with a badge.
+
+Copyright (c) 2026 Andrew Youll. MIT licence.
