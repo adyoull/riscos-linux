@@ -8,7 +8,7 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### Compute Module 5 Lite: its device tree files in the Pi boot files (13 Nov 2026; riscos-kernel-pi 6.6.78-10)
+### Compute Module 5: its device tree files and the D0 overlay in the Pi boot files (13 Nov 2026; riscos-kernel-pi 6.6.78-10 and -11)
 
 andym (ROOL forum): the 8 Nov image on a Compute Module 5, from SD and
 from NVMe, on Raspberry Pi's CM5 IO board and a Waveshare one: the
@@ -27,6 +27,18 @@ after a second.
   board needs isn't known until he tries it.
 - The 1.0.0020 image hasn't got them: `cm5-lite-dtbs.zip` (the two
   files) is for copying onto the card's FAT partition by hand.
+- **6.6.78-11: `overlays/bcm2712d0.dtbo`.** With the two files andym's
+  CM5 was recognised, and Linux stopped at 0.51 s with "Kernel panic -
+  not syncing: Asynchronous SError Interrupt". Every CM5 (and the Pi 500,
+  and Pi 5 boards from the 2 GB one on) has the D0 stepping of the
+  BCM2712; the firmware applies the `bcm2712d0` overlay ("the BCM2712
+  C0->D0 differences") to the board's device tree by itself when the
+  file is in overlays/, and the boot files had only overlay_map and the
+  three vc4-kms-v3d overlays. The kernel build makes it. Added; the zip
+  for existing cards is now `cm5-boot-files.zip` (the two .dtb files and
+  overlays/bcm2712d0.dtbo; RISCOSonLinux docs/files). Still not tried
+  here. (A Pi 5 with the D0 chip has its own `bcm2712d0-rpi-5-b.dtb`,
+  which was there: why Pi 5 owners hadn't met this.)
 
 ### MemMapEntries 0.04: a module for OS_FindMemMapEntries, OS_SetMemMapEntries and OS_ReadMemMapEntries (13 Nov 2026; riscos-harddisc 1.0.0053-1)
 
