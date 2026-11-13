@@ -310,6 +310,17 @@ space (unsigned n)
   return bad (r) ? 0 : (unsigned) r;
 }
 
+/* Keeps hold of n pages of the staging space that pages have just been
+   moved out of. mremap leaves nothing there, and Linux would give that
+   address space to the next thing that asks: the module's own tables,
+   which are then lost when the staging space is given back whole. */
+static void
+hold (unsigned addr, unsigned n)
+{
+  lsys (SYS_mmap2, addr, n * PAGE, PROT_NONE,
+	MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1u, 0);
+}
+
 /* puts a page that is at addr out of the way */
 static int
 park (unsigned page, unsigned addr, int keep_source)
@@ -387,6 +398,7 @@ do_set (struct entry *list)
 	}
     }
   unsigned stage = space (n);
+  unsigned staged = n;			/* (n shrinks if a move fails) */
   if (!stage)
     return ERR (no_room);
   /* the levels asked for: remembered (the entries' own words are used as
@@ -466,6 +478,7 @@ do_set (struct entry *list)
 	{
 	  if (!park (e->page, stage + i * PAGE, 0))
 	    where[e->page] = GONE;
+	  hold (stage + i * PAGE, 1);
 	  i++;
 	  continue;
 	}
@@ -474,7 +487,9 @@ do_set (struct entry *list)
 	     && (where[list[i + run].page] & ~PARKED) == stage + (i + run) * PAGE
 	     && (err ? list[i + run].ppl : list[i + run].addr) == to + run * PAGE)
 	run++;
-      if (move (stage + i * PAGE, to, run, 0))
+      int ok = move (stage + i * PAGE, to, run, 0);
+      hold (stage + i * PAGE, run);
+      if (ok)
 	for (unsigned j = 0; j < run; j++)
 	  {
 	    where[list[i + j].page] = to + j * PAGE;
@@ -491,7 +506,7 @@ do_set (struct entry *list)
 	}
       i += run;
     }
-  lsys (SYS_munmap, stage, n * PAGE, 0, 0, 0, 0);
+  lsys (SYS_munmap, stage, staged * PAGE, 0, 0, 0, 0);
   /* the entries' protection levels are the caller's: put back what was
      used as scratch */
   for (struct entry *e = list; e->page != -1u; e++)

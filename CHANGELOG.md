@@ -40,6 +40,34 @@ after a second.
   here. (A Pi 5 with the D0 chip has its own `bcm2712d0-rpi-5-b.dtb`,
   which was there: why Pi 5 owners hadn't met this.)
 
+### MemMapEntries 0.05: Photodesk "unexpected error" on a large image (13 Nov 2026; riscos-harddisc 1.0.0054-1)
+
+George Greenfield: Photodesk 3.22 starts and shows a sprite, Display >
+Resize works, Image > Rotate aborts. Reproduced in the test VM with
+Photodesk 3.14 and a 1280x800 24-bit sprite (a 32x32 one rotates):
+"PhotoDesk has suffered an unexpected error", the fault inside the
+module's own address table lookup (at_find), at an address inside the
+staging space of the OS_SetMemMapEntries call.
+
+- Cause: pages are put down from the staging space with mremap, which
+  leaves nothing at the address moved from. When the address table grew
+  during the put-down, Linux gave it that freed address space; the
+  staging space was then given back whole, and the table went with it.
+  Only a call that moves enough pages to grow the table does it, hence
+  large images only.
+- Fix (memmap.c `hold`): address space that pages are moved out of stays
+  reserved until the staging space is given back. Also the whole staging
+  space is given back when a move fails (it was only the part before the
+  failure).
+- riscos-harddisc 1.0.0054-1 also puts UnixLib's PThreadTicker 0.04
+  (riscos-unixlib dist, sha256 eb185268...) in !System as
+  System:Modules.PThrTicker (rolpkg `place-pthreadticker`: an older copy
+  in !System is replaced, a newer one left; none: !System.310). TORCS's
+  !Run asks for 0.04 and looks in System first; the copy inside !TORCS
+  is 0.03.
+- Tested: test VM, Photodesk 3.14, the same sprite rotated 45 degrees
+  (1470x1470 result), no fault; `tests/run.sh memmap` passes.
+
 ### MemMapEntries 0.04: a module for OS_FindMemMapEntries, OS_SetMemMapEntries and OS_ReadMemMapEntries (13 Nov 2026; riscos-harddisc 1.0.0053-1)
 
 Photodesk 3.14 (the owner's copy; George reported 3.22) stopped at start

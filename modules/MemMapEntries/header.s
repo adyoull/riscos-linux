@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"MemMapEntries"
-help:	.asciz	"MemMapEntries\t0.04 (13 Nov 2026) Page mapping SWIs, RISC OS for Linux"
+help:	.asciz	"MemMapEntries\t0.05 (13 Nov 2026) Page mapping SWIs, RISC OS for Linux"
 	.align	2
 commands:
 	.asciz	"MemMapEntries"
