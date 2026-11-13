@@ -112,6 +112,10 @@ check bput 0 '^bput ok' 600 '' -- \
 # NativeSupport 0.47 leaves a word that a pc-relative load reads)
 check literal 0 '^literal ok' 60 '' -- \
   -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.literal/bas'
+# MemMapEntries (modules/MemMapEntries): OS_FindMemMapEntries,
+# OS_SetMemMapEntries and OS_ReadMemMapEntries on a dynamic area's pages
+check memmap 0 '^memmap ok' 120 '' -- -m "$TB/out/modules/MemMapEntries,ffa" \
+  -c 'BASIC -quit IXFS:$.'"$(printf '%s' "${HERE#/}" | tr './' '/.')"'.programs.memmap/bas'
 # OS_CallAfter and OS_RemoveTickerEvent against a firing ticker for 40 s
 # (5.31-29: OS_RemoveTickerEvent really turns interrupts off; a soak test)
 check ticker 0 '^ticker ok' 120 '' -- \

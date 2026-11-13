@@ -8,6 +8,84 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### MemMapEntries 0.04: a module for OS_FindMemMapEntries, OS_SetMemMapEntries and OS_ReadMemMapEntries (13 Nov 2026; riscos-harddisc 1.0.0053-1)
+
+Photodesk 3.14 (the owner's copy; George reported 3.22) stopped at start
+with a "Message from PhotoDesk" box of two garbage characters, natively
+and under the test bed's QEMU alike. Traced with `RISCOS_SWI_TRACE=1
+bin/rol-run -d ...`: its module calls XOS_FindMemMapEntries on its
+dynamic area's pages, the port's kernel has that, OS_ReadMemMapEntries
+and OS_SetMemMapEntries as "SWI not known" (Kernel/s/Linux:
+"Unimplemented paged memory SWIs"), the module doesn't check and returns
+with V still set, and the application shows an error block that isn't
+one. Photodesk reorders the 32K blocks of its image store by remapping
+pages. (nsscan: its unsqueezed !RunImage has nothing to rewrite; not
+NativeSupport.)
+
+The owner asked for a module, not a ROM change.
+
+- **modules/MemMapEntries** (memmap.c, header.s; 7 KB): takes the three
+  SWIs on the SWI vector (OS_ClaimProcessorVector, as NativeSupport takes
+  its few; all others go straight on) and does them with Linux: a
+  dynamic area's memory is an anonymous mapping, and mremap() moves its
+  pages without copying. It numbers a page when OS_FindMemMapEntries
+  first asks about its address; the number stays with the memory. A
+  whole OS_SetMemMapEntries list is one change (all pages lifted to a
+  staging space, then put down), so a list that swaps pages works in any
+  order; a page that was at a destination and isn't moved itself is put
+  out of the way, not lost; address -1 puts a page out of the way.
+  `*MemMapEntries` shows the counts. It won't start on a RISC OS that
+  has the SWIs.
+- **Not done:** enforcing protection levels (see 0.03); application
+  space (refused: it is mapped again at each task switch); raising the
+  error of a non-X SWI.
+- **0.03: protection levels are remembered** (the owner asked whether
+  they are needed: not by Photodesk, which hands back the 0 it was
+  given; and levels 1 to 3 can't be enforced, as the port runs RISC OS's
+  kernel and modules in Linux user mode with the programs, so a page
+  made "no user access" would lock out the module that asked). The
+  level OS_SetMemMapEntries gives a page is kept and is what
+  OS_FindMemMapEntries and OS_ReadMemMapEntries report; pages stay
+  readable and writable. Tested: memmap.bas (level 1 set, read back by
+  number and by address, the page still writable, another page's still
+  0), both routes; Photodesk natively as before (496 pages moved, none
+  refused).
+- **0.02: memory that goes takes its pages with it** (the owner: "fix
+  this", of 0.01 not tidying when an area is removed). On
+  Service_DynamicAreaRemove, and on Service_MemoryMoved when an area with
+  numbered pages has got smaller, the module looks at the dynamic areas
+  there are (OS_DynamicArea 3 and 2; not the free pool, whose "size" is
+  all free memory and matched every address at first) and forgets each
+  page whose address is in none of them: its number is then a bad page
+  number. A page out of the way is given back to Linux when the address
+  it was first found at is in no area. When none are left the numbers
+  start again, so the tables don't grow with each run of a program. The
+  areas with pages are remembered with their sizes, so the many
+  Service_MemoryMoved calls that don't concern them cost one
+  OS_DynamicArea 2 each. Tested: memmap.bas (an area made 4 pages
+  smaller; a second area removed with one page in it and one out of the
+  way; a new area afterwards), both routes; Photodesk natively: paint,
+  Quit (3,016 pages forgotten), run again and paint (3,016 numbered
+  afresh, none refused).
+- **Tests:** `tests/programs/memmap.bas` (check `memmap`): 16 pages
+  found, reversed in one call, read back, one out of the way and back
+  onto another's address, bad page number, application space: passes
+  under QEMU and natively (the native VM, NativeSupport 0.48). Photodesk
+  3.14 with the module loaded: starts on both; natively a new image was
+  made and painted on with the airbrush (2 Find calls, 8 Set calls, 496
+  pages moved, none refused). Not tried: loading and saving pictures,
+  big ones, a long session, a real Pi.
+
+- **0.04, and packaged** (the owner: "package up for push"): on a RISC
+  OS that has the SWIs the module now starts and does nothing (it gave
+  an error, which would stop the start-up file it is loaded from).
+  riscos-harddisc 1.0.0053-1 has it in TestBed.Modules, and its postinst
+  adds `RMEnsure MemMapEntries 0 RMLoad ...` to
+  !Boot.Choices.Boot.PreDesk.TestBed, as it does for LinuxOverlay and
+  SCSILinux. Tested in the native VM with that line: loaded at start-up,
+  Photodesk run from the Filer with nothing typed, paints (496 pages
+  moved, none refused); memmap.bas on both routes.
+
 ### RISC OS 5.31-29: OS_RemoveTickerEvent turns interrupts off (13 Nov 2026; riscos-rom 5.31-29)
 
 Ralph's report (RISCOSonLinux issue 3; Pi 4, ROM 5.31-24): some minutes

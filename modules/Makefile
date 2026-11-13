@@ -32,7 +32,7 @@ CFLAGS := -O2 -marm -march=armv7-a -mno-unaligned-access -fpie -fvisibility=hidd
 LDFLAGS := -nostdlib -static -Wl,--no-dynamic-linker -Wl,-T,common/module.ld \
            -Wl,--build-id=none -Wl,-z,norelro
 
-all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa $(OUT)/MbufRes,ffa $(OUT)/LinuxOverlay,ffa $(OUT)/SCSILinux,ffa
+all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa $(OUT)/MbufRes,ffa $(OUT)/LinuxOverlay,ffa $(OUT)/SCSILinux,ffa $(OUT)/MemMapEntries,ffa
 
 $(OBJ) $(OUT):
 	mkdir -p $@
@@ -228,6 +228,24 @@ $(OUT)/LinuxShell,ffa: $(OBJ)/LinuxShell.elf $(OBJ)/LinuxShell-at64k.elf common/
 	  0x$$($(NM) $(OBJ)/LinuxShell.elf | awk '$$3=="__got_start"{print $$1}') \
 	  0x$$($(NM) $(OBJ)/LinuxShell.elf | awk '$$3=="__got_end"{print $$1}')
 	cp $(OBJ)/lsh0.bin $@
+
+# --- MemMapEntries: OS_Find/Read/SetMemMapEntries for the port (memmap.c) ----
+$(OBJ)/MemMapEntries-header.o: MemMapEntries/header.s common/cmodule.inc | $(OBJ)
+	$(AS) -I common -o $@ $<
+$(OBJ)/MemMapEntries-c.o: MemMapEntries/memmap.c common/cmodule.h | $(OBJ)
+	$(CC) $(CFLAGS) -I common -c -o $@ $<
+MME_OBJS := $(OBJ)/MemMapEntries-header.o $(OBJ)/MemMapEntries-c.o $(OBJ)/ae-cmodule.o
+$(OBJ)/MemMapEntries.elf: $(MME_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(MME_OBJS) -lgcc
+$(OBJ)/MemMapEntries-at64k.elf: $(MME_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--defsym=__link_base=0x10000 -o $@ $(MME_OBJS) -lgcc
+$(OUT)/MemMapEntries,ffa: $(OBJ)/MemMapEntries.elf $(OBJ)/MemMapEntries-at64k.elf common/check-pic.py | $(OUT)
+	$(OBJCOPY) -O binary $(OBJ)/MemMapEntries.elf $(OBJ)/mme0.bin
+	$(OBJCOPY) -O binary $(OBJ)/MemMapEntries-at64k.elf $(OBJ)/mme1.bin
+	python3 -B common/check-pic.py $(OBJ)/mme0.bin $(OBJ)/mme1.bin 0x10000 \
+	  0x$$($(NM) $(OBJ)/MemMapEntries.elf | awk '$$3=="__got_start"{print $$1}') \
+	  0x$$($(NM) $(OBJ)/MemMapEntries.elf | awk '$$3=="__got_end"{print $$1}')
+	cp $(OBJ)/mme0.bin $@
 
 # --- USBDriver (RISC OS for Linux): RISC OS's USB device interface on usbfs ---
 $(OBJ)/USBLinux-header.o: USBLinux/header.s common/cmodule.inc | $(OBJ)
