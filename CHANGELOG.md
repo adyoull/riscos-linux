@@ -8,7 +8,7 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-12, riscos-kernel-generic and -wdk2023 7.2.0-5, riscos-support 1.0.0054-1, riscos-firmware 20261109-1)
+### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-13, riscos-kernel-generic and -wdk2023 7.2.0-6, riscos-support 1.0.0055-1; firmware from Debian)
 
 Raik (a Huawei stick that works only after Armbian has switched it; the
 Pinebook Pro's own Wi-Fi unreliable) and the owner's question: can as
@@ -21,8 +21,8 @@ no loadable modules and only the machines' own drivers.
   a check that nothing built in was demoted to a module (Kconfig does
   that when a built-in driver's library is asked for as a module: they
   are put back). 162 modules in the Pi kernel (19 MB), 159 in the
-  generic one (21 MB), 163 in the Dev Kit one (21 MB). Local versions `-v8-rol12` and `-rol5`, so the
-  releases are `6.6.78-v8-rol12+` and `7.2.0-rol5` (build 7.2 with
+  generic one (21 MB), 163 in the Dev Kit one (21 MB). Local versions `-v8-rol13` and `-rol6`, so the
+  releases are `6.6.78-v8-rol13+` and `7.2.0-rol6` (build 7.2 with
   `LOCALVERSION=` on make's command line, or the tree's git state adds
   `-dirty`). Modules are staged with `INSTALL_MOD_STRIP=1
   modules_install` and shipped in the kernel packages at
@@ -56,12 +56,20 @@ no loadable modules and only the machines' own drivers.
   The IO boards' USB sockets hang off the module's own (dwc2) port,
   which the firmware leaves as a device port. Untried on a Compute
   Module.
-- **Firmware:** riscos-rolpkg's `tools/firmware.py` takes what the
-  modules (and the built-in drivers) name from linux-firmware (commit
-  69e51bb2, 9 Nov 2026, from the CirrusLogic mirror on GitHub; Debian's
-  servers aren't reachable from the build machine) into
-  `riscos-firmware` (USB devices) and `riscos-firmware-cards` (the
-  rest, without Bluetooth and ath12k).
+- **Firmware: Debian's packages.** The kernel packages depend on
+  `firmware-realtek`, `firmware-mediatek`, `firmware-atheros`,
+  `firmware-misc-nonfree` (and `firmware-iwlwifi`, generic and Dev Kit),
+  from Debian's `non-free-firmware` section. The images' package
+  sources had `main` only: riscos-support's postinst adds the section
+  to Debian's entries, and leaves `/var/lib/riscos/apt-again`, on which
+  `rol-info` (run by Updates when apt has finished) does `apt-get
+  update` and a second `full-upgrade`: in the first the kernel is kept
+  back (its dependencies can't be met yet), in the second it and the
+  firmware go in. `CONFIG_FW_LOADER_COMPRESS` (xz, zstd) is on in case
+  Debian's files are compressed. (The first build of the day, 6.6.78-12
+  / 7.2.0-5 / support 1.0.0054-1, had firmware packages of our own made
+  from linux-firmware, riscos-firmware and riscos-firmware-cards; they
+  were never published, the owner preferring not to host firmware.)
 - **Tested (QEMU):** the Pi kernel as a raspi3b: `cdc_ether` loaded for
   a USB network adapter present at start-up and for one added later
   (QMP `device_add`), and rol-netd then got an address on it; the

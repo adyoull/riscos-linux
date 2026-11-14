@@ -14,6 +14,9 @@
 # kernel-7.2-wdk2023.config are its output: it need only be run again to
 # add a driver to the list below.
 #
+# Firmware: the kernels read compressed firmware too (FW_LOADER_COMPRESS),
+# as Debian's firmware packages may hold it.
+#
 # Left out on purpose: the old USB host-to-host cable drivers (cdc_subset,
 # net1080, plusb, zaurus). They claim devices cdc_ether should have.
 #
@@ -26,6 +29,7 @@ cp "$cfg" "$o/.config"
 cp "$cfg" "$o/.config.before"
 c() { scripts/config --file "$o/.config" -k "$@"; }
 mk() { if [ "$o" = "$PWD" ]; then make "$@"; else make O="$o" "$@"; fi; }
+c -e FW_LOADER_COMPRESS -e FW_LOADER_COMPRESS_XZ -e FW_LOADER_COMPRESS_ZSTD
 c -e MODULES -e MODULE_UNLOAD -d MODVERSIONS -d MODULE_SIG -d MODULE_COMPRESS \
   -d MODULE_FORCE_LOAD -d MODULE_SRCVERSION_ALL -d TRIM_UNUSED_KSYMS \
   --set-str LOCALVERSION "$lv" -d LOCALVERSION_AUTO

@@ -125,7 +125,7 @@ The licence texts are in `licences/` and on each image's FAT partition.
     `-dirty`), then `make ... INSTALL_MOD_PATH=<dir> INSTALL_MOD_STRIP=1 modules_install`; the kernel packages
     carry `<dir>/lib/modules/<release>` as `/usr/lib/modules/<release>`. The configs were made from the ones
     without modules by `images/kernel-modules.sh`, which holds the list of drivers built as modules. Their
-    firmware is packaged from linux-firmware by riscos-rolpkg's `tools/firmware.py`.
+    firmware comes from Debian's `firmware-*` packages, which the kernel packages depend on.
 - **The Linux side:** `aarch64-linux-gnu-gcc -O2 -static images/fe/NAME.c -o NAME`.
 - **RISC OS modules, QEMU, tests:** `make RCD_DIR=...` (needs
   [riscos-crossdev](https://github.com/adyoull/riscos-crossdev)); see `TESTBED.md`.
