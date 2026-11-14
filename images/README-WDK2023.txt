@@ -1,6 +1,6 @@
-RISC OS on Linux 1.0.0020 for the Windows Dev Kit 2023 ("Project Volterra")
+RISC OS on Linux 1.0.0055 for the Windows Dev Kit 2023 ("Project Volterra")
 ===========================================================================
-Version 1.0, build 0020 (8 November 2026): Timothy
+Version 1.0, build 0055 (14 November 2026): Timothy
 Baldwin's Linux port of RISC OS 5 (RISC OS 5.31) with RISC OS Open's
 HardDisc4 5.30, on Debian 13 (minimal) with the mainline 7.2 kernel. The same system as the generic
 image (Raspberry Pi, UEFI machines, Pinebooks). The Dev Kit's processor (Snapdragon 8cx Gen 3) runs 32-bit ARM
@@ -10,7 +10,7 @@ NativeSupport module does what QEMU does on the Mac.
 Only for the Dev Kit: its kernel loads the Dev Kit's own device tree, so
 on anything else (UTM, QEMU, a Pi) Linux finds no screen and RISC OS
 stops at once (the machine switches off a minute later). For those, use
-riscos-generic.img.xz, or "RISC OS 1.0.0020.utm" on a Mac.
+riscos-generic.img.xz, or "RISC OS 1.0.0055.utm" on a Mac.
 This build shows all Linux start-up messages on the screen, and keeps
 them in /riscos/kernel-log.txt on the image's Linux partition as they
 come, so if the screen goes off or it stops, they can be read afterwards
@@ -56,7 +56,11 @@ Screen: the mini DisplayPort socket. RISC OS uses the monitor's own mode
 ports.
 
 Network: the wired Ethernet port, with DHCP; Configure's "Linux network"
-plug-in sets it. Wi-Fi isn't supported on this machine yet.
+plug-in sets it. The Dev Kit's own Wi-Fi (Qualcomm WCN6855) has Linux's
+driver (ath11k) and Debian's firmware for the first time in this build,
+and has NOT yet been tried on a Dev Kit: it may or may not appear in the
+plug-in. USB Wi-Fi and Ethernet adapters have drivers too (loaded when
+the adapter is found: the "rol-modd" lines in kernel-log.txt).
 
 Firmware: the Dev Kit's audio and compute DSPs and its GPU need
 Microsoft's firmware, which can't be put on this image. The first time

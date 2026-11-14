@@ -8,7 +8,7 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-13, riscos-kernel-generic and -wdk2023 7.2.0-6, riscos-support 1.0.0055-1; firmware from Debian)
+### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-14, riscos-kernel-generic and -wdk2023 7.2.0-7, riscos-support 1.0.0055-1; firmware from Debian; images 1.0.0055)
 
 Raik (a Huawei stick that works only after Armbian has switched it; the
 Pinebook Pro's own Wi-Fi unreliable) and the owner's question: can as
@@ -21,8 +21,8 @@ no loadable modules and only the machines' own drivers.
   a check that nothing built in was demoted to a module (Kconfig does
   that when a built-in driver's library is asked for as a module: they
   are put back). 162 modules in the Pi kernel (19 MB), 159 in the
-  generic one (21 MB), 163 in the Dev Kit one (21 MB). Local versions `-v8-rol13` and `-rol6`, so the
-  releases are `6.6.78-v8-rol13+` and `7.2.0-rol6` (build 7.2 with
+  generic one (21 MB), 163 in the Dev Kit one (21 MB). Local versions `-v8-rol14` and `-rol7`, so the
+  releases are `6.6.78-v8-rol14+` and `7.2.0-rol7` (build 7.2 with
   `LOCALVERSION=` on make's command line, or the tree's git state adds
   `-dirty`). Modules are staged with `INSTALL_MOD_STRIP=1
   modules_install` and shipped in the kernel packages at
@@ -70,6 +70,24 @@ no loadable modules and only the machines' own drivers.
   / 7.2.0-5 / support 1.0.0054-1, had firmware packages of our own made
   from linux-firmware, riscos-firmware and riscos-firmware-cards; they
   were never published, the owner preferring not to host firmware.)
+- **6.6.78-14 and 7.2.0-7** add `firmware-ath9k-htc` and
+  `firmware-carl9170` (Debian main) to the kernels' dependencies: every
+  module's firmware names (modinfo) were checked against the file lists
+  of Debian's packages, and ath9k_htc's and carl9170's were in none of
+  the five. (Also in none, left: brcmsmac, mwifiex, bnx2, e100. Newer
+  rtw89, iwlwifi and mt76 files than Debian's are asked for first, and
+  the drivers fall back to the older ones Debian has.) Debian's files
+  are not compressed. Real sizes: 73 MB to download, 283 MB installed.
+- **Images 1.0.0055** (the number is riscos-support's, which the
+  start-up screen shows; the last images were 1.0.0020):
+  the test bed's `images/mkroot55.sh` (the 1.0.0020 image's root, the packages put in
+  with riscos-rolpkg's preinstall.py, Debian's firmware packages
+  included, and `non-free-firmware` in the sources), `mkgen55.sh`
+  (`config-pi.txt` is now the image's config.txt: audio before the
+  overlays, the Compute Modules' USB lines), `mkwdk55.sh`. The generic
+  image started under QEMU from UEFI firmware (AAVMF) to the desktop and
+  as a raspi3b with its own kernel8.img; the Dev Kit image can't be
+  started in emulation. xz: generic 205 MB, Dev Kit 178 MB, UTM zip 357 MB (1.0.0020: 118, 98, 192).
 - **Tested (QEMU):** the Pi kernel as a raspi3b: `cdc_ether` loaded for
   a USB network adapter present at start-up and for one added later
   (QMP `device_add`), and rol-netd then got an address on it; the
