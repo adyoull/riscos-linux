@@ -1,12 +1,76 @@
 # Changelog
 
-## Since images 1.0.0020 (9 to 13 November 2026; through Updates)
+## Since images 1.0.0020 (9 to 14 November 2026; through Updates)
 
 RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 0.48, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
 `*IXRun`, the Pi kernel's fan driver and the Pi's headphone socket.
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
+
+### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-12, riscos-kernel-generic and -wdk2023 7.2.0-5, riscos-support 1.0.0054-1, riscos-firmware 20261109-1)
+
+Raik (a Huawei stick that works only after Armbian has switched it; the
+Pinebook Pro's own Wi-Fi unreliable) and the owner's question: can as
+many Wi-Fi adapters as possible be supported. Until now the kernels had
+no loadable modules and only the machines' own drivers.
+
+- **Kernels with modules** (`kernel/pi-6.6/config`, `kernel/generic-7.2/config`, `kernel/wdk2023-7.2/config`; `kernel/generic-7.2/0100-build-trims.patch` no longer removes the other makers' Wi-Fi drivers from Kconfig). `images/kernel-modules.sh` makes each
+  configuration from the one without: `CONFIG_MODULES` on (no versions,
+  no signatures, no compression), the drivers in its list as modules, and
+  a check that nothing built in was demoted to a module (Kconfig does
+  that when a built-in driver's library is asked for as a module: they
+  are put back). 162 modules in the Pi kernel (19 MB), 159 in the
+  generic one (21 MB), 163 in the Dev Kit one (21 MB). Local versions `-v8-rol12` and `-rol5`, so the
+  releases are `6.6.78-v8-rol12+` and `7.2.0-rol5` (build 7.2 with
+  `LOCALVERSION=` on make's command line, or the tree's git state adds
+  `-dirty`). Modules are staged with `INSTALL_MOD_STRIP=1
+  modules_install` and shipped in the kernel packages at
+  `/usr/lib/modules/<release>`.
+- **Left out on purpose:** `cdc_subset`, `net1080`, `plusb`, `zaurus`,
+  `int51x1`, `kalmia`, `cx82310_eth` (old host-to-host cables and
+  oddities). With no udev there is no ordering between drivers that
+  match the same device, and `cdc_subset` took QEMU's USB network
+  adapter before `cdc_ether` could.
+- **The built-in firmware is unchanged.** The files the kernels embed
+  (`CONFIG_EXTRA_FIRMWARE`: the Pis' and Pinebooks' Wi-Fi, the regulatory
+  database) were cut out of the released 6.6.78-11 and 7.2.0-4 images by
+  the kernel's own table of them, so they are byte for byte the same.
+- **`images/fe/rol-modd.c`** (new): reads `modules.dep` and
+  `modules.alias`, matches each device's modalias (fnmatch), loads the
+  module after what it depends on (finit_module). One pass over
+  `/sys/devices` at start-up, then the kernel's uevents (netlink). init
+  runs it once and waits (up to 10 s) before starting the network, then
+  leaves one running. `/riscos/modules/blacklist`, `/riscos/modules/load`.
+  Options `-v -1 -n -m DIR -a ALIAS`. Logs to `/dev/kmsg`.
+- **Huawei sticks:** a Huawei (12d1) device whose only interfaces are
+  mass storage is sent the usual switch message on its bulk OUT endpoint
+  through usbfs. Not tried with a real stick.
+- **`rol-netd`:** of several wired interfaces, the first with a link
+  (each is brought up to see); of several Wi-Fi ones, a USB one first.
+- **Compute Modules:** the kernel-pi package's postinst adds `[cm4]
+  otg_mode=1` and `[cm5] dtoverlay=dwc2,dr_mode=host` to `config.txt`
+  once (unless it has an `otg_mode` or `dtoverlay=dwc2` line), and the
+  boot files gain `overlays/dwc2.dtbo`. Chris Hall's CM5 Lite: no
+  keyboard or mouse, USB drives ignored, black screen starting from USB.
+  The IO boards' USB sockets hang off the module's own (dwc2) port,
+  which the firmware leaves as a device port. Untried on a Compute
+  Module.
+- **Firmware:** riscos-rolpkg's `tools/firmware.py` takes what the
+  modules (and the built-in drivers) name from linux-firmware (commit
+  69e51bb2, 9 Nov 2026, from the CirrusLogic mirror on GitHub; Debian's
+  servers aren't reachable from the build machine) into
+  `riscos-firmware` (USB devices) and `riscos-firmware-cards` (the
+  rest, without Bluetooth and ath12k).
+- **Tested (QEMU):** the Pi kernel as a raspi3b: `cdc_ether` loaded for
+  a USB network adapter present at start-up and for one added later
+  (QMP `device_add`), and rol-netd then got an address on it; the
+  packages installed with dpkg in that machine, `config.txt` edited as
+  above. The generic kernel on `virt`: desktop reached, `8139cp` loaded
+  for a PCI card, and with the first interface's link down the network
+  came up on the second. **Not tested:** any real machine, any USB
+  Wi-Fi adapter (QEMU has none), the Dev Kit kernel (no emulation of
+  the Dev Kit), the Huawei switch.
 
 ### Compute Module 5: its device tree files and the D0 overlay in the Pi boot files (13 Nov 2026; riscos-kernel-pi 6.6.78-10 and -11)
 

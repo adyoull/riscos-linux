@@ -193,9 +193,32 @@ is_wireless (const char *ifn)
   return stat (p, &st) == 0;
 }
 
-/* the Ethernet-type interfaces (not lo, sit0 and the like): "eth0 wlan0" */
+/* on a USB socket (an adapter someone plugged in), not built into the
+   machine */
+static int
+is_usb (const char *ifn)
+{
+  char p[200], l[300];
+  snprintf (p, sizeof p, "/sys/class/net/%s/device/subsystem", ifn);
+  ssize_t n = readlink (p, l, sizeof l - 1);
+  if (n <= 0)
+    return 0;
+  l[n] = 0;
+  const char *b = strrchr (l, '/');
+  return !strcmp (b ? b + 1 : l, "usb");
+}
+
+static int if_up (const char *ifn, int up);
+
+/* the Ethernet-type interfaces (not lo, sit0 and the like): "eth0 wlan0".
+   WIRED and WIFI are the ones to use when there are several:
+   - wired: the first (in name order) with a link; none has: the first.
+     With PROBE each is brought up first, since an interface that is down
+     shows no link;
+   - Wi-Fi: a USB adapter before the machine's own (whoever plugs one in
+     wants it used), then name order. */
 static void
-list_interfaces (char *wired, char *wifi, char *all, size_t n)
+list_interfaces (char *wired, char *wifi, char *all, size_t n, int probe)
 {
   wired[0] = wifi[0] = all[0] = 0;
   DIR *d = opendir ("/sys/class/net");
@@ -214,13 +237,33 @@ list_interfaces (char *wired, char *wifi, char *all, size_t n)
     closedir (d);
   /* in name order, so eth0 comes before eth1 */
   qsort (names, count, IFNAMSIZ, (int (*) (const void *, const void *)) strcmp);
+  int wired_link = 0, wifi_usb = 0, nwired = 0;
+  for (int i = 0; i < count; i++)
+    if (!is_wireless (names[i]))
+      nwired++;
   for (int i = 0; i < count; i++)
     {
       int w = is_wireless (names[i]);
-      if (w && !wifi[0])
-        snprintf (wifi, IFNAMSIZ, "%.15s", names[i]);
-      if (!w && !wired[0])
-        snprintf (wired, IFNAMSIZ, "%.15s", names[i]);
+      if (w)
+        {
+          int usb = is_usb (names[i]);
+          if (!wifi[0] || (usb && !wifi_usb))
+            {
+              snprintf (wifi, IFNAMSIZ, "%.15s", names[i]);
+              wifi_usb = usb;
+            }
+        }
+      else
+        {
+          if (probe && nwired > 1)
+            if_up (names[i], 1);
+          int link = read_num ("/sys/class/net/%s/carrier", names[i]) == 1;
+          if (!wired[0] || (link && !wired_link))
+            {
+              snprintf (wired, IFNAMSIZ, "%.15s", names[i]);
+              wired_link = link;
+            }
+        }
       size_t l = strlen (all);
       snprintf (all + l, n - l, "%s%s", l ? " " : "", names[i]);
     }
@@ -1009,7 +1052,7 @@ main (int argc, char **argv)
           if (sethostname (conf.hostname, strlen (conf.hostname))) { }
           changed = 1;
         }
-      list_interfaces (wired, wifi, all, sizeof all);
+      list_interfaces (wired, wifi, all, sizeof all, strcmp (conf.interface, "off") != 0);
 
       /* which interface */
       char pick[IFNAMSIZ] = "";

@@ -95,7 +95,7 @@ Every item, in full: [What RISC OS on Linux adds to his port](docs/what-we-added
 | Part of the image | Source here | Licence |
 |---|---|---|
 | RISC OS 5.31 (the ROM, `/opt/riscos/RISCOS.IMG`) | branch [`riscos-5.31-source`](../../tree/riscos-5.31-source): RISC OS Open's sources of 29 October 2026 merged into the Linux port | Apache-2.0 (most), BSD-3-Clause (some); see each component's LICENSE |
-| The Linux side: `init`, `rol-fb` (screen, keyboard, mouse), `rol-snd` (sound), `rol-netd` (network, Wi-Fi), `rol-cmd` (Linux commands, root password), `rol-usbd` (USB for RISC OS) | `images/fe/` | MIT |
+| The Linux side: `init`, `rol-fb` (screen, keyboard, mouse), `rol-snd` (sound), `rol-netd` (network, Wi-Fi), `rol-cmd` (Linux commands, root password), `rol-usbd` (USB for RISC OS), `rol-modd` (loads Linux's driver modules) | `images/fe/` | MIT |
 | `qemu-arm-riscos` (RISC OS on machines without 32-bit ARM) | `qemu/` (patch to QEMU 8.2.2, `build.sh`) | GPL-2.0-or-later, as QEMU |
 | RISC OS modules: NativeSupport, VFPSupport, ARMEABISupport, LinuxAudio, LinuxShell (`*Linux`), USBDriver, KVMWheel, Iconv, LinuxCodec and the VideoCore stand-ins (VCHIQ, BCMSupport, PCI), SoundControl, WindowScroll | `modules/` | MIT, except RISC OS Open's code where marked (`LICENCES.md`) |
 | Desktop parts: Configure's Updates, Linux network and Scroll wheel plug-ins, the hard disc icon, CaCertificates, PackMan's sources | `harddisc/extras/` (and `harddisc/fetch.sh`, which builds HardDisc4 from RISC OS Open's) | MIT; Mozilla's certificates MPL-2.0 |
@@ -121,6 +121,11 @@ The licence texts are in `licences/` and on each image's FAT partition.
     `make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image`.
   - **Raspberry Pi:** raspberrypi/linux at the commit in `kernel/pi-6.6/BASE`, with `kernel/pi-6.6/config`.
   - **Firmware:** `CONFIG_EXTRA_FIRMWARE_DIR` points at `firmware/`: put the Wi-Fi firmware listed in the config there.
+  - **Modules:** add `modules` to the make targets (for 7.2 also `LOCALVERSION=`, or the release gains
+    `-dirty`), then `make ... INSTALL_MOD_PATH=<dir> INSTALL_MOD_STRIP=1 modules_install`; the kernel packages
+    carry `<dir>/lib/modules/<release>` as `/usr/lib/modules/<release>`. The configs were made from the ones
+    without modules by `images/kernel-modules.sh`, which holds the list of drivers built as modules. Their
+    firmware is packaged from linux-firmware by riscos-rolpkg's `tools/firmware.py`.
 - **The Linux side:** `aarch64-linux-gnu-gcc -O2 -static images/fe/NAME.c -o NAME`.
 - **RISC OS modules, QEMU, tests:** `make RCD_DIR=...` (needs
   [riscos-crossdev](https://github.com/adyoull/riscos-crossdev)); see `TESTBED.md`.

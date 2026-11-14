@@ -219,6 +219,53 @@ show_log (void)
 }
 
 
+/* --- driver modules: rol-modd loads the ones the hardware asks for (USB and
+   PCI Wi-Fi and Ethernet adapters, mobile broadband sticks), now and as
+   things are plugged in. Its start-up pass is waited for (up to 10
+   seconds), so an adapter that is already in has its interface before the
+   network starts. */
+static void
+modules_up (void)
+{
+  if (access ("/opt/riscos/rol-modd", X_OK))
+    return;
+  if (mkdir ("/riscos/modules", 0755) == 0)
+    {
+      /* RISC OS's user owns /riscos: the two lists are theirs to edit */
+      struct stat st;
+      if (stat ("/riscos", &st) == 0 && chown ("/riscos/modules", st.st_uid, st.st_gid)) { }
+    }
+  pid_t p = fork ();
+  if (p == 0)
+    {
+      int null = open ("/dev/null", O_RDWR);
+      dup2 (null, 0);
+      dup2 (null, 1);
+      dup2 (null, 2);
+      execl ("/opt/riscos/rol-modd", "rol-modd", "-1", (char *) NULL);
+      _exit (127);
+    }
+  for (int i = 0; p > 0 && i < 100; i++)
+    {
+      if (waitpid (p, NULL, WNOHANG) != 0)
+        break;
+      usleep (100000);
+    }
+  /* and the one that stays, for what is plugged in later (it looks at
+     everything again first, so nothing between the two is missed) */
+  if (fork () == 0)
+    {
+      int null = open ("/dev/null", O_RDWR);
+      dup2 (null, 0);
+      dup2 (null, 1);
+      dup2 (null, 2);
+      setsid ();
+      execl ("/opt/riscos/rol-modd", "rol-modd", (char *) NULL);
+      _exit (127);
+    }
+}
+
+
 /* --- network: rol-netd, which RISC OS's Configure plug-in (Linux network)
    controls through /riscos/net/config and reads /riscos/net/status from */
 static void
@@ -1656,6 +1703,7 @@ main (void)
   if (wdk)
     wdk_firmware ();
   restore_time ();
+  modules_up ();
   splash ("Starting the network");
   network_up ();
   time_daemon ();
