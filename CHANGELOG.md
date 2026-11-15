@@ -78,6 +78,20 @@ no loadable modules and only the machines' own drivers.
   rtw89, iwlwifi and mt76 files than Debian's are asked for first, and
   the drivers fall back to the older ones Debian has.) Debian's files
   are not compressed. Real sizes: 73 MB to download, 283 MB installed.
+- **riscos-support 1.0.0056-1 (15 Nov):** Debian's
+  `firmware-misc-nonfree` Recommends `firmware-nvidia-graphics`,
+  `firmware-intel-graphics` and `firmware-intel-misc`, and apt installs
+  Recommends, so 1.0.0055-1's update brought in 48 MB (107 MB installed)
+  of firmware for chips the kernels have no driver for; the owner saw
+  them arrive. The stand-in Debian of the first tests held only the
+  packages the kernels name, so it didn't show. Now the postinst writes
+  `/etc/apt/preferences.d/riscos-firmware` (priority -1 for the three),
+  and `rol-info`, after an install, purges those of the three that
+  `apt-mark showauto` lists. Tested with the three real packages in the
+  stand-in: with 1.0.0055-1 they are installed (the fault, reproduced);
+  that machine updated to 1.0.0056-1 loses them; a 1.0.0020 machine
+  updating straight to 1.0.0056-1 never gets them. The images (made
+  with preinstall.py from named .debs) never had them.
 - **Images 1.0.0055** (the number is riscos-support's, which the
   start-up screen shows; the last images were 1.0.0020):
   the test bed's `images/mkroot55.sh` (the 1.0.0020 image's root, the packages put in
