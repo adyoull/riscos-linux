@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0056 for 64-bit ARM machines (15 November 2026)
+RISC OS on Linux 1.0.0057 for 64-bit ARM machines (15 November 2026)
 ====================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
@@ -6,14 +6,14 @@ One image for:
   - 64-bit ARM machines that boot from UEFI: the firmware starts
     EFI/BOOT/BOOTAA64.EFI from this partition. That covers virtual
     machines (UTM, QEMU, Parallels: on an Apple Silicon Mac the ready-made
-    "RISC OS 1.0.0056.utm" is easier) and ARM boards and servers with
+    "RISC OS 1.0.0057.utm" is easier) and ARM boards and servers with
     standard UEFI firmware (ACPI, or a device tree from the firmware).
     The Windows Dev Kit 2023 needs its own device tree: use its own image
     (riscos-wdk2023) instead;
   - Pine64's Pinebook (Allwinner A64) and Pinebook Pro (Rockchip RK3399),
     with U-Boot (below) starting EFI/BOOT/BOOTAA64.EFI.
 
-Version 1.0, build 0056: RISC OS 5.31 (5.31-29: RISC OS Open's
+Version 1.0, build 0057: RISC OS 5.31 (5.31-29: RISC OS Open's
 sources merged into Timothy Baldwin's Linux port) with
 RISC OS Open's HardDisc4 5.30, on Debian 13 (the slim base
 Debian's own container images use, about 100 MB: no Linux desktop, no
@@ -25,12 +25,13 @@ screen says "Starting RISC OS (native)..." when it runs natively.
 *NativeSupport shows what NativeSupport (the module that makes native
 running work) has done.
 
-New in build 0056 (every package update since build 0020; the build
+New in build 0057 (every package update since build 0020; the build
 number is now the Linux side's version, which the start-up screen
 shows): Wi-Fi, Ethernet and mobile broadband adapters that are plugged
 in or fitted (see Network); Compute Modules' USB sockets on an IO board;
 the Compute Module 5, 5 Lite, Pi 500 and newer Pi 5 boards start; the
-Pi 5's fan driver and the Pi 3 and 4's headphone socket; Photodesk,
+Pi 5's fan driver and the Pi 3 and 4's headphone socket; sound
+through a Pi's HDMI ports (new, not yet tried on a Pi); Photodesk,
 OvationPro, ChartDraw and MultiPlot run; RiSH, a Linux terminal for the
 desktop, in Apps; *IXRun and *Linux are interactive; internal drives in
 RISC OS's own format appear as hard discs; laptop touchpads; sound on

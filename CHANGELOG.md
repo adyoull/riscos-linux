@@ -8,6 +8,40 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Windows Dev Kit 2023: a GPU test image (15 Nov 2026; private test build 1, not a release)
+
+The owner asked for a Dev Kit image with the graphics drivers in, for
+Chris Gransden to try. The kernel side was already there (DRM_MSM with
+the Adreno driver built in, the GPU and its zap shader enabled in
+blackrock's device tree; Chris's build 7 log of October had the GPU
+bound and only `a660_sqe.fw` missing). What was missing is user space
+and firmware:
+
+- **Firmware:** 7.2's Adreno 690 entry asks for `a660_sqe.fw` and
+  `a660_gmu.bin` (not a690_gmu.bin), both in Debian's
+  `firmware-qcom-soc` 20250410-2 (trixie, non-free-firmware; 305 MB
+  installed, most of it other machines'). The zap shader
+  (`qcdxkmsuc8280.mbn`) is Microsoft's and init already copies it from
+  the Windows drive.
+- **Mesa:** Debian's, 26.1.6-1~bpo13+1 from trixie-backports as
+  riscos-risc3d 0.19-1 pins it (`msm_dri.so`, freedreno), without
+  Recommends (no Vulkan drivers): 42 packages, 139 MB to download.
+- **RISC3D:** riscos-risc3d 0.19-1 (rol-3d, the RISC3D and Linux3D
+  modules, its PreDesk file), and RISC3D's test kit 34 as a zip in
+  HardDisc4.TestBed.
+- **How:** `images/mkwdk-gpu-test.sh`: the packages are worked out by
+  apt on the build machine against the image's dpkg status, then
+  installed by apt itself inside the image, started under QEMU with the
+  Dev Kit's own kernel (it has virtio drivers) and a stand-in init;
+  then the image is rebuilt from that root with `mkwdk57.sh`.
+  `GPU-TEST.txt` on the EFI partition (`README-WDK2023-GPU-TEST.txt`)
+  says what to try and which logs to send.
+- **Checked:** apt exit 0, `dpkg --audit` clean, `rol-3d --check` in
+  that machine: Mesa 26.1.6 loads and draws (llvmpipe, there being no
+  GPU). **Nothing here has run on a Dev Kit**: the Adreno's start-up
+  (firmware, zap, GMU), freedreno, and rol-fb's overlays on the DPU's
+  planes are all untried. xz: 314 MB.
+
 ### Sound through a Raspberry Pi's HDMI ports: IEC958 subframes (15 Nov 2026; riscos-support 1.0.0057-1)
 
 Norman Lawrence (ROOL forum; Pi 5, and a CM5 on a Waveshare board): sound
@@ -119,18 +153,20 @@ no loadable modules and only the machines' own drivers.
   that machine updated to 1.0.0056-1 loses them; a 1.0.0020 machine
   updating straight to 1.0.0056-1 never gets them. The images (made
   with preinstall.py from named .debs) never had them.
-- **Images 1.0.0056** (the number is riscos-support's, which the
-  start-up screen shows; the last images were 1.0.0020. Built first
-  as 1.0.0055 on the 14th and never uploaded; rebuilt on the 15th with
-  riscos-support 1.0.0056-1 and its pin):
-  the test bed's `images/mkroot56.sh` (the 1.0.0020 image's root, the packages put in
+- **Images 1.0.0057** (the number is riscos-support's, which the
+  start-up screen shows; the last images were 1.0.0020. Built as
+  1.0.0055 on the 14th and as 1.0.0056 on the 15th, neither uploaded;
+  rebuilt later on the 15th with riscos-support 1.0.0057-1, for sound
+  through a Pi's HDMI ports):
+  the test bed's `images/mkroot57.sh` (the 1.0.0020 image's root, the packages put in
   with riscos-rolpkg's preinstall.py, Debian's firmware packages
-  included, and `non-free-firmware` in the sources), `mkgen56.sh`
+  included, and `non-free-firmware` in the sources), `mkgen57.sh`
   (`config-pi.txt` is now the image's config.txt: audio before the
-  overlays, the Compute Modules' USB lines), `mkwdk56.sh`. The generic
-  image started under QEMU from UEFI firmware (AAVMF) to the desktop and
-  as a raspi3b with its own kernel8.img; the Dev Kit image can't be
-  started in emulation. xz: generic 205 MB, Dev Kit 178 MB, UTM zip 357 MB (1.0.0020: 118, 98, 192).
+  overlays, the Compute Modules' USB lines), `mkwdk57.sh`. The generic
+  image started under QEMU from UEFI firmware (AAVMF) to the desktop
+  (1.0.0055's also as a raspi3b with its own kernel8.img); the Dev Kit
+  image can't be started in emulation. xz: generic 205 MB, Dev Kit
+  178 MB, UTM zip 361 MB (1.0.0020: 118, 98, 192).
 - **Tested (QEMU):** the Pi kernel as a raspi3b: `cdc_ether` loaded for
   a USB network adapter present at start-up and for one added later
   (QMP `device_add`), and rol-netd then got an address on it; the
