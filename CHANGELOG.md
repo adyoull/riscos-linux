@@ -8,7 +8,7 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-14, riscos-kernel-generic and -wdk2023 7.2.0-7, riscos-support 1.0.0055-1; firmware from Debian; images 1.0.0055)
+### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-14, riscos-kernel-generic and -wdk2023 7.2.0-7, riscos-support 1.0.0055-1 and 1.0.0056-1; firmware from Debian; images 1.0.0056)
 
 Raik (a Huawei stick that works only after Armbian has switched it; the
 Pinebook Pro's own Wi-Fi unreliable) and the owner's question: can as
@@ -92,13 +92,15 @@ no loadable modules and only the machines' own drivers.
   that machine updated to 1.0.0056-1 loses them; a 1.0.0020 machine
   updating straight to 1.0.0056-1 never gets them. The images (made
   with preinstall.py from named .debs) never had them.
-- **Images 1.0.0055** (the number is riscos-support's, which the
-  start-up screen shows; the last images were 1.0.0020):
-  the test bed's `images/mkroot55.sh` (the 1.0.0020 image's root, the packages put in
+- **Images 1.0.0056** (the number is riscos-support's, which the
+  start-up screen shows; the last images were 1.0.0020. Built first
+  as 1.0.0055 on the 14th and never uploaded; rebuilt on the 15th with
+  riscos-support 1.0.0056-1 and its pin):
+  the test bed's `images/mkroot56.sh` (the 1.0.0020 image's root, the packages put in
   with riscos-rolpkg's preinstall.py, Debian's firmware packages
-  included, and `non-free-firmware` in the sources), `mkgen55.sh`
+  included, and `non-free-firmware` in the sources), `mkgen56.sh`
   (`config-pi.txt` is now the image's config.txt: audio before the
-  overlays, the Compute Modules' USB lines), `mkwdk55.sh`. The generic
+  overlays, the Compute Modules' USB lines), `mkwdk56.sh`. The generic
   image started under QEMU from UEFI firmware (AAVMF) to the desktop and
   as a raspi3b with its own kernel8.img; the Dev Kit image can't be
   started in emulation. xz: generic 205 MB, Dev Kit 178 MB, UTM zip 357 MB (1.0.0020: 118, 98, 192).
