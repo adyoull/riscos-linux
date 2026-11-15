@@ -8,6 +8,38 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Wimp$ScrapDir one character too long for the C library: temporary files in $.tmp (15 Nov 2026; riscos-harddisc 1.0.0055-1)
+
+Chris Gransden: a ROM build on a RAM disc (which got "much further"
+with 5.31-28's FileCore fixes) stops at Messages with "Internal error:
+abort on data transfer at &2085C0E4" in the SharedCLibrary, then
+srcbuild's "Error cannot open temp log file '$.tmp.xf701e467'".
+
+- **The abort** (his log's fault reports): a C library stdio routine
+  entered with a null FILE pointer: reads at &24 and &0 (the null
+  pointer page's "!!!!NULL.POINTER.DEREFERENCE!!!!" text, r2 = "EFER"),
+  then a read through that text as a pointer. The caller is perl
+  (Messages' `Utils.HelpAppend`: `glob()` reads its result through a
+  temporary file) printing "%s\n" to a file it failed to open.
+- **Why it failed to open:** `_sys_tmpnam_` (RISC_OSLib c.armsys) reads
+  `Wimp$ScrapDir` with `_kernel_getenv` into L_tmpnam - 10 = 70 bytes,
+  69 characters, and on any error uses `$.tmp`. On RISC OS for Linux the
+  variable is `IXFS::ROL.$.riscos.HardDisc4.!Boot.Resources.!Scrap.ScrapDirs.ScrapDir`:
+  70 characters since discs got the name ROL (5.31-16); on a Pi it is 58.
+  So every C program's tmpnam/tmpfile used `$.tmp` on the current disc:
+  `IXFS::ROL.$.tmp` is Linux's /tmp, which exists, so builds on HardDisc4
+  worked; a RAM disc has no `$.tmp`.
+- **Fix:** riscos-harddisc's postinst adds two lines to
+  `!Boot.Choices.Boot.PreDesk.TestBed` (which runs after !Scrap): where
+  the two variables have exactly those values, they are set again from
+  `<IXFS$HardDisc4>` (`IXFS:$.riscos.HardDisc4…`, 65 characters; + the
+  10 of ".xNNNNNNNN" is inside the library's 80).
+- **Tested (QEMU):** the lines in 1.0.0057's generic image: `*Show
+  Wimp$Scrap*` gives the two short names. Not tested: a C program's
+  tmpfile from a RAM disc, or the ROM build (Chris).
+- Not changed: the C library's 69 characters (programs linked with
+  ANSILib carry their own copy, so the variable is the place).
+
 ### Windows Dev Kit 2023: a GPU test image (15 Nov 2026; private test build 1, not a release)
 
 The owner asked for a Dev Kit image with the graphics drivers in, for
