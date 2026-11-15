@@ -6,6 +6,29 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-30 (to be built)
+
+- **IXFS gives a directory's names in order** (`mixed/Linux/IXSupport`,
+  `c/fs` and `c/read_directory`): OS_GBPB 9 to 12 gave them as Linux
+  does, which on ext4 is by a hash of the name, where FileCore gives them
+  sorted without regard to case. Programs rely on that: **Ovation Pro**
+  loads the script files in its `Library` and `AutoRun` directories in
+  the order OS_GBPB gives them, and a later one uses names an earlier one
+  defines, so from HardDisc4 it started with "Unknown identifier DOTTED
+  at line 52 in <OvationPro$Dir>.Library.!MenuLib" and eight more, and an
+  icon with no menu, while from a RAM disc it ran (George Greenfield,
+  David Pitt: "an IXFS only thing"). `*Cat` and `*Ex` listed in that
+  order too.
+  - The whole directory is now read and sorted when a read of it starts
+    (as FileCore compares: the name as RISC OS sees it, without its
+    `,xxx` type, letters without case), and the place in it that OS_GBPB
+    hands back is a position in that order. If another directory is read
+    in between, it is read and sorted again and carries on from the same
+    place. The directory is closed at its end, as before.
+  - Checked on a Linux machine with the same code against a sort written
+    separately (713 names; whole, 7 at a time, and re-read at every
+    call). **Not yet built into a ROM or run.**
+
 ## 5.31-29 (built 13 Nov 2026; released as riscos-rom 5.31-29)
 
 - **OS_RemoveTickerEvent turns interrupts off** (`Kernel/s/TickEvents`):
