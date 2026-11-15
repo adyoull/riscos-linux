@@ -26,7 +26,9 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <linux/fs.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -105,6 +107,9 @@ filecore_disc (const char *node, char *name, size_t nsz, long long *bytes)
     return 0;
   ssize_t r = pread (f, b, sizeof b, 0xC00);
   off_t devsize = lseek (f, 0, SEEK_END);
+  int devss = 0;
+  if (ioctl (f, BLKSSZGET, &devss) < 0)
+    devss = 512;
   close (f);
   if (r != (ssize_t) sizeof b)
     return 0;
@@ -138,6 +143,18 @@ filecore_disc (const char *node, char *name, size_t nsz, long long *bytes)
   while (k > 0 && name[k - 1] == ' ')
     k--;
   name[k] = 0;
+  /* RISC OS's SCSIFS takes sectors of 256, 512 and 1024 bytes only: a disc
+     with bigger ones (a 4K NVMe drive) would be an icon that only ever
+     says "Sector size not supported", so it is left alone, and said */
+  if (devss > 1024 || log2ss > 10)
+    {
+      char msg[300];
+      snprintf (msg, sizeof msg,
+		"rol-discd: %s: a FileCore disc \"%s\" with %d byte sectors (its record says %u): SCSIFS can't use sectors over 1024 bytes, so it is not given to RISC OS\n",
+		node, name, devss, 1u << log2ss);
+      say (msg);
+      return 0;
+    }
   *bytes = devsize;
   return 1;
 }

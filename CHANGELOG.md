@@ -8,6 +8,22 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Internal FileCore discs with sectors over 1024 bytes are left alone (15 Nov 2026; riscos-support 1.0.0061-1)
+
+Chris Hall (CM5 Lite, now working with the update): his NVMe drive's
+RISC OS partition (864 GB, 4K sectors) appears as SCSI::4 and says
+"Sector size not supported". rol-discd's test (FileCore's boot block
+checksum, a sensible disc record, a size that fits) accepted it:
+rightly, it is FileCore, but SCSIFS (`s/ScsiFs20`) takes a READ
+CAPACITY block size of 256, 512 or 1024 only (FileCore itself is built
+with BigSectors, 2K and 4K). rol-discd now reads the device's sector
+size (BLKSSZGET) and leaves a disc alone, with a line in the kernel
+log, if that or its record's is over 1024. Tested (QEMU): a virtio disc
+with 4096-byte logical blocks and a made-up boot block is not given; a
+512-byte one beside it is. **To come:** SCSIFS taking 2048 and 4096
+(a ROM change; it needs a real 4K FileCore disc image to test against
+before anyone's drive is opened for writing). rol-usbd unchanged.
+
 ### Ovation Pro from HardDisc4: IXFS gives a directory's names in order (15 Nov 2026; riscos-rom 5.31-30)
 
 George Greenfield and David Pitt: Ovation Pro started from HardDisc4
