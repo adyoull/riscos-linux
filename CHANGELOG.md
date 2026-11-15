@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-30 (to be built)
+## 5.31-30 (built 15 Nov 2026; released as riscos-rom 5.31-30)
 
 - **IXFS gives a directory's names in order** (`mixed/Linux/IXSupport`,
   `c/fs` and `c/read_directory`): OS_GBPB 9 to 12 gave them as Linux
@@ -25,9 +25,11 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
     hands back is a position in that order. If another directory is read
     in between, it is read and sorted again and carries on from the same
     place. The directory is closed at its end, as before.
-  - Checked on a Linux machine with the same code against a sort written
-    separately (713 names; whole, 7 at a time, and re-read at every
-    call). **Not yet built into a ROM or run.**
+  - Built with the DDE (32d) under QEMU. Tested there: a directory of
+    312 names read whole, 7 at a time, and one at a time with another
+    directory read between every call: in order each time; the desktop
+    and the Filer as before. The same code was checked on Linux against
+    a sort written separately (713 names). Not run with Ovation Pro.
 
 ## 5.31-29 (built 13 Nov 2026; released as riscos-rom 5.31-29)
 
