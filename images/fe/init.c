@@ -516,13 +516,15 @@ battery_scan (void)
   if (mains < 0 && strcmp (state, "discharging"))
     mains = 1;			/* nothing to ask, but it isn't running down */
 
-  /* how long: Linux's figure (seconds), or what is left (or to come)
-     over the rate it is going at */
+  /* how long: Linux's figure (seconds; now, or the average, which is all
+     the Argon ONE UP's driver gives), or what is left (or to come) over
+     the rate it is going at */
   long long minutes = -1;
   int charging = !strcmp (state, "charging");
   if (charging || !strcmp (state, "discharging"))
     {
-      if (!battery_number (name, charging ? "time_to_full_now" : "time_to_empty_now", &t) && t > 0)
+      if ((!battery_number (name, charging ? "time_to_full_now" : "time_to_empty_now", &t) && t > 0)
+	  || (!battery_number (name, charging ? "time_to_full_avg" : "time_to_empty_avg", &t) && t > 0))
 	minutes = (t + 30) / 60;
       else
 	{

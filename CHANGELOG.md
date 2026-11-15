@@ -43,7 +43,7 @@ thing").
   HardDisc4 and IXFS:$, `*Cat` in order. The same code against a
   separate sort on Linux (713 names). **Not run with Ovation Pro.**
 
-### A battery icon; I2C and multi-touch touchpads in the Pi kernel (15 Nov 2026; riscos-support 1.0.0058-1, riscos-harddisc 1.0.0056-1, riscos-kernel-pi 6.6.78-15; images 1.0.0058)
+### A battery icon; I2C and multi-touch touchpads in the Pi kernel (15 Nov 2026; riscos-support 1.0.0058-1 and 1.0.0059-1, riscos-harddisc 1.0.0056-1, riscos-kernel-pi 6.6.78-15 and -16; images 1.0.0058)
 
 Andy (an Argon ONE UP, a laptop round a Compute Module 5) asked for a
 battery gauge (its gauge is on I2C at &64) and said the pointer follows
@@ -81,10 +81,24 @@ a window like the Filer's free space one giving the percentage and time.
   I2C_HID_OF, BATTERY_CW2015; in `kernel-modules.sh` too. Started under
   QEMU as a raspi3b: RISC OS starts, cdc_ether loads. Not tried on a
   Pi 5 or the Argon.
-- **To come:** the Argon ONE UP's gauge (no Linux driver known for a
-  chip at &64: a reader in init over /dev/i2c, once Andy has told us
-  what answers there), and his touchpad's report once the new kernel
-  has run.
+- **The Argon ONE UP's battery (riscos-kernel-pi 6.6.78-16,
+  riscos-support 1.0.0059-1):** the owner pointed to Jeff Curless's
+  driver (github.com/JeffCurless/argon-oneup, `battery/oneUpPower.c`,
+  GPL-2.0-only): the gauge is a CW2217 at &64 on i2c1; the driver loads
+  the battery's profile and registers `BAT0` and `AC0`. Kept unchanged
+  in `images/argon-oneup/` (`kernel/pi-6.6/argon-oneup/` in
+  riscos-linux) with its overlay source; built out of tree against the
+  Pi kernel (`updates/oneUpPower.ko`, alias
+  `of:N*T*Cargon40,oneup-battery`, so rol-modd loads it) and
+  `overlays/argon-oneup-battery.dtbo` goes in the boot files. The user
+  adds `dtparam=i2c_arm=on` and `dtoverlay=argon-oneup-battery` to
+  config.txt: nothing tells an Argon from another CM5 carrier, so it
+  isn't done for them. The driver gives `time_to_empty_avg`, not
+  `_now`: init reads the average too. Its low-battery power-off
+  (`orderly_poweroff` under 5% unplugged) is left on. 6.6.78-15 and
+  1.0.0058-1 were delivered but not published; -16 and 1.0.0059-1
+  replace them. **Built only: no Argon ONE UP here.** Andy's touchpad
+  is still to be confirmed once the kernel has run.
 - **Images 1.0.0058:** `mkroot58.sh`, `mkgen58.sh`, `mkwdk58.sh`
   (1.0.0057's with the packages above).
 
