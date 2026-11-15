@@ -399,6 +399,176 @@ dns_a (unsigned server, const char *name)
   return 0;
 }
 
+/* The battery, for RISC OS's icon bar (!Battery on HardDisc4): every 10
+   seconds what Linux says of the machine's battery (the first supply of
+   type Battery in /sys/class/power_supply that is the system's own and
+   present) is written to /riscos/battery/status as name=value lines:
+     percent=   how full, 0 to 100
+     state=     charging, discharging, full, or idle (on the mains, not
+                charging)
+     minutes=   to empty when discharging, to full when charging; -1 when
+                Linux doesn't say and it can't be worked out
+     mains=     1 with a mains or USB supply connected, 0 without, -1 when
+                Linux has none to ask
+     name=      Linux's name for the battery
+   With no battery there is no file (and no icon). BATTERY_DIR is for
+   testing. */
+#ifndef BATTERY_DIR
+#define BATTERY_DIR "/sys/class/power_supply"
+#endif
+#ifndef BATTERY_STATUS
+#define BATTERY_STATUS "/riscos/battery/status"
+#endif
+
+/* a file of a supply as text (without its newline); 0, or -1 if absent */
+static int
+battery_text (const char *supply, const char *file, char *out, size_t size)
+{
+  char path[300];
+  snprintf (path, sizeof path, BATTERY_DIR "/%s/%s", supply, file);
+  int fd = open (path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return -1;
+  ssize_t n = read (fd, out, size - 1);
+  close (fd);
+  if (n <= 0)
+    return -1;
+  out[n] = 0;
+  out[strcspn (out, "\n")] = 0;
+  return 0;
+}
+
+/* and as a number; 0, or -1 if absent or not one */
+static int
+battery_number (const char *supply, const char *file, long long *out)
+{
+  char text[64], *end;
+  if (battery_text (supply, file, text, sizeof text))
+    return -1;
+  *out = strtoll (text, &end, 10);
+  return end == text ? -1 : 0;
+}
+
+/* writes the status of the battery, or removes it; 1 with a battery */
+static int
+battery_scan (void)
+{
+  char name[128] = "", type[32], text[64];
+  int mains = -1;
+  DIR *d = opendir (BATTERY_DIR);
+  struct dirent *e;
+  while (d && (e = readdir (d)) != NULL)
+    {
+      long long v;
+      if (e->d_name[0] == '.' || strlen (e->d_name) >= sizeof name
+	  || battery_text (e->d_name, "type", type, sizeof type))
+	continue;
+      if (!strcmp (type, "Battery"))
+	{
+	  /* not a mouse's or a keyboard's, and one that is fitted; the
+	     first by name, so that it's the same one each time */
+	  if (!battery_text (e->d_name, "scope", text, sizeof text) && !strcmp (text, "Device"))
+	    continue;
+	  if (!battery_number (e->d_name, "present", &v) && v == 0)
+	    continue;
+	  if (!name[0] || strcmp (e->d_name, name) < 0)
+	    strcpy (name, e->d_name);
+	}
+      else if (!battery_number (e->d_name, "online", &v))
+	{
+	  if (mains < 0)
+	    mains = 0;
+	  if (v)
+	    mains = 1;
+	}
+    }
+  if (d)
+    closedir (d);
+  if (!name[0])
+    {
+      unlink (BATTERY_STATUS);
+      return 0;
+    }
+
+  /* how full: Linux's figure, or energy (or charge) now over full */
+  long long percent = -1, now = -1, full = -1, rate = -1, t;
+  int energy = !battery_number (name, "energy_now", &now);
+  if (energy)
+    battery_number (name, "energy_full", &full);
+  else if (!battery_number (name, "charge_now", &now))
+    battery_number (name, "charge_full", &full);
+  if (battery_number (name, "capacity", &percent))
+    percent = now >= 0 && full > 0 ? (now * 100 + full / 2) / full : -1;
+  if (percent > 100)
+    percent = 100;
+
+  const char *state = "idle";
+  if (battery_text (name, "status", text, sizeof text))
+    text[0] = 0;
+  if (!strcmp (text, "Charging"))
+    state = "charging";
+  else if (!strcmp (text, "Discharging"))
+    state = "discharging";
+  else if (!strcmp (text, "Full"))
+    state = "full";
+  else if (mains == 0)
+    state = "discharging";	/* "Unknown" or "Not charging" and no mains */
+  if (mains < 0 && strcmp (state, "discharging"))
+    mains = 1;			/* nothing to ask, but it isn't running down */
+
+  /* how long: Linux's figure (seconds), or what is left (or to come)
+     over the rate it is going at */
+  long long minutes = -1;
+  int charging = !strcmp (state, "charging");
+  if (charging || !strcmp (state, "discharging"))
+    {
+      if (!battery_number (name, charging ? "time_to_full_now" : "time_to_empty_now", &t) && t > 0)
+	minutes = (t + 30) / 60;
+      else
+	{
+	  if (battery_number (name, energy ? "power_now" : "current_now", &rate))
+	    rate = -1;
+	  if (rate < 0)
+	    rate = -rate;	/* some drivers give a discharge as negative */
+	  long long left = charging ? full - now : now;
+	  if (rate > 0 && now >= 0 && left >= 0 && (!charging || full > 0))
+	    minutes = (left * 60 + rate / 2) / rate;
+	}
+      if (minutes > 99 * 60)
+	minutes = -1;		/* a rate of next to nothing: not a time */
+    }
+
+  char out[400];
+  int n = snprintf (out, sizeof out,
+		    "percent=%lld\nstate=%s\nminutes=%lld\nmains=%d\nname=%s\n",
+		    percent, state, minutes, mains, name);
+  int fd = open (BATTERY_STATUS ".new", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd >= 0)
+    {
+      if (write (fd, out, n) != n) { }
+      close (fd);
+      rename (BATTERY_STATUS ".new", BATTERY_STATUS);
+    }
+  return 1;
+}
+
+static void
+battery_daemon (void)
+{
+  if (fork () != 0)
+    return;
+  int had = -1;
+  for (;;)
+    {
+      int have = battery_scan ();
+      if (have != had && (have || had > 0))
+	say (have ? "A battery: its state is in /riscos/battery/status%s"
+	     : "The battery has gone%s", "");
+      had = have;
+      sleep (10);
+    }
+}
+
 /* The time kept across starts, for a machine without a clock battery (a
    Pi): saved to /riscos/time whenever it's set from the network and as
    RISC OS ends, and put back at the start if the clock is behind it, so
@@ -953,7 +1123,7 @@ protect_on (void)
 static void
 protect_setup (void)
 {
-  const char *own[] = { "/riscos", "/riscos/net", "/riscos/sound", "/riscos/cmd", "/riscos/HardDisc4", NULL };
+  const char *own[] = { "/riscos", "/riscos/net", "/riscos/sound", "/riscos/cmd", "/riscos/battery", "/riscos/HardDisc4", NULL };
   for (int i = 0; own[i]; i++)
     {
       mkdir (own[i], 0755);
@@ -1707,6 +1877,7 @@ main (void)
   splash ("Starting the network");
   network_up ();
   time_daemon ();
+  battery_daemon ();
   cmd_up ();
   sound_up ();
   /* ROBench's processor tests as a native Linux program, for comparing

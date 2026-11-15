@@ -8,6 +8,86 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Ovation Pro from HardDisc4: IXFS gives a directory's names in order (15 Nov 2026; riscos-rom 5.31-30)
+
+George Greenfield and David Pitt: Ovation Pro started from HardDisc4
+gives "Unknown identifier DOTTED at line 52 in
+<OvationPro$Dir>.Library.!MenuLib", then eight more of the kind, and an
+icon bar icon with no menu; from a RAM disc it runs ("an IXFS only
+thing").
+
+- **Cause:** Ovation Pro loads the script files of its `Library` and
+  `AutoRun` directories in the order OS_GBPB gives them, and later ones
+  use names earlier ones define. FileCore gives a directory sorted
+  without regard to case. IXFS (`mixed/Linux/IXSupport`, `c/fs` and
+  `c/read_directory`) handed over getdents' order, which on ext4 is by a
+  hash of the name.
+- **Fix (riscos-5.31-source):** the whole directory is read and sorted
+  when a read of it starts (by the name as RISC OS sees it: no `,xxx`,
+  '.' as '/', letters without case; equal names by Linux's own), and the
+  place OS_GBPB hands back is a position in that order. A read of another
+  directory in between makes it read and sort again and carry on from
+  the same place (as it re-read and skipped before). The directory is
+  closed at its end, as before, so nothing of ours keeps a disc busy.
+- **Built** with RISC OS Open's DDE 32d under QEMU, in a 1.0.0057 image
+  with the source at HardDisc4.ROLSrc and `nightly/BuildROM` run in a
+  task window from a Tasks file: 105 minutes from nothing. (The build
+  machine of 5.31-28 and -29 was lost with the container; this is how
+  to make it again: the DDE's `AcornC/C++`, `Programming` and `Apps.DDE`
+  beside ROLSrc, its `Developer.!System` modules merged into !System,
+  `Kernel/hdr/AutoVersion` written by hand.)
+- **Tested (QEMU):** `tests`-style BASIC program at start-up: a directory
+  of 312 names read whole (OS_GBPB 9), 7 at a time (10) and one at a
+  time with another directory read between every call: in order each
+  time, all 312, and the other directory's 42. Desktop, Filer windows of
+  HardDisc4 and IXFS:$, `*Cat` in order. The same code against a
+  separate sort on Linux (713 names). **Not run with Ovation Pro.**
+
+### A battery icon; I2C and multi-touch touchpads in the Pi kernel (15 Nov 2026; riscos-support 1.0.0058-1, riscos-harddisc 1.0.0056-1, riscos-kernel-pi 6.6.78-15; images 1.0.0058)
+
+Andy (an Argon ONE UP, a laptop round a Compute Module 5) asked for a
+battery gauge (its gauge is on I2C at &64) and said the pointer follows
+the pad absolutely. The owner: an icon beside the display's when a
+battery is found, showing how full it is, changed when plugged in, with
+a window like the Filer's free space one giving the percentage and time.
+
+- **init: `battery_daemon`.** Every 10 s the first supply of type
+  Battery in /sys/class/power_supply (not `scope` Device, not `present`
+  0) is written to `/riscos/battery/status`: `percent=` (capacity, or
+  energy or charge now over full), `state=` (charging, discharging, full,
+  idle), `minutes=` (time_to_empty_now or time_to_full_now, or what is
+  left over power_now or current_now; -1 unknown), `mains=` (any other
+  supply online), `name=`. No battery: no file. Checked on Linux with
+  stand-in directories (seven cases).
+- **!Battery** (`harddisc/extras/!Battery`, BASIC; in
+  !Boot.Resources, started by !DiscIcon's !Run as !NetWatch is): polls
+  the file (10 s; 2 s with its window open). Icon made at the right of
+  the bar (so beside the display's) only when the file is there, and
+  removed if it goes: sprite `rolbat0`..`10` by tenths, `rolbatc0`..`10`
+  with a flash when on the mains (charging, full, or idle with mains),
+  the percentage as its text. Select or Adjust: a window above the bar
+  with the charge as a bar (Wimp green, orange at 25% and under, red at
+  15% and under), the state and "Time left" or "Time to full". Menu:
+  Quit. Sprites drawn by `harddisc/extras/mkbattery.py`.
+- **Tested (QEMU, stand-in status files):** 85% discharging (icon,
+  window "2 h 15 min"), 12% charging (flash, red, "Time to full 48
+  min"), 100% full on the mains, the menu; with the new init and no
+  battery the file is removed and there is no icon. **No machine with a
+  battery has run it.**
+- **riscos-kernel-pi 6.6.78-15** (`6.6.78-v8-rol15`): I2C_CHARDEV,
+  I2C_DESIGNWARE_PLATFORM (the Pi 5's I2C buses are the RP1's: there were
+  none), HID_MULTITOUCH (off in the Pi kernel, on in the generic one:
+  without it a precision touchpad is seen by rol-fb as a tablet),
+  I2C_HID_OF, BATTERY_CW2015; in `kernel-modules.sh` too. Started under
+  QEMU as a raspi3b: RISC OS starts, cdc_ether loads. Not tried on a
+  Pi 5 or the Argon.
+- **To come:** the Argon ONE UP's gauge (no Linux driver known for a
+  chip at &64: a reader in init over /dev/i2c, once Andy has told us
+  what answers there), and his touchpad's report once the new kernel
+  has run.
+- **Images 1.0.0058:** `mkroot58.sh`, `mkgen58.sh`, `mkwdk58.sh`
+  (1.0.0057's with the packages above).
+
 ### Wimp$ScrapDir one character too long for the C library: temporary files in $.tmp (15 Nov 2026; riscos-harddisc 1.0.0055-1)
 
 Chris Gransden: a ROM build on a RAM disc (which got "much further"

@@ -65,6 +65,12 @@ for m in $mods; do
   grep -q "^CONFIG_$m=y" "$o/.config" && continue
   c -m $m
 done
+# laptops built round a Pi or a Compute Module (the Argon ONE UP): the Pi
+# 5's I2C buses (the RP1's are DesignWare's), /dev/i2c-N, touchpads that
+# speak HID multi-touch (without it they report as a tablet) or HID over
+# I2C, and the CW2015 fuel gauge. Built in: nothing loads them by alias.
+c -e I2C_CHARDEV -e I2C_DESIGNWARE_CORE -e I2C_DESIGNWARE_PLATFORM -e HID_MULTITOUCH \
+  -e I2C_HID_OF -e BATTERY_CW2015
 mk ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig >/dev/null
 # things that default to on once modules are possible, and aren't wanted
 c -d KPROBES -d RTLWIFI_DEBUG -d IWLWIFI_DEVICE_TRACING -d RTW88_DEBUG -d RTW89_DEBUGMSG -d ATH10K_DEBUG
