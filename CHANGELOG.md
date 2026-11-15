@@ -99,6 +99,20 @@ a window like the Filer's free space one giving the percentage and time.
   1.0.0058-1 were delivered but not published; -16 and 1.0.0059-1
   replace them. **Built only: no Argon ONE UP here.** Andy's touchpad
   is still to be confirmed once the kernel has run.
+- **Safe shutdown (riscos-harddisc 1.0.0057-1, riscos-support
+  1.0.0060-1; the owner's request):** !Battery, on the battery (not
+  plugged in): at 10% `VDU 7` and its window with "Battery low: plug in
+  soon"; at 5% `TaskManager_Shutdown` with &48 (Message_Shutdown, power
+  off; PreQuit is broadcast, so programs with unsaved work object as
+  usual); at 3% &4A (no PreQuit). Without power-off support the same
+  without bit 6. Each once, until plugged in or back above 10%. init
+  writes 2 to `/sys/module/oneUpPower/parameters/soc_shutdown` so the
+  Argon driver's own power-off (default 5%) is only a backstop. QEMU,
+  stand-in figures: warning at 9%; at 5% and at 3% RISC OS shut down
+  and the machine turned off (QEMU ended, 84 s from start). Not tried:
+  a program objecting; a real battery. (BASIC note: a variable named
+  FORCE% is FOR CE%: "Mistake"; the thresholds are lowat%, critat%,
+  forceat%.)
 - **Images 1.0.0058:** `mkroot58.sh`, `mkgen58.sh`, `mkwdk58.sh`
   (1.0.0057's with the packages above).
 

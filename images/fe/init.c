@@ -554,6 +554,25 @@ battery_scan (void)
   return 1;
 }
 
+/* The Argon ONE UP's driver turns the machine off itself when the battery
+   falls under a figure of its own (5%), without a word to RISC OS.
+   RISC OS's battery icon shuts RISC OS down properly at 5% (and without
+   asking at 3%), so the driver's figure is set to 2: it then acts only if
+   that didn't happen. */
+static void
+battery_backstop (void)
+{
+  int fd = open ("/sys/module/oneUpPower/parameters/soc_shutdown", O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  char v[16] = "";
+  if (read (fd, v, sizeof v - 1) > 0 && atoi (v) != 2)
+    {
+      if (pwrite (fd, "2", 1, 0) != 1) { }
+    }
+  close (fd);
+}
+
 static void
 battery_daemon (void)
 {
@@ -562,6 +581,7 @@ battery_daemon (void)
   int had = -1;
   for (;;)
     {
+      battery_backstop ();
       int have = battery_scan ();
       if (have != had && (have || had > 0))
 	say (have ? "A battery: its state is in /riscos/battery/status%s"
