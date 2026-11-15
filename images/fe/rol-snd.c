@@ -7,7 +7,9 @@
  * byte count: little-endian words) and the samples (signed 16-bit stereo,
  * left first). This reads the FIFO and plays the sound through the
  * kernel's ALSA interface (/dev/snd/pcmC*D*p: no alsa-lib), resampling when
- * the sound card can't do RISC OS's rate. LinuxAudio keeps about 50 ms
+ * the sound card can't do RISC OS's rate, and packing the samples as IEC958
+ * subframes for a card that takes nothing else (a Raspberry Pi's HDMI
+ * ports). LinuxAudio keeps about 50 ms
  * ahead, so the card's own pace drives RISC OS's sound.
  *
  * The card: the one named in /riscos/sound/config ("device=" an ALSA card
@@ -321,6 +323,9 @@ static struct
   unsigned rate;		/* the card's */
   snd_pcm_uframes_t period, buffer;
   struct card card;
+  int iec958;			/* the card takes IEC958 subframes only */
+  unsigned iec_count;		/* the frame within the block of 192 */
+  unsigned char iec_status[24];	/* the channel status sent with them */
 } pcm = { .fd = -1 };
 
 static void
@@ -392,44 +397,63 @@ pcm_open (unsigned rate)
       logmsg ("%s: %s", path, strerror (errno));
       return -1;
     }
-  /* the rates to try: RISC OS's, then the usual ones */
+  /* the rates to try: RISC OS's, then the usual ones; as 16-bit samples,
+     or as IEC958 subframes, which is all an HDMI port of a Raspberry Pi
+     (vc4-hdmi) takes */
   unsigned tries[] = { rate, 48000, 44100, 32000, 96000 };
   struct snd_pcm_hw_params hw;
-  int ok = 0;
-  for (unsigned t = 0; t < sizeof tries / sizeof tries[0] && !ok; t++)
-    {
-      any (&hw);
-      mask_one (&hw, SNDRV_PCM_HW_PARAM_ACCESS, SNDRV_PCM_ACCESS_RW_INTERLEAVED);
-      mask_one (&hw, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE);
-      mask_one (&hw, SNDRV_PCM_HW_PARAM_SUBFORMAT, SNDRV_PCM_SUBFORMAT_STD);
-      interval (&hw, SNDRV_PCM_HW_PARAM_CHANNELS, 2, 2);
-      interval (&hw, SNDRV_PCM_HW_PARAM_SAMPLE_BITS, 16, 16);
-      interval (&hw, SNDRV_PCM_HW_PARAM_FRAME_BITS, 32, 32);
-      interval (&hw, SNDRV_PCM_HW_PARAM_RATE, tries[t], tries[t]);
-      /* about 10 ms periods, 4 to 8 of them */
-      unsigned per = tries[t] / 100;
-      interval (&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, per / 2, per * 2);
-      interval (&hw, SNDRV_PCM_HW_PARAM_PERIODS, 4, 8);
-      if (ioctl (fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) == 0)
-	ok = 1;
-    }
-  if (!ok)
+  int ok = 0, iec;
+  for (iec = 0; iec < 2 && !ok; iec++)
+    for (unsigned t = 0; t < sizeof tries / sizeof tries[0] && !ok; t++)
+      {
+	any (&hw);
+	mask_one (&hw, SNDRV_PCM_HW_PARAM_ACCESS, SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+	mask_one (&hw, SNDRV_PCM_HW_PARAM_FORMAT,
+		  iec ? SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE : SNDRV_PCM_FORMAT_S16_LE);
+	mask_one (&hw, SNDRV_PCM_HW_PARAM_SUBFORMAT, SNDRV_PCM_SUBFORMAT_STD);
+	interval (&hw, SNDRV_PCM_HW_PARAM_CHANNELS, 2, 2);
+	interval (&hw, SNDRV_PCM_HW_PARAM_SAMPLE_BITS, iec ? 32 : 16, iec ? 32 : 16);
+	interval (&hw, SNDRV_PCM_HW_PARAM_FRAME_BITS, iec ? 64 : 32, iec ? 64 : 32);
+	interval (&hw, SNDRV_PCM_HW_PARAM_RATE, tries[t], tries[t]);
+	/* about 10 ms periods, 4 to 8 of them */
+	unsigned per = tries[t] / 100;
+	interval (&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, per / 2, per * 2);
+	interval (&hw, SNDRV_PCM_HW_PARAM_PERIODS, 4, 8);
+	if (ioctl (fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) == 0)
+	  ok = 1 + iec;
+      }
+  for (iec = 0; iec < 2 && !ok; iec++)
     {
       /* let the card choose everything but the format */
       any (&hw);
       mask_one (&hw, SNDRV_PCM_HW_PARAM_ACCESS, SNDRV_PCM_ACCESS_RW_INTERLEAVED);
-      mask_one (&hw, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE);
+      mask_one (&hw, SNDRV_PCM_HW_PARAM_FORMAT,
+		iec ? SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE : SNDRV_PCM_FORMAT_S16_LE);
       interval (&hw, SNDRV_PCM_HW_PARAM_CHANNELS, 2, 2);
-      if (ioctl (fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw))
-	{
-	  logmsg ("%s won't take 16-bit stereo: %s", path, strerror (errno));
-	  close (fd);
-	  return -1;
-	}
+      if (ioctl (fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) == 0)
+	ok = 1 + iec;
     }
+  if (!ok)
+    {
+      logmsg ("%s won't take stereo as 16-bit samples or as IEC958: %s",
+	      path, strerror (errno));
+      close (fd);
+      return -1;
+    }
+  pcm.iec958 = ok == 2;
   pcm.rate = interval_value (&hw, SNDRV_PCM_HW_PARAM_RATE);
   pcm.period = interval_value (&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
   pcm.buffer = interval_value (&hw, SNDRV_PCM_HW_PARAM_BUFFER_SIZE);
+  if (pcm.iec958)
+    {
+      /* channel status: consumer, PCM, no emphasis, original, the rate */
+      memset (pcm.iec_status, 0, sizeof pcm.iec_status);
+      pcm.iec_status[1] = 0x82;
+      pcm.iec_status[3] = pcm.rate == 44100 ? 0x00 : pcm.rate == 48000 ? 0x02
+	: pcm.rate == 32000 ? 0x03 : pcm.rate == 96000 ? 0x0a
+	: pcm.rate == 88200 ? 0x08 : 0x01 /* not said */;
+      pcm.iec_count = 0;
+    }
 
   struct snd_pcm_sw_params sw;
   memset (&sw, 0, sizeof sw);
@@ -448,21 +472,24 @@ pcm_open (unsigned rate)
   if (ioctl (fd, SNDRV_PCM_IOCTL_PREPARE))
     logmsg ("prepare: %s", strerror (errno));
   pcm.fd = fd;
-  logmsg ("playing on card %d (%s, %s) device %d at %u Hz (RISC OS: %u Hz), period %lu, buffer %lu",
-	  pcm.card.num, pcm.card.id, pcm.card.name, pcm.card.dev, pcm.rate, rate,
+  logmsg ("playing on card %d (%s, %s) device %d at %u Hz%s (RISC OS: %u Hz), period %lu, buffer %lu",
+	  pcm.card.num, pcm.card.id, pcm.card.name, pcm.card.dev, pcm.rate,
+	  pcm.iec958 ? " as IEC958" : "", rate,
 	  (unsigned long) pcm.period, (unsigned long) pcm.buffer);
   return 0;
 }
 
-static void
-pcm_write (const int16_t *s, unsigned frames)
+/* write FRAMES frames of SIZE bytes each; 0, or -1 with the card closed */
+static int
+pcm_write_raw (const void *buf, unsigned frames, unsigned size)
 {
+  const char *s = buf;
   while (frames && pcm.fd >= 0)
     {
       struct snd_xferi x = { .buf = (void *) s, .frames = frames };
       if (ioctl (pcm.fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &x) == 0)
 	{
-	  s += 2 * x.result;
+	  s += size * x.result;
 	  frames -= (unsigned) x.result;
 	  continue;
 	}
@@ -478,6 +505,52 @@ pcm_write (const int16_t *s, unsigned frames)
 	continue;
       logmsg ("write: %s", strerror (errno));
       pcm_close ();
+    }
+  return pcm.fd >= 0 ? 0 : -1;
+}
+
+/* 16-bit stereo as IEC958 subframes (ALSA's IEC958_SUBFRAME_LE: preamble
+   in bits 0 to 3, the sample in 4 to 27, validity 28, user data 29,
+   channel status 30, parity of 4 to 30 in 31). OUT holds 2 * FRAMES. */
+static void
+iec958_pack (const int16_t *s, unsigned frames, uint32_t *out)
+{
+  for (unsigned i = 0; i < 2 * frames; i++)
+    {
+      unsigned c = pcm.iec_count;
+      uint32_t d = ((uint32_t) (uint16_t) s[i]) << 12;
+      if (pcm.iec_status[c >> 3] & (1 << (c & 7)))
+	d |= 0x40000000;
+      if (__builtin_parity (d))
+	d |= 0x80000000;
+      if (i & 1)
+	{
+	  d |= 0x4;		/* the second subframe of a frame */
+	  pcm.iec_count = (c + 1) % 192;
+	}
+      else
+	d |= c ? 0x2 : 0x8;	/* the first; 8 starts a block */
+      out[i] = d;
+    }
+}
+
+static void
+pcm_write (const int16_t *s, unsigned frames)
+{
+  if (!pcm.iec958)
+    {
+      pcm_write_raw (s, frames, 4);
+      return;
+    }
+  static uint32_t sub[2 * 1024];
+  while (frames && pcm.fd >= 0)
+    {
+      unsigned n = frames > 1024 ? 1024 : frames;
+      iec958_pack (s, n, sub);
+      if (pcm_write_raw (sub, n, 8))
+	return;
+      s += 2 * n;
+      frames -= n;
     }
 }
 

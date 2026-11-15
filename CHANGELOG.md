@@ -8,6 +8,33 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Sound through a Raspberry Pi's HDMI ports: IEC958 subframes (15 Nov 2026; riscos-support 1.0.0057-1)
+
+Norman Lawrence (ROOL forum; Pi 5, and a CM5 on a Waveshare board): sound
+plays through a USB device and not through HDMI. The owner asked whether
+only certain HDMI ports carry sound. Either does; the fault was ours and
+on every Pi: vc4's HDMI sound device takes one format,
+`SNDRV_PCM_FMTBIT_IEC958_SUBFRAME_LE` (vc4_hdmi.c, in the 6.6 Pi tree and
+7.2 alike; ALSA programs get there through alsa-lib's iec958 plug-in),
+and rol-snd, which talks to the kernel directly, only ever asked for
+S16_LE, so HW_PARAMS failed ("won't take 16-bit stereo"). Sound had only
+been tried under QEMU (HDA, virtio, USB audio) and with USB devices.
+
+- **rol-snd** tries S16_LE at each rate as before, then
+  IEC958_SUBFRAME_LE (32-bit subframes, 64-bit frames) at each rate, then
+  each format with the card choosing the rest. For an IEC958 card it
+  packs each sample as alsa-lib's plug-in does: preamble in bits 0 to 3
+  (8 at the start of a block of 192 frames, 2 for a first subframe, 4 for
+  a second), the 16-bit sample in bits 12 to 27, the channel status bit
+  in 30 (consumer, PCM, original, the card's rate) and the parity of bits
+  4 to 30 in 31. The log line says "as IEC958".
+- Tested: the packing against a separate implementation of alsa-lib's
+  rule (1000 subframes over a block boundary and split calls: identical);
+  the 16-bit path under QEMU with a USB audio device (card opened at
+  48000 Hz, sound written). **Not tested on a Pi's HDMI:** QEMU has no
+  vc4 sound. If still silent, ask for `/riscos/sound/log.txt` and
+  `/proc/asound/cards`.
+
 ### Driver modules: Wi-Fi, Ethernet and mobile broadband adapters; Compute Module USB (14 Nov 2026; riscos-kernel-pi 6.6.78-14, riscos-kernel-generic and -wdk2023 7.2.0-7, riscos-support 1.0.0055-1 and 1.0.0056-1; firmware from Debian; images 1.0.0056)
 
 Raik (a Huawei stick that works only after Armbian has switched it; the
