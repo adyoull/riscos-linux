@@ -8,7 +8,7 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### PreDesk.TestBed never ran after a failing PreDesk file: AArdvarkLoader (16 Nov 2026; riscos-harddisc 1.0.0062-1)
+### PreDesk.TestBed never ran after a failing PreDesk file: !AArdvarkLoader (16 Nov 2026; riscos-harddisc 1.0.0063-1)
 
 George Greenfield (Pi 4B, FileCore SSD on USB): no drive icon on 5.31-30,
 fine on 5.31-29. His logs: Linux gives the disc to RISC OS (rol-usbd:
@@ -29,7 +29,23 @@ PreDesk it would run twice (the sound modules re-initialised twice).
 Its later additions go to the new place. Tried under QEMU: a PreDesk
 SetUpNet with "IfThere Nowhere:Nothing" gives George's log and no NVMe
 disc icon; with the postinst's step applied, AArdvarkLoader runs first
-and the icon is there. To do at the next image build: the image's own
+and the icon is there.
+
+1.0.0063-1 (the owner: "Create an icon for AArdvarkLoader and add it to
+sprites in its boot"): an application, harddisc/extras/!AArdvarkLoader
+(!Boot: IconSprites; !Run: the same, then Choices:Boot.TestBed once,
+AArdvarkLoader$Loaded; !Sprites, !Sprites22, !Sprites11 drawn by
+mkaardvark.py: sprite names are 12 characters, so "!aardvarkloa" and
+"sm!aardvarkl", which the Filer finds), in the package at
+Choices/Boot/PreDesk. An application there is run in BootRun's second
+pass ("Repeat BootRun ... -directories"), after the files, and that pass
+runs even when the files' pass stopped at an error (George's log:
+Configure ran). So it no longer runs before the other files, as
+1.0.0062-1's file did, but after them and before Configure; "!A" is
+first among the applications. 1.0.0062-1 was not published; the postinst
+removes its file. Tried under QEMU with the failing SetUpNet: the log
+shows PreDesk.!AArdvarkLoader after the Repeat error, the NVMe disc's
+icon is there, and the Filer shows the aardvark. To do at the next image build: the image's own
 start-up files (stage/root has PreDesk/TestBed; the postinst moves it
 when the package is configured). Not known: what is in George's
 SetUpNet (asked).
