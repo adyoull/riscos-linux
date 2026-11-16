@@ -8,6 +8,26 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### RISC3D staged as a PackMan package (16 Nov 2026; riscos-harddisc 1.0.0058-1)
+
+RISC3D's handoff (`2026-11-16-risc3d-packman-on-rol-too.md`), at the
+owner's direction: one PackMan package, RISC3D, on every system, and
+RISC OS on Linux's distribution carries it as it does RDPServer and
+Folio. `/usr/share/riscos/packman/RISC3D/`: the `!Boot/Resources/!RISC3D`
+tree from `RISC3D-0.04-3.zip` (md5 6f1f84ca…: !Boot, !Run, !Help,
+!Sprites, !Sprites11, RISC3D 0.04, GPU.Linux3D 0.03, GPU.ReadMe), Info
+(Control written here to the package's description: Components
+`Resources.!RISC3D (Movable)`, arm32, MIT; Copyright; Files), status
+`RISC3D 0.04-3 installed`, and an adopt list of the files riscos-risc3d
+0.19-1 to 0.21-1 put there unrecorded. No lookat: !Boot boots
+Resources. (The staged trees live in the package, not in a repository:
+the .deb is the record.) Tested: install-packman-packages on a fresh
+HardDisc4 and on one with a 0.21-1-style copy (installed once, Status
+line and Info written, second run does nothing); under QEMU without
+rol-3d RISC OS starts cleanly and `*RISC3D` reports Linux3D registered,
+"not known yet whether on a GPU". riscos-risc3d 0.22-1 (theirs) is to
+drop its RISC OS files and depend on riscos-harddisc (>= 1.0.0058-1).
+
 ### Internal FileCore discs with sectors over 1024 bytes are left alone (15 Nov 2026; riscos-support 1.0.0061-1)
 
 Chris Hall (CM5 Lite, now working with the update): his NVMe drive's
