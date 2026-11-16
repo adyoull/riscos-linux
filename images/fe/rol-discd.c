@@ -16,6 +16,14 @@
  * disc: read-write, opened O_EXCL so that Linux can't mount it meanwhile.
  * Only the discs listed are ever opened.
  *
+ * NVMe drives are not SCSIFS's: on RISC OS itself they belong to NVMeFS
+ * (RISC OS Open's, with its filer), which also takes sectors of 4096
+ * bytes, where SCSIFS stops at 1024. FileCore discs on NVMe drives are
+ * listed in /riscos/mediactl/nvme instead (device, size in bytes, FileCore
+ * disc name, sector size), for the test bed's NVMeDriver module, which
+ * NVMeFS reads and writes them through; it asks for one on the same
+ * socket. The file is only there when there is such a disc.
+ *
  * Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
  */
 #define _GNU_SOURCE
@@ -40,7 +48,7 @@
 #define RO_GID 1000
 #define MAXD 16
 
-struct disc { char dev[40], name[12]; long long bytes; };
+struct disc { char dev[40], name[12]; long long bytes; int nvme, ss; };
 static struct disc discs[MAXD];
 static int ndiscs;
 static dev_t root_part, root_disk;
@@ -99,7 +107,7 @@ whole_disc (dev_t d)
 /* The same test as rol-usbd's: a disc (or partition) whose boot block
    (bytes &C00-&DFF) has FileCore's checksum and a sensible disc record */
 static int
-filecore_disc (const char *node, char *name, size_t nsz, long long *bytes)
+filecore_disc (const char *node, char *name, size_t nsz, long long *bytes, int nvme, int *ss)
 {
   unsigned char b[512];
   int f = open (node, O_RDONLY | O_CLOEXEC);
@@ -143,10 +151,23 @@ filecore_disc (const char *node, char *name, size_t nsz, long long *bytes)
   while (k > 0 && name[k - 1] == ' ')
     k--;
   name[k] = 0;
+  *ss = devss;
+  /* an NVMe drive's sectors and its record's must agree (NVMeFS works in
+     the drive's) */
+  if (nvme && devss != (int) (1u << log2ss))
+    {
+      char msg[300];
+      snprintf (msg, sizeof msg,
+		"rol-discd: %s: a FileCore disc \"%s\" whose record says %u byte sectors on a drive with %d byte ones: not given to RISC OS\n",
+		node, name, 1u << log2ss, devss);
+      say (msg);
+      return 0;
+    }
   /* RISC OS's SCSIFS takes sectors of 256, 512 and 1024 bytes only: a disc
-     with bigger ones (a 4K NVMe drive) would be an icon that only ever
-     says "Sector size not supported", so it is left alone, and said */
-  if (devss > 1024 || log2ss > 10)
+     with bigger ones that isn't NVMeFS's (a 4K SATA drive) would be an
+     icon that only ever says "Sector size not supported", so it is left
+     alone, and said */
+  if (!nvme && (devss > 1024 || log2ss > 10))
     {
       char msg[300];
       snprintf (msg, sizeof msg,
@@ -214,12 +235,13 @@ give (const char *dev)
     return 0;
   struct disc *d = &discs[ndiscs];
   snprintf (node, sizeof node, "/dev/%s", dev);
-  if (!filecore_disc (node, d->name, sizeof d->name, &d->bytes))
+  d->nvme = !strncmp (dev, "nvme", 4);
+  if (!filecore_disc (node, d->name, sizeof d->name, &d->bytes, d->nvme, &d->ss))
     return 0;
   snprintf (d->dev, sizeof d->dev, "%s", dev);
   ndiscs++;
-  snprintf (msg, sizeof msg, "rol-discd: %s: internal FileCore disc \"%s\", %lld bytes: given to RISC OS (SCSIFS)\n",
-	    dev, d->name, d->bytes);
+  snprintf (msg, sizeof msg, "rol-discd: %s: internal FileCore disc \"%s\", %lld bytes, %d byte sectors: given to RISC OS (%s)\n",
+	    dev, d->name, d->bytes, d->ss, d->nvme ? "NVMeFS" : "SCSIFS");
   say (msg);
   return 1;
 }
@@ -273,11 +295,29 @@ write_list (void)
   FILE *f = fopen (tmp, "we");
   if (!f)
     return;
+  int nv = 0;
   for (int i = 0; i < ndiscs; i++)
-    fprintf (f, "%s\t%lld\t%s\t0\n", discs[i].dev, discs[i].bytes, discs[i].name);
+    if (!discs[i].nvme)
+      fprintf (f, "%s\t%lld\t%s\t0\n", discs[i].dev, discs[i].bytes, discs[i].name);
+    else
+      nv++;
   fclose (f);
   if (chown (tmp, RO_UID, RO_GID)) { }
   rename (tmp, CTL "/filecore-internal");
+  /* NVMeFS's (through the NVMeDriver module) */
+  unlink (CTL "/nvme");
+  if (!nv)
+    return;
+  char tmp2[] = CTL "/.nvme";
+  f = fopen (tmp2, "we");
+  if (!f)
+    return;
+  for (int i = 0; i < ndiscs; i++)
+    if (discs[i].nvme)
+      fprintf (f, "%s\t%lld\t%s\t%d\n", discs[i].dev, discs[i].bytes, discs[i].name, discs[i].ss);
+  fclose (f);
+  if (chown (tmp2, RO_UID, RO_GID)) { }
+  rename (tmp2, CTL "/nvme");
 }
 
 /* One request: "OPEN dev" -> "OK bytes readonly" with the open disc, or

@@ -1,0 +1,71 @@
+RISC OS Open Release Archive
+============================
+
+This is the latest desktop filer, filing system, and low level driver which
+works with solid state NonVolatile Memory express (NVMe) type drives.
+
+The three components included in this archive are a joint Open Source
+development between RISCOSbits, Stader Softwareentwicklung, and RISC OS Open.
+
+
+Supported hardware
+==================
+
+Currently this software only supports the Raspberry Pi Compute Module 4. It
+is anticipated that support for other platforms with a PCI express socket such
+as the Titanium and Pinebook Pro will be added in due course.
+
+A broad selection of drives are available with sizes up to 256GB and 2TB
+possible with FileCore; contact your RISC OS dealer for advice on buying
+specific models.
+
+
+How to install the software
+===========================
+
+The add on is provided in the form of an update to !Boot which can be merged
+using the Configure application.
+
+1. Start Configure (see chapter "Changing the computer's configuration"
+   in the RISC OS 5 User Guide)
+2. Click on the Boot setup plug-in
+3. Click on the Install option
+4. Drag the !Boot update from this archive to the drop site
+5. Click on the Merge button
+6. Reboot the Raspberry Pi
+
+When it restarts you will find a new fixed disc icon on the lefthand side
+of the icon bar.
+
+If you purchased the drive blank from a non-RISC OS supplier it may be
+necessary to format the drive before use. For this, HForm 2.78 or later is
+required to understand NVMe drives. You can get the latest version of HForm
+via PackMan or by downloading it from
+  https://packages.riscosopen.org/rool/DiscDetails.html
+directly.
+
+
+Are you into programming?
+=========================
+
+If you're into programming and would like to help out enhancing the software,
+or are merely interested to see how it works, the source code is available
+to download from the RISC OS Open GitLab from the following addresses:
+
+  https://gitlab.riscosopen.org/RiscOS/Sources/FileSys/ADFS/ADFSFiler
+  https://gitlab.riscosopen.org/RiscOS/Sources/FileSys/NVMeFS/NVMeFS
+  https://gitlab.riscosopen.org/RiscOS/Sources/HWSupport/NVMe/NVMeDriver
+
+Note: despite its name, the ADFSFiler component has assembly time selections
+      to produce the NVMeFiler as an option.
+
+
+Caution
+=======
+
+As a new piece of software, it is possible that there are bugs hiding that
+nobody has discovered yet. As with any disc drive, it is important to have
+a robust backup strategy in place should things go wrong.
+
+
+-- RISC OS Open

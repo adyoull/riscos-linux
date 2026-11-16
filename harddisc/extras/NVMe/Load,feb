@@ -1,0 +1,9 @@
+| NVMe drives in RISC OS's own format, as on a machine running RISC OS
+| itself: RISC OS Open's NVMeFS and its filer (unchanged; see LICENSE),
+| on RISC OS on Linux's NVMeDriver, which does NVMeFS's NVMe commands
+| on the drive through Linux. Run at start-up when Linux lists such a
+| drive (IXFS:$.riscos.mediactl.nvme).
+RMEnsure NVMeDriver 0.50 RMLoad <Obey$Dir>.NVMeDriver
+RMEnsure NVMeFS 0.05 RMLoad <Obey$Dir>.NVMeFS
+| RISC OS Open's: waits for NVMeFS to find the drives, then loads the filer
+Run <Obey$Dir>.Wait

@@ -8,6 +8,79 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### NVMe drives through NVMeFS, as on RISC OS itself; 4K sectors (16 Nov 2026; riscos-support 1.0.0066-1, riscos-harddisc 1.0.0060-1)
+
+Chris Hall's internal NVMe drive has a RISC OS partition with 4K sectors;
+SCSIFS takes 256, 512 and 1024 only, so 1.0.0061-1 left it alone. Chris
+Gransden noted a 4K drive on a USB adapter gives SCSIFS's "Sector size
+not supported" on RISC OS itself too; the owner, that RISC OS does read
+4K internal drives with the right drivers: RISC OS Open's NVMeFS, with
+NVMeDriver (the PCI hardware) under it and NVMeFiler for the icon
+(ROOL's NVMeSupport archive; RISCOSbits, Stader Softwareentwicklung and
+RISC OS Open; BSD). The owner supplied the archive and the sources of
+NVMeFS and NVMeDriver.
+
+Here Linux owns the hardware, so:
+
+- **modules/NVMeLinux** (new; the module is called NVMeDriver, 0.50, and
+  has NVMeDriver's SWI chunk &5A5C0): ControllerEnumerate,
+  ControllerAccessInfo, ControllerInfo, GetResult and Transfer, as
+  NVMeDriver's doc/Concept_Driver.txt describes them. Each drive is a
+  controller with one namespace. Transfer does the command at once:
+  Identify (namespace: size in sectors and one LBA format; controller)
+  from what Linux says of the drive, Read, Write, Verify and Flush as
+  pread64/pwrite64/fsync through IXSupport_LinuxSyscall, the data found
+  from the command's PRP entries (system memory, one 4096 byte page an
+  entry, the second entry a list when there are more than two, the
+  last slot of a list page the next page). The result block gets NVMe's
+  status; completion type 2's routine is called from a transient
+  callback, 6's at once, 1 and 5 by Service_NVMeDriverTransferDone. At
+  most 128 KB a command (NVMeFS splits). Service_NVMeDriverStarted is
+  sent from a callback after it starts, Dying when it goes.
+  `*NVMeDevices` lists the drives. `NVMeLinux$Test` (a Linux path) and
+  `NVMeLinux$TestSector` make a disc image a drive, for testing.
+- **OS_MMUControl 2**: NVMeFS calls it (flush) before copying data and
+  takes an error as a failed transfer; the port's kernel has no
+  OS_MMUControl at all (`MMUControlSWI * NoSuchSWI` in s/Linux). The
+  module answers reason 2 with no error, on the SWI vector as
+  MemMapEntries takes its SWIs, unless the kernel answers it. **To do in
+  the ROM:** OS_MMUControl in the port's kernel (reason 2 at least).
+- **rol-discd**: a FileCore disc on an NVMe drive is listed in
+  /riscos/mediactl/nvme (device, bytes, name, sector size) and not in
+  filecore-internal, so SCSILinux no longer sees it; its sector size and
+  its disc record's must agree. The file is only there when there is
+  one. Other internal discs as before (over 1024 byte sectors: left
+  alone).
+- **HardDisc4** `TestBed.NVMe`: ROOL's NVMeFS 0.05, NVMeFilerSA 1.16 and
+  Wait (unchanged binaries), their LICENSE and ReadMe, our NVMeDriver,
+  and `Load`; PreDesk's TestBed runs Load when mediactl.nvme is there.
+  ROOL's own !Run (which wants BCMSupport and PCI, and loads the
+  hardware driver) is not used.
+
+Tested (QEMU, generic image; kernel 7.2.0-7):
+- 512 byte sectors, a disc image through `NVMeLinux$Test`: HForm 2.78
+  formats it through NVMeFS (it finds the drive, model and firmware
+  strings from ControllerInfo); a 300 KB file and Utilities (227 files)
+  copied on and back are identical; *Verify OK. 1163 reads, 811 writes.
+- The same disc on an emulated NVMe drive (`-device nvme`): rol-discd
+  gives it to NVMeFS, the modules load at start-up, NVMeFiler's icon
+  appears, the file reads back identical; and identical again through
+  SCSIFS (SCSILinux$Test on a copy).
+- 4K sectors: 12 transfers of 4 KB to 266 KB written and read back with
+  NVMeFS_DiscOp (a disc record given), on a disc image and on an
+  emulated NVMe drive with 4096 byte blocks (a boot block made up to
+  get it past rol-discd): all match, the image checked from outside too
+  and nothing written elsewhere.
+- **Not tested:** a FileCore disc with 4K sectors (HForm 2.78 formats
+  512 only: its sector size is fixed at 2^9, and the owner said not to
+  patch it; RISCOSbits' 4K formatter is theirs), a real NVMe drive, a
+  partition on one, more than one drive, background transfers (NVMeFS's
+  experimental -bg).
+- The module here was built with Ubuntu's arm-linux-gnueabihf GCC 13
+  (`make T=arm-linux-gnueabihf- CC='arm-linux-gnueabihf-gcc
+  -mfloat-abi=soft'`): the crossdev toolchain the Makefile names wasn't
+  on the build machine. check-pic passes.
+
 ### The FAT partition as !Boot.Loader (16 Nov 2026; riscos-support 1.0.0065-1)
 
 Asked on the ROOL forum: "is there an easy way to access the firmware

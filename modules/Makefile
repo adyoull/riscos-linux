@@ -32,7 +32,7 @@ CFLAGS := -O2 -marm -march=armv7-a -mno-unaligned-access -fpie -fvisibility=hidd
 LDFLAGS := -nostdlib -static -Wl,--no-dynamic-linker -Wl,-T,common/module.ld \
            -Wl,--build-id=none -Wl,-z,norelro
 
-all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa $(OUT)/MbufRes,ffa $(OUT)/LinuxOverlay,ffa $(OUT)/SCSILinux,ffa $(OUT)/MemMapEntries,ffa
+all: $(OUT)/VFPSupport,ffa $(OUT)/ARMEABISupport,ffa $(OUT)/SoundDMA,ffa $(OUT)/Iconv,ffa $(OUT)/KVMWheel,ffa $(OUT)/WindowScroll,ffa $(OUT)/LinuxAudio,ffa $(OUT)/SoundControl,ffa $(OUT)/NativeSupport,ffa $(OUT)/LinuxCodec,ffa $(OUT)/VCHIQ,ffa $(OUT)/BCMSupport,ffa $(OUT)/PCI,ffa $(OUT)/LinuxShell,ffa $(OUT)/USBDriver,ffa $(OUT)/MbufRes,ffa $(OUT)/LinuxOverlay,ffa $(OUT)/SCSILinux,ffa $(OUT)/MemMapEntries,ffa $(OUT)/NVMeDriver,ffa
 
 $(OBJ) $(OUT):
 	mkdir -p $@
@@ -167,6 +167,27 @@ $(OUT)/SCSILinux,ffa: $(OBJ)/SCSILinux.elf $(OBJ)/SCSILinux-at64k.elf common/che
 	  0x$$($(NM) $(OBJ)/SCSILinux.elf | awk '$$3=="__got_start"{print $$1}') \
 	  0x$$($(NM) $(OBJ)/SCSILinux.elf | awk '$$3=="__got_end"{print $$1}')
 	cp $(OBJ)/sl0.bin $@
+
+# --- NVMeDriver (NVMe drives through Linux, for RISC OS Open's NVMeFS) ------
+NV_OBJS := $(OBJ)/nv-header.o $(OBJ)/nv-nvme.o $(OBJ)/ae-cmodule.o
+
+$(OBJ)/nv-header.o: NVMeLinux/header.s common/cmodule.inc | $(OBJ)
+	$(AS) -I common -o $@ $<
+$(OBJ)/nv-nvme.o: NVMeLinux/nvmelinux.c common/cmodule.h | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ)/NVMeDriver.elf: $(NV_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(NV_OBJS) -lgcc
+$(OBJ)/NVMeDriver-at64k.elf: $(NV_OBJS) common/module.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--defsym=__link_base=0x10000 -o $@ $(NV_OBJS) -lgcc
+
+$(OUT)/NVMeDriver,ffa: $(OBJ)/NVMeDriver.elf $(OBJ)/NVMeDriver-at64k.elf common/check-pic.py | $(OUT)
+	$(OBJCOPY) -O binary $(OBJ)/NVMeDriver.elf $(OBJ)/nv0.bin
+	$(OBJCOPY) -O binary $(OBJ)/NVMeDriver-at64k.elf $(OBJ)/nv1.bin
+	python3 -B common/check-pic.py $(OBJ)/nv0.bin $(OBJ)/nv1.bin 0x10000 \
+	  0x$$($(NM) $(OBJ)/NVMeDriver.elf | awk '$$3=="__got_start"{print $$1}') \
+	  0x$$($(NM) $(OBJ)/NVMeDriver.elf | awk '$$3=="__got_end"{print $$1}')
+	cp $(OBJ)/nv0.bin $@
 
 # --- LinuxCodec (Linux's V4L2 video decoders for RISC OS programs) ----------
 LC_OBJS := $(OBJ)/lc-header.o $(OBJ)/lc-codec.o $(OBJ)/ae-cmodule.o
