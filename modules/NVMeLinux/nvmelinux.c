@@ -81,16 +81,29 @@
 #define CT_SERVICE_S	5
 #define CT_CALLBACK_S	6
 
-/* NVMe status (bits 17 up of the result's fourth word): type << 8 | code */
+/* NVMe status (bits 17 up of the result's fourth word): type << 8 | code.
+   NVMeFS takes a command as failed when the low SEVEN bits of the code
+   are not zero (its NVMe_DW3_SF_SC is &7F, where NVMe's code is eight
+   bits), so NVMe's own codes &80 (LBA out of range) and &280 (write
+   fault) would pass for success, and a failed write would be lost
+   without a word. Every failure here therefore has a code NVMeFS sees:
+   a write that fails is "data transfer error", an address off the end
+   "invalid field". &281 (unrecovered read error) NVMeFS turns into
+   FileCore's disc error. */
 #define ST_OK		0x000
 #define ST_BAD_OPCODE	0x001
 #define ST_BAD_FIELD	0x002
 #define ST_DATA_ERROR	0x004
 #define ST_BAD_NS	0x00B
-#define ST_LBA_RANGE	0x080
-#define ST_WRITE_FAULT	0x280
+#define ST_LBA_RANGE	ST_BAD_FIELD
+#define ST_WRITE_FAULT	ST_DATA_ERROR
 #define ST_READ_ERROR	0x281
 #define ST_READ_ONLY	0x182
+
+#define SEEN(st) (((st) & 0x7F) != 0)
+typedef char status_codes_seen_by_nvmefs[SEEN (ST_BAD_OPCODE) && SEEN (ST_BAD_FIELD) && SEEN (ST_DATA_ERROR)
+					 && SEEN (ST_BAD_NS) && SEEN (ST_LBA_RANGE) && SEEN (ST_WRITE_FAULT)
+					 && SEEN (ST_READ_ERROR) && SEEN (ST_READ_ONLY) ? 1 : -1];
 
 ERROR_BLOCK (bad_handle, 0x821C00, "Invalid NVMe controller handle");
 ERROR_BLOCK (bad_swi, 0x1E6, "SWI value out of range for module NVMeDriver");

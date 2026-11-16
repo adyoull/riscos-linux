@@ -8,7 +8,7 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### NVMe drives through NVMeFS, as on RISC OS itself; 4K sectors (16 Nov 2026; riscos-support 1.0.0066-1, riscos-harddisc 1.0.0060-1)
+### NVMe drives through NVMeFS, as on RISC OS itself; 4K sectors (16 Nov 2026; riscos-support 1.0.0066-1, riscos-harddisc 1.0.0061-1)
 
 Chris Hall's internal NVMe drive has a RISC OS partition with 4K sectors;
 SCSIFS takes 256, 512 and 1024 only, so 1.0.0061-1 left it alone. Chris
@@ -22,7 +22,7 @@ NVMeFS and NVMeDriver.
 
 Here Linux owns the hardware, so:
 
-- **modules/NVMeLinux** (new; the module is called NVMeDriver, 0.50, and
+- **modules/NVMeLinux** (new; the module is called NVMeDriver, 0.52, and
   has NVMeDriver's SWI chunk &5A5C0): ControllerEnumerate,
   ControllerAccessInfo, ControllerInfo, GetResult and Transfer, as
   NVMeDriver's doc/Concept_Driver.txt describes them. Each drive is a
@@ -76,10 +76,23 @@ Tested (QEMU, generic image; kernel 7.2.0-7):
   patch it; RISCOSbits' 4K formatter is theirs), a real NVMe drive, a
   partition on one, more than one drive, background transfers (NVMeFS's
   experimental -bg).
-- The module here was built with Ubuntu's arm-linux-gnueabihf GCC 13
-  (`make T=arm-linux-gnueabihf- CC='arm-linux-gnueabihf-gcc
-  -mfloat-abi=soft'`): the crossdev toolchain the Makefile names wasn't
-  on the build machine. check-pic passes.
+- **NVMeFS only sees a failure whose NVMe status code has one of its
+  low seven bits set** (it masks the code with &7F; NVMe's is eight
+  bits). NVMe's own "LBA out of range" (&80) and "write fault" (&280)
+  therefore passed for success: found when a transfer past the end of a
+  drive "worked" (NVMeFS handed back its own buffer). The driver (0.52)
+  gives "invalid field" and "data transfer error" for those, and a
+  compile-time check keeps every status it can return visible. Tested:
+  a transfer past the end now gives "NVM operation Write failed on
+  Drive 5".
+- Built with riscos-crossdev 1.11's toolchain (GCCSDK GCC 10.2.0), the
+  release tarball from GitHub (sha256 checked); SCSILinux rebuilt with
+  it is byte for byte the shipped one. The first build (0.50, in
+  riscos-harddisc 1.0.0060-1, never published) was made with Ubuntu's
+  arm-linux-gnueabihf GCC 13, the toolchain not being on the build
+  machine; all the tests above were run again with the crossdev build
+  (the 512 byte copy and Verify on the emulated drive, the 4K sector
+  transfers).
 
 ### The FAT partition as !Boot.Loader (16 Nov 2026; riscos-support 1.0.0065-1)
 

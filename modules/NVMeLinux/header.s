@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"NVMeDriver"
-help:	.asciz	"NVMeDriver\t0.50 (16 Nov 2026) NVMe drives through Linux, for NVMeFS"
+help:	.asciz	"NVMeDriver\t0.52 (16 Nov 2026) NVMe drives through Linux, for NVMeFS"
 swi_names:
 	.asciz	"NVMeDriver\0ControllerEnumerate\0ControllerAccessInfo\0Transfer\0GetResult\0SetSpecialPRPinfo\0QueueReset\0ControllerInfo\0"
 	.align	2
