@@ -20,7 +20,9 @@
    RISC OS can't open Linux's /dev itself. Each drive is a controller
    with one namespace. For testing, the system variable NVMeLinux$Test
    names a disc image file (a Linux path), which becomes a drive too, with
-   sectors of NVMeLinux$TestSector bytes (512 if unset).
+   sectors of NVMeLinux$TestSector bytes (512 if unset). The image must be
+   under 2 GB (it is opened from here, without O_LARGEFILE; a real drive
+   is opened by rol-discd, and any size).
 
    What NVMeFS uses (and so what is here): NVMeDriver_ControllerEnumerate,
    _ControllerAccessInfo, _ControllerInfo, and _Transfer with the admin

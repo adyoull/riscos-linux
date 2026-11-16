@@ -71,11 +71,37 @@ Tested (QEMU, generic image; kernel 7.2.0-7):
   emulated NVMe drive with 4096 byte blocks (a boot block made up to
   get it past rol-discd): all match, the image checked from outside too
   and nothing written elsewhere.
-- **Not tested:** a FileCore disc with 4K sectors (HForm 2.78 formats
-  512 only: its sector size is fixed at 2^9, and the owner said not to
-  patch it; RISCOSbits' 4K formatter is theirs), a real NVMe drive, a
-  partition on one, more than one drive, background transfers (NVMeFS's
-  experimental -bg).
+- **Not tested:** a real NVMe drive, a partition on one, more than one
+  drive, background transfers (NVMeFS's experimental -bg).
+- **A real 4K FileCore disc (later the same day).** The owner supplied
+  RISCOSbits' formatter (!NVMe4kFmt 0.05, Anton Reiser) and their
+  FreeNVMe modules (NVMeFS 0.04 of 25 Mar 2025, which has the
+  NVMeFS_DriveDetach and DriveAttach SWIs the formatter needs; ROOL's
+  0.05 has not). Neither is in any package. An emulated NVMe drive of
+  512 GiB with 4096 byte blocks (a sparse file; a boot block made up to
+  get it past rol-discd) with our NVMeDriver and FreeNVMe's NVMeFS:
+  the formatter shows the drive (model, 512.0 GiB, LBA size 4096, one
+  LBA format) and formats it ("FileCore drive found: 512GiB, 16k
+  LFAU"; the disc record: log2 sector size 12, 1026 zones). Then, as
+  shipped (rol-discd, our NVMeDriver, ROOL's NVMeFS 0.05 and filer):
+  the icon at start-up; a 3 MB file, Utilities (227 files) and Apps
+  (317 files, 39 MB) copied on and back, all identical; after a restart
+  *CheckMap "Map good", *Free 536,779,712 KB free, *Count 545 files,
+  the file identical again. *Verify of the whole 512 GiB wasn't waited
+  for (and Escape doesn't stop it). The formatter's CHANGE (the drive's
+  own LBA size: NVMe's Format command) is answered "invalid opcode":
+  that is the drive's, and Linux's.
+  The 2 GB limit of `NVMeLinux$Test` images (no O_LARGEFILE) was found
+  here: "No NVMe drives" with a 2 GB image.
+- **Seen three times today, not explained:** a start-up that sits with
+  the hourglass and an idle processor (RISC OS in its idle wait), twice
+  in PreDesk or at the desktop's start with a FileCore disc present,
+  for minutes; one ended when Escape was pressed, one didn't end with
+  Shift, the next start of the same image was normal. ROOL's Wait
+  (51 BASIC WAITs: vertical syncs, which the port makes from its
+  ticker) is in the NVMe start-up, but the first time was before NVMe
+  existed here. To look into (the ticker, or a tick lost while a
+  module is in a Linux call).
 - **NVMeFS only sees a failure whose NVMe status code has one of its
   low seven bits set** (it masks the code with &7F; NVMe's is eight
   bits). NVMe's own "LBA out of range" (&80) and "write fault" (&280)
