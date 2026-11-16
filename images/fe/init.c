@@ -5,6 +5,7 @@
  *
  * Copyright (c) 2026 Andrew Youll. MIT licence. */
 #define _GNU_SOURCE
+#include <sys/statfs.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -82,6 +83,8 @@ media_umount_all (void)
 
 static void fat_logs_stop (void);
 static void fat_umount_all (void);
+static void loader_keep_cmos (void);
+static void loader_put_cmos (void);
 
 /* How each session ended, so that one that ended unexpectedly can be told
    from one that didn't, afterwards: /riscos/session.txt says "running"
@@ -171,7 +174,9 @@ machine_off (int how)
      partition is marked clean before the restart: a lazy one could still
      be pending when reboot() is called, which leaves the partition marked
      "not properly unmounted" for good (Linux doesn't clear that mark) */
+  loader_keep_cmos ();
   fat_umount_all ();
+  loader_put_cmos ();
   if (umount ("/run/win"))
     umount2 ("/run/win", MNT_DETACH);
   /* USB discs and cards (rol-usbd mounts them in /riscos/media) */
@@ -1179,6 +1184,86 @@ protect_setup (void)
   setenv ("ROL_CONFINE", v, 1);
 }
 
+/* !Boot.Loader: the FAT partition the machine starts from (the kernels, a
+   Pi's firmware and config.txt, LOGS), as on a Pi running RISC OS itself,
+   where !Boot.Loader is that partition. It is mounted over HardDisc4's
+   !Boot/Loader directory, RISC OS's user's, before RISC OS starts (so
+   RISC OS's own view of the files has it), and unmounted at the end with
+   the other mounts of the partition (fat_umount_all).
+
+   RISC OS's CMOS RAM is the file CMOS in that directory, so it is then
+   the partition's, as on a Pi: the first time, HardDisc4's copy is put
+   there. At the end the partition's copy is put back in HardDisc4's
+   directory underneath, so that a start without the partition (it can't
+   be mounted, or an older riscos-support) has the same settings. */
+#define LOADER "/riscos/HardDisc4/!Boot/Loader"
+static int loader_mounted;
+static unsigned char loader_cmos[4096];
+static ssize_t loader_cmos_len = -1;
+
+static ssize_t
+loader_read_cmos (void)
+{
+  int fd = open (LOADER "/CMOS", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
+    return -1;
+  ssize_t n = read (fd, loader_cmos, sizeof loader_cmos);
+  close (fd);
+  return n > 0 && n < (ssize_t) sizeof loader_cmos ? n : -1;
+}
+
+static void
+loader_write_cmos (ssize_t n)
+{
+  int fd = open (LOADER "/CMOS.new", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+  if (fd < 0)
+    return;
+  int ok = write (fd, loader_cmos, (size_t) n) == n;
+  if (fchown (fd, RO_UID, RO_GID)) { }
+  fsync (fd);
+  close (fd);
+  if (ok)
+    rename (LOADER "/CMOS.new", LOADER "/CMOS");
+  else
+    unlink (LOADER "/CMOS.new");
+}
+
+static void
+loader_mount (void)
+{
+  struct stat st;
+  char opt[128];
+  if (!fat_dev[0] || lstat (LOADER, &st) || !S_ISDIR (st.st_mode))
+    return;
+  ssize_t have = loader_read_cmos ();
+  snprintf (opt, sizeof opt, "uid=%d,gid=%d,fmask=0133,dmask=0022,shortname=mixed,flush", RO_UID, RO_GID);
+  if (mount (fat_dev, LOADER, "vfat", MS_NOSUID | MS_NODEV | MS_NOATIME, opt))
+    {
+      say ("!Boot.Loader: the FAT partition couldn't be mounted (%s)\n", strerror (errno));
+      return;
+    }
+  loader_mounted = 1;
+  if (have > 0 && access (LOADER "/CMOS", F_OK))
+    loader_write_cmos (have);
+}
+
+/* at the end: the partition's CMOS, while it is still mounted... */
+static void
+loader_keep_cmos (void)
+{
+  loader_cmos_len = loader_mounted ? loader_read_cmos () : -1;
+}
+
+/* ...and into HardDisc4's own directory once it isn't */
+static void
+loader_put_cmos (void)
+{
+  struct statfs sf;
+  if (loader_cmos_len <= 0 || statfs (LOADER, &sf) || sf.f_type == 0x4d44 /* FAT: still mounted */)
+    return;
+  loader_write_cmos (loader_cmos_len);
+}
+
 /* USB discs and cards appear in RISC OS as IXFS:$.riscos.media.NAME:
    rol-usbd mounts them there while RISC OS runs. /riscos/media is made a
    shared mount point, so that mounts made under it later reach RISC OS's
@@ -1997,6 +2082,7 @@ main (void)
   }
   set_ram_size (native);
   media_setup ();
+  loader_mount ();
   if (protect_on ())
     protect_setup ();
   time_t t0 = time (NULL);

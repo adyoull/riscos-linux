@@ -148,7 +148,6 @@ struct disc
   long long bytes;		/* its size, when given */
   char fcname[12];		/* its FileCore disc name, when given */
   int removable;		/* Linux's removable flag (of the whole disc) */
-  int boot;			/* the FAT partition the machine starts from */
 };
 static struct disc discs[MAXD];
 static dev_t root_disk;		/* the whole disc Linux runs from */
@@ -595,123 +594,6 @@ unmount (struct disc *d, int lazy)
   write_list ();
 }
 
-/* --- The FAT partition the machine starts from --------------------------
-
-   Partition 1 of the disc Linux runs from: the kernels, a Pi's firmware
-   and config.txt, the LOGS folder. On a Pi running RISC OS itself it is
-   in reach from the desktop (!Boot.Loader); here it is mounted as
-   /riscos/media/Loader, RISC OS's user's, and listed with the USB discs,
-   so it gets an icon (its name is also in /riscos/mediactl/bootdisc, for
-   the icon task to show it as a hard disc). init mounts the same
-   partition for a moment now and then, as root's, to copy the logs to
-   it: Linux gives a second mount of a partition the first one's owner
-   options, so a mount made while init's is there is undone and tried
-   again at the next look. */
-#define BOOTNAME "Loader"
-
-static int
-boot_partition (char *out, size_t n)
-{
-  char p[300], t[512];
-  if (!root_disk)
-    return 0;
-  snprintf (p, sizeof p, "/sys/dev/block/%u:%u", major (root_disk), minor (root_disk));
-  ssize_t l = readlink (p, t, sizeof t - 1);
-  if (l <= 0)
-    return 0;
-  t[l] = 0;
-  const char *blk = strrchr (t, '/');
-  blk = blk ? blk + 1 : t;
-  snprintf (p, sizeof p, "/sys/block/%.64s", blk);
-  DIR *s = opendir (p);
-  struct dirent *f;
-  int found = 0;
-  while (s && !found && (f = readdir (s)))
-    {
-      if (strncmp (f->d_name, blk, strlen (blk)))
-	continue;
-      snprintf (p, sizeof p, "/sys/block/%.64s/%.64s/partition", blk, f->d_name);
-      if (read_file (p, t, sizeof t) > 0 && atoi (t) == 1)
-	{
-	  snprintf (out, n, "%s", f->d_name);
-	  found = 1;
-	}
-    }
-  if (s)
-    closedir (s);
-  return found;
-}
-
-static void
-boot_look (char *present)
-{
-  char dv[64];
-  if (!boot_partition (dv, sizeof dv))
-    return;
-  int i, freei = -1;
-  for (i = 0; i < MAXD; i++)
-    if (discs[i].dev[0] && !strcmp (discs[i].dev, dv))
-      break;
-    else if (!discs[i].dev[0] && freei < 0)
-      freei = i;
-  if (i == MAXD)
-    {
-      if (freei < 0)
-	return;
-      i = freei;
-      memset (&discs[i], 0, sizeof discs[i]);
-      snprintf (discs[i].dev, sizeof discs[i].dev, "%.31s", dv);
-      discs[i].boot = 1;
-    }
-  present[i] = 1;
-  struct disc *d = &discs[i];
-  if (d->mounted || d->ejected || d->tries >= 60)
-    return;
-  d->tries++;
-  char node[64], opt[200];
-  const char *mp = MEDIA "/" BOOTNAME;
-  snprintf (node, sizeof node, "/dev/%s", d->dev);
-  /* FAT only (never anything else, whatever partition 1 holds); another
-     disc may have taken the name (a USB disc labelled Loader) */
-  if (name_used (BOOTNAME))
-    return;
-  mkdir (mp, 0755);
-  snprintf (opt, sizeof opt, "uid=%d,gid=%d,fmask=0133,dmask=0022,shortname=mixed,flush", RO_UID, RO_GID);
-  if (mount (node, mp, "vfat", MS_NOSUID | MS_NODEV | MS_NOATIME, opt))
-    {
-      rmdir (mp);
-      return;
-    }
-  struct stat st;
-  if (stat (mp, &st) || st.st_uid != RO_UID)
-    {
-      /* init's mount was there: root's files. Again at the next look. */
-      if (umount (mp))
-	umount2 (mp, MNT_DETACH);
-      rmdir (mp);
-      return;
-    }
-  snprintf (d->name, sizeof d->name, "%s", BOOTNAME);
-  d->mounted = 1;
-  FILE *f = fopen (CTL "/.bootdisc", "we");
-  if (f)
-    {
-      fprintf (f, "%s\n", BOOTNAME);
-      fclose (f);
-      if (chown (CTL "/.bootdisc", RO_UID, RO_GID)) { }
-      rename (CTL "/.bootdisc", CTL "/bootdisc");
-    }
-  write_list ();
-  char msg[200];
-  snprintf (msg, sizeof msg, "rol-usbd: %s: the FAT partition the machine starts from: mounted as %s\n", d->dev, mp);
-  int k = open ("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-  if (k >= 0)
-    {
-      if (write (k, msg, strlen (msg)) < 0) { }
-      close (k);
-    }
-}
-
 /* each partition of a wanted disc (or the disc, with no partition table) */
 static void
 discs_look (void)
@@ -801,7 +683,6 @@ discs_look (void)
     }
   if (b)
     closedir (b);
-  boot_look (present);
   /* gone: pulled out, or the card taken out of its reader */
   for (int i = 0; i < MAXD; i++)
     if (discs[i].dev[0] && !present[i])

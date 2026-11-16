@@ -8,35 +8,45 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### The FAT partition from the desktop: the disc "Loader" (16 Nov 2026; riscos-support 1.0.0063-1, riscos-harddisc 1.0.0059-1)
+### The FAT partition as !Boot.Loader (16 Nov 2026; riscos-support 1.0.0064-1)
 
 Asked on the ROOL forum: "is there an easy way to access the firmware
 partition from within RISC OS?" There wasn't: init mounts partition 1 of
 the disc Linux runs from only for a moment (the reset files at the
 start, the logs now and then and at the end). On a Pi running RISC OS
-itself it is in reach as !Boot.Loader.
+itself it is !Boot.Loader, and the owner asked for the same, with no
+icon. (A first version, riscos-support 1.0.0063-1 and riscos-harddisc
+1.0.0059-1, had rol-usbd mount it as /riscos/media/Loader with a hard
+disc icon from !DiscIcon; neither was published, and rol-usbd and
+!DiscIcon are as they were.)
 
-rol-usbd now mounts it as /riscos/media/Loader (vfat, RISC OS's user's,
-`flush`, as a USB FAT disc) and lists it in /riscos/mediactl/discs, so
-!DiscIcon gives it an icon with Open, Free and Eject like any other; its
-name is also written to /riscos/mediactl/bootdisc, and !DiscIcon shows
-that one as a hard disc beside HardDisc4 (priority &5F000000). The
-partition is found from the root's device (partition 1 of the same
-disc: mmcblk, sd, nvme, vd), and only FAT is tried. Linux gives a second
-mount of a mounted partition the first one's options, so if init's
-log-copying mount (root's) happens to be there the files come out
-root's: rol-usbd checks the mount point's owner, undoes the mount and
-tries again at the next look (up to 60). init's mounts and the kernel
-packages' install-boot-files share the mount and write as root as
-before; at the end init unmounts /riscos/media after its own, so the
-partition is still left clean.
+init (`loader_mount`, after `media_setup` and before RISC OS starts, so
+that RISC OS's own view of the files has it) mounts the partition over
+/riscos/HardDisc4/!Boot/Loader: vfat, RISC OS's user's (uid and gid
+1000, fmask 0133, dmask 0022), shortname=mixed, flush. Being the first
+and lasting mount, its options are the ones the partition keeps; init's
+log-copying mounts and the kernel packages' install-boot-files share it
+and write as root as before. `fat_umount_all` already unmounts every
+mount of the partition at the end, so it is left clean.
 
-Tested (QEMU, generic image): the icon appears beside HardDisc4 and
-opens (the device trees, config.txt, EFI); `*Create` of a file there
-works and the file is on the partition afterwards; LOGS is still
-written at shutdown; fsck.fat finds the partition clean. Not tried on a
-Pi or the Dev Kit. A file saved there with a RISC OS type and no
-extension gets `,xxx` on its name, as on a USB FAT disc.
+The CMOS RAM file is /riscos/HardDisc4/!Boot/Loader/CMOS (rol-fb's
+--nvram), so with the partition mounted there it is the partition's
+file, as on a Pi. The first time, HardDisc4's copy is written to the
+partition (read before mounting); at the end the partition's copy is
+read while still mounted (`loader_keep_cmos`) and written to
+HardDisc4's own directory underneath once it isn't (`loader_put_cmos`),
+so a start without the partition (no FAT there, a write-protected card,
+an older riscos-support) has the same settings. If the mount fails
+RISC OS runs as before, from HardDisc4's directory.
+
+Tested (QEMU, generic image): `*Cat` of !Boot.Loader lists the device
+trees, config.txt, cmdline.txt, kernel8.img, LOGS, CMOS; `*Create`
+there works and the file is on the partition afterwards;
+`*Configure MouseStep 3` changed CMOS on the partition and the same
+bytes were in HardDisc4's copy after shutdown; LOGS still written;
+fsck.fat finds the partition clean. Not tried on a Pi or the Dev Kit,
+nor a kernel update end to end. A file saved there with a RISC OS type
+and no extension gets `,xxx` on its name, as on a USB FAT disc.
 
 ### Touchpads: hold with one finger, drag with another (16 Nov 2026; riscos-support 1.0.0062-1)
 
