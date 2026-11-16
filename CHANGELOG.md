@@ -8,6 +8,25 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Touchpads: hold with one finger, drag with another (16 Nov 2026; riscos-support 1.0.0062-1)
+
+Raik (Pinebook Pro): "With Touchpad hold Select and move a window etc.
+is not possible". rol-fb's touchpad code scrolled whenever two fingers
+were on the pad, button down or not, and took positions from ABS_X and
+ABS_Y alone, which are the first finger's: the one that holds the pad
+down and stays still. Now, while the pad's button is down
+(`pressed_bit`), movement moves the pointer however many fingers there
+are; and each finger is followed in its own multi-touch slot
+(ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_MT_POSITION_X/Y; the current slot
+read with EVIOCGABS at start), the pointer taking the movement of the
+finger that moved most and scrolling the fingers' average. A pad with
+no slots works from ABS_X/Y as before. Tested by compiling rol-fb.c
+into a harness that feeds read_input made-up events through a pipe:
+one finger moving, press then a second finger dragging (moves, no
+wheel), two fingers without the button (wheel, no move), a tap, one
+finger pressing and dragging, and a single-touch pad. Not yet on a real
+pad.
+
 ### RISC3D staged as a PackMan package (16 Nov 2026; riscos-harddisc 1.0.0058-1)
 
 RISC3D's handoff (`2026-11-16-risc3d-packman-on-rol-too.md`), at the

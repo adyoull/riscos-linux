@@ -129,6 +129,7 @@ static size_t last_len;
 /* A touchpad (a laptop's: Pinebook Pro) reports where the finger is on
    the pad (ABS_X/Y), as a tablet does, but moves the pointer like a mouse:
    by how far the finger moves. Its state while touched: */
+#define TP_SLOTS 5
 struct touchpad
 {
   int res_x, res_y;		/* units a millimetre */
@@ -140,6 +141,11 @@ struct touchpad
   int pressed;			/* the pad's button: which RISC OS button */
   int clicked;			/* pressed during this touch (no tap) */
   unsigned pressed_bit;
+  /* each finger by itself, where the pad says (multi-touch slots): x and
+     y above are only ever the first finger's, which is the one that stays
+     still when the pad is held down with one finger and another drags */
+  int mt, slot;
+  struct { int id, x, y, lx, ly, have; } f[TP_SLOTS];
 };
 static struct
 {
@@ -2184,6 +2190,8 @@ scan_inputs (void)
       int tp = ax.maximum > 0 && ay.maximum > 0 && HAS (keys, BTN_TOOL_FINGER)
 	       && !HAS (keys, BTN_TOOL_PEN) && !HAS (props, INPUT_PROP_DIRECT);
       memset (&inputs[ninputs].tp, 0, sizeof inputs[ninputs].tp);
+      for (int k = 0; k < TP_SLOTS; k++)
+	inputs[ninputs].tp.f[k].id = -1;
       inputs[ninputs].touchpad = tp;
       if (tp)
 	{
@@ -2192,6 +2200,10 @@ scan_inputs (void)
 				     : ax.maximum / 100 > 0 ? ax.maximum / 100 : 1;
 	  inputs[ninputs].tp.res_y = ay.resolution > 0 ? ay.resolution
 				     : ay.maximum / 60 > 0 ? ay.maximum / 60 : 1;
+	  /* which slot the pad is on now: it only says when that changes */
+	  struct input_absinfo as;
+	  if (ioctl (fd, EVIOCGABS (ABS_MT_SLOT), &as) == 0 && as.value >= 0)
+	    inputs[ninputs].tp.slot = as.value;
 	}
       char nm[128] = "";
       ioctl (fd, EVIOCGNAME (sizeof nm), nm);
@@ -2325,25 +2337,57 @@ static void
 touchpad_report (struct touchpad *t, int *rel_dx, int *rel_dy, int *mx, int *my,
 		 int *moved, int w, int h)
 {
+  int dx = 0, dy = 0, sdx = 0, sdy = 0;
   if (!t->touching || !t->fingers)
     {
       t->have_last = 0;
-      return;
-    }
-  if (!t->have_last)
-    {
-      t->lx = t->x, t->ly = t->y, t->have_last = 1;
       t->sx = t->sy = 0;
+      for (int k = 0; k < TP_SLOTS; k++)
+	t->f[k].have = 0;
       return;
     }
-  int dx = t->x - t->lx, dy = t->y - t->ly;
-  t->lx = t->x, t->ly = t->y;
+  if (t->mt)
+    {
+      /* the finger that moved most moves the pointer; scrolling goes by
+	 the fingers' average */
+      int n = 0, best = -1;
+      for (int k = 0; k < TP_SLOTS; k++)
+	{
+	  if (t->f[k].id < 0)
+	    continue;
+	  if (!t->f[k].have)
+	    {
+	      t->f[k].lx = t->f[k].x, t->f[k].ly = t->f[k].y, t->f[k].have = 1;
+	      continue;
+	    }
+	  int fx = t->f[k].x - t->f[k].lx, fy = t->f[k].y - t->f[k].ly;
+	  t->f[k].lx = t->f[k].x, t->f[k].ly = t->f[k].y;
+	  sdx += fx, sdy += fy, n++;
+	  if (abs (fx) + abs (fy) > best)
+	    best = abs (fx) + abs (fy), dx = fx, dy = fy;
+	}
+      if (n > 1)
+	sdx /= n, sdy /= n;
+    }
+  else
+    {
+      if (!t->have_last)
+	{
+	  t->lx = t->x, t->ly = t->y, t->have_last = 1;
+	  t->sx = t->sy = 0;
+	  return;
+	}
+      dx = sdx = t->x - t->lx, dy = sdy = t->y - t->ly;
+      t->lx = t->x, t->ly = t->y;
+    }
   t->travel += abs (dx) + abs (dy);
   double mmx = (double) dx / t->res_x, mmy = (double) dy / t->res_y;
-  if (t->fingers >= 2)
+  /* two fingers scroll, unless the pad is held down: then it is a drag
+     (one finger holding, another moving), and the pointer moves */
+  if (t->fingers >= 2 && !t->pressed_bit)
     {
       /* scrolling: a notch every 4 mm */
-      t->sy += mmy, t->sx += mmx;
+      t->sy += (double) sdy / t->res_y, t->sx += (double) sdx / t->res_x;
       while (t->sy >= 4)
 	wheel_key (0x1F1, 1), t->sy -= 4;
       while (t->sy <= -4)
@@ -2550,10 +2594,22 @@ read_input (int i)
 	    }
 	  else if (e->type == EV_ABS && inputs[i].touchpad)
 	    {
+	      struct touchpad *t = &inputs[i].tp;
 	      if (e->code == ABS_X)
-		inputs[i].tp.x = e->value;
+		t->x = e->value;
 	      else if (e->code == ABS_Y)
-		inputs[i].tp.y = e->value;
+		t->y = e->value;
+	      else if (e->code == ABS_MT_SLOT)
+		t->slot = e->value;
+	      else if (t->slot >= 0 && t->slot < TP_SLOTS)
+		{
+		  if (e->code == ABS_MT_TRACKING_ID)
+		    t->f[t->slot].id = e->value, t->f[t->slot].have = 0, t->mt = 1;
+		  else if (e->code == ABS_MT_POSITION_X)
+		    t->f[t->slot].x = e->value;
+		  else if (e->code == ABS_MT_POSITION_Y)
+		    t->f[t->slot].y = e->value;
+		}
 	    }
 	  else if (e->type == EV_SYN && e->code == SYN_REPORT && inputs[i].touchpad)
 	    touchpad_report (&inputs[i].tp, &rel_dx, &rel_dy, &mx, &my, &moved, w, h);
