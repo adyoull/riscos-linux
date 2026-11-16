@@ -26,6 +26,10 @@ MAXD%=13 : ROOT%=MAXD%
 DIM blk% 1024, menu% 28+24*3, icon%(MAXD%), dname$(MAXD%), dpath$(MAXD%), ind%(MAXD%)
 FOR i%=0 TO MAXD% : DIM b% 80 : ind%(i%)=b% : icon%(i%)=-1 : NEXT
 list$="IXFS:$.riscos.mediactl.discs" : listed$="" : nextcheck%=0
+REM the FAT partition the machine starts from (kernels, config.txt, LOGS):
+REM Linux mounts it with the USB discs and names it in mediactl.bootdisc;
+REM it is shown as a hard disc, beside HardDisc4
+boot$=""
 ejecting$="" : ejectby%=0
 REM messages wanted (Quit always comes): DataSave, DataLoad
 DIM msgs% 12 : msgs%!0=1 : msgs%!4=3 : msgs%!8=0
@@ -66,7 +70,7 @@ $ind%(i%)=n$
 CASE i% OF
   WHEN 0 : $(ind%(i%)+32)="S"+spr$
   WHEN ROOT% : $(ind%(i%)+32)="Sdirectory"
-  OTHERWISE : $(ind%(i%)+32)="S"+usb$
+  OTHERWISE : IF n$=boot$ THEN $(ind%(i%)+32)="S"+spr$ ELSE $(ind%(i%)+32)="S"+usb$
 ENDCASE
 SYS "Wimp_TextOp",1,n$,0 TO w%
 IF w%<68 THEN w%=68
@@ -76,6 +80,7 @@ REM HardDisc4 with the hard discs (priority &60000000); IXFS:$ after
 REM Apps (&30000000), USB discs and cards after it, as PDFS's devices
 REM (each next one lower)
 IF i%=0 THEN p%=&60000000 ELSE IF i%=ROOT% THEN p%=&30000000 ELSE p%=&30000000-i%
+IF i%>0 AND i%<ROOT% AND n$=boot$ THEN p%=&5F000000
 SYS "Wimp_CreateIcon",p%,blk% TO icon%(i%)
 ENDPROC
 
@@ -103,6 +108,13 @@ IF (f% AND 1)=0 AND t%=1 THEN
       IF n$<>"" THEN l$+=n$+" "
     ENDWHILE
     CLOSE#f%
+  ENDIF
+ENDIF
+IF boot$="" THEN
+  SYS "XOS_File",17,"IXFS:$.riscos.mediactl.bootdisc" TO t%;f%
+  IF (f% AND 1)=0 AND t%=1 THEN
+    f%=OPENIN("IXFS:$.riscos.mediactl.bootdisc")
+    IF f% THEN boot$=GET$#f% : CLOSE#f%
   ENDIF
 ENDIF
 IF ejecting$<>"" THEN PROCejectcheck(l$)

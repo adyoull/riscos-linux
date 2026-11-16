@@ -8,6 +8,36 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The FAT partition from the desktop: the disc "Loader" (16 Nov 2026; riscos-support 1.0.0063-1, riscos-harddisc 1.0.0059-1)
+
+Asked on the ROOL forum: "is there an easy way to access the firmware
+partition from within RISC OS?" There wasn't: init mounts partition 1 of
+the disc Linux runs from only for a moment (the reset files at the
+start, the logs now and then and at the end). On a Pi running RISC OS
+itself it is in reach as !Boot.Loader.
+
+rol-usbd now mounts it as /riscos/media/Loader (vfat, RISC OS's user's,
+`flush`, as a USB FAT disc) and lists it in /riscos/mediactl/discs, so
+!DiscIcon gives it an icon with Open, Free and Eject like any other; its
+name is also written to /riscos/mediactl/bootdisc, and !DiscIcon shows
+that one as a hard disc beside HardDisc4 (priority &5F000000). The
+partition is found from the root's device (partition 1 of the same
+disc: mmcblk, sd, nvme, vd), and only FAT is tried. Linux gives a second
+mount of a mounted partition the first one's options, so if init's
+log-copying mount (root's) happens to be there the files come out
+root's: rol-usbd checks the mount point's owner, undoes the mount and
+tries again at the next look (up to 60). init's mounts and the kernel
+packages' install-boot-files share the mount and write as root as
+before; at the end init unmounts /riscos/media after its own, so the
+partition is still left clean.
+
+Tested (QEMU, generic image): the icon appears beside HardDisc4 and
+opens (the device trees, config.txt, EFI); `*Create` of a file there
+works and the file is on the partition afterwards; LOGS is still
+written at shutdown; fsck.fat finds the partition clean. Not tried on a
+Pi or the Dev Kit. A file saved there with a RISC OS type and no
+extension gets `,xxx` on its name, as on a USB FAT disc.
+
 ### Touchpads: hold with one finger, drag with another (16 Nov 2026; riscos-support 1.0.0062-1)
 
 Raik (Pinebook Pro): "With Touchpad hold Select and move a window etc.
