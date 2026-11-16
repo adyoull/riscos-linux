@@ -8,6 +8,35 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### RISC3D part of ROL: riscos-risc3d in the repository, recommended by riscos-support; RISC3D 0.04-7 staged (16 Nov 2026; riscos-support 1.0.0068-1, riscos-harddisc 1.0.0064-1)
+
+RISC3D's handoff (2026-11-16-risc3d-make-riscos-risc3d-part-of-rol.md,
+the owner: nobody on ROL should need apt-get install riscos-risc3d) and
+its staging requests 0.04-4 to 0.04-7. riscos-risc3d 0.22-1 (md5
+5ae4bd15..., the RISC3D project's) is in rolpkg's pool; riscos-support
+Recommends it (Depends would be a loop: riscos-risc3d depends on
+riscos-support and riscos-harddisc). apt installs a new Recommends on
+full-upgrade: simulated with apt from support 1.0.0067-1 and harddisc
+1.0.0063-1, the full upgrade installs riscos-risc3d. riscos-risc3d's own
+postinst sets apt-again, so rol-info's second pass reads trixie-backports
+and Mesa 25.2 comes in under its src:mesa pin.
+
+riscos-harddisc 1.0.0064-1 stages RISC3D 0.04-7 (RISC3D-0.04-7.zip, md5
+782b7426...: Linux3D 0.04, the icon, V3DRender 0.15, GPU.Licences and
+GPU.GPL-2; types from the zip's Acorn extra fields; Control 0.04-7,
+Files with the three new files, Copyright noting V3DRender's GPL).
+install-packman-packages gains "upgrade-from": when Status records a
+version listed there (RISC3D: 0.04-3, which 1.0.0058-1 installed), the
+package's files, record and Status version are updated in place. Without
+it riscos-risc3d 0.22-1's restore would add 0.04-7's three new files
+beside 0.04-3, unowned, and PackMan would refuse its own upgrade (files
+conflict). Tried on copies of HardDisc4: 0.04-3 recorded (updated; a
+second run does nothing), no record (installed), 0.04-8 recorded (left).
+The staged tree lives in the image root (img/rootg58), not a repository.
+Not tried: the whole update on a machine, Mesa from backports through
+Updates. Images: to be built with riscos-risc3d installed (owner: no
+image respins for now).
+
 ### PreDesk.TestBed never ran after a failing PreDesk file: !AArdvarkLoader (16 Nov 2026; riscos-harddisc 1.0.0063-1)
 
 George Greenfield (Pi 4B, FileCore SSD on USB): no drive icon on 5.31-30,
