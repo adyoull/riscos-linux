@@ -8,6 +8,32 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### PreDesk.TestBed never ran after a failing PreDesk file: AArdvarkLoader (16 Nov 2026; riscos-harddisc 1.0.0062-1)
+
+George Greenfield (Pi 4B, FileCore SSD on USB): no drive icon on 5.31-30,
+fine on 5.31-29. His logs: Linux gives the disc to RISC OS (rol-usbd:
+"given to RISC OS (SCSIFS)"); RISC OS's PreDesk run reads ARPlayer,
+DALimit, DiscSetup, SetUpNet, then "Repeat: Syntax:*IfThere <file> then
+<command> else <command>", then Configure. No TestBed: SCSILinux and the
+rest never loaded. Repeat (BootCmds c/repeatcmd) stops at the first
+command that errors unless given -continue; 5.31-30's IXFS gives names
+sorted, so TestBed is after SetUpNet (up to -29: ext4's hash order, and
+TestBed happened to be earlier). The owner: "can we add an
+AArdvarkLoader? that loads before everything to load testbed?"
+
+riscos-harddisc's postinst moves Choices/Boot/PreDesk/TestBed to
+Choices/Boot/TestBed (with what users and earlier updates added) and
+writes PreDesk/AArdvarkLoader,feb: "IfThere Choices:Boot.TestBed Then
+Obey Choices:Boot.TestBed". Moved, not run from where it was: left in
+PreDesk it would run twice (the sound modules re-initialised twice).
+Its later additions go to the new place. Tried under QEMU: a PreDesk
+SetUpNet with "IfThere Nowhere:Nothing" gives George's log and no NVMe
+disc icon; with the postinst's step applied, AArdvarkLoader runs first
+and the icon is there. To do at the next image build: the image's own
+start-up files (stage/root has PreDesk/TestBed; the postinst moves it
+when the package is configured). Not known: what is in George's
+SetUpNet (asked).
+
 ### A start-up stall: the timer signal left blocked after a trap; NVMe power saving off on a Pi 5 (16 Nov 2026; NativeSupport 0.49, riscos-support 1.0.0067-1)
 
 About one start in 25 under QEMU stopped with the hourglass, in
@@ -39,8 +65,10 @@ it has changed by the time they return, set the frame's uc_sigmask to
 match (sigmask_settle; both directions, counted, shown by
 *NativeSupport). With a build that also wrote a line each time: 60
 starts, 8 corrections (all in PreDesk.TestBed), no stalls. Not
-explained: 8 in 60 is more often than the stall was seen (2 in 57), so
-before 0.49 most such starts must have recovered; how isn't known. Not
+explained at first: 8 in 60 is more often than the stall was seen (2 in
+57). A second run of 0.48 with a 0.1 s watcher: 16 starts, 2 with the
+signals blocked and a tick held, both stalls, none that recovered. So
+the rate varies with timing and there is no recovery. Not
 changed: the HAL (a ROM change; __PVirt_WFI could refuse to sleep with
 the signals blocked and nothing pending, as a second defence).
 
