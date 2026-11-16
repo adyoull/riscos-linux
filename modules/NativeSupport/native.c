@@ -163,7 +163,7 @@ static struct
   unsigned da_low, da_high, da_over;
   int tchk_ok;
   unsigned patched, patched_rom, patched_sync, syncs, full_syncs, flush_sites, stubbed, full, probe_faults, emul_aborts, in_full, imb_full, emul_psr, emul_priv, getdents, mem0, mem24,
-    pmp_swis, ioc, aborts, kpmp_ops, reports, sync_jit, aeabi105;
+    pmp_swis, ioc, aborts, kpmp_ops, reports, sync_jit, aeabi105, mask_freed, mask_blocked;
 } ns;
 
 

@@ -881,6 +881,8 @@ mod_command (int index, const char *tail, int argc)
   line_out ("Instructions patched in new code: ", ns.patched_sync);
   line_out ("Code synchronisations: ", ns.syncs);
   line_out ("Whole-cache synchronisations (RMA scanned): ", ns.full_syncs);
+  line_out ("Interrupt signals unblocked after a trap (a start-up hang before 0.49): ", ns.mask_freed);
+  line_out ("Interrupt signals kept blocked after a trap: ", ns.mask_blocked);
   line_out ("MRS done without a signal (sites): ", ns.stubbed);
   line_out ("PSR instructions done: ", ns.emul_psr);
   line_out ("Other privileged instructions done: ", ns.emul_priv);

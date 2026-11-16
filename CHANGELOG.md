@@ -3,10 +3,53 @@
 ## Since images 1.0.0020 (9 to 14 November 2026; through Updates)
 
 RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
-0.48, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
+0.49, RiSH (the RISC Shell, `apps/RiSH`), interactive `*Linux` and
 `*IXRun`, the Pi kernel's fan driver and the Pi's headphone socket.
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
+
+### A start-up stall: the timer signal left blocked after a trap; NVMe power saving off on a Pi 5 (16 Nov 2026; NativeSupport 0.49, riscos-support 1.0.0067-1)
+
+About one start in 25 under QEMU stopped with the hourglass, in
+PreDesk.TestBed or as the desktop started, RISC OS's thread asleep in
+epoll_pwait with no timeout. Three were seen before any log was kept
+(the owner: "you should have saved the logs"). Caught with a watcher in
+the test image (the init wrapped by a script that samples
+/proc/PID/task/*/status and syscall, each start's serial log kept): 57
+starts, 2 stalls. In both the thread had the port's interrupt signals
+blocked (SigBlk ffffffffbffbfa15) with the timer's signal (40) held by
+Linux (ShdPnd bit 39), and vcpu->irq_pending 0, a state the HAL's own
+code doesn't make: it keeps those signals blocked exactly while an
+interrupt waits (irq_signal_handler leaves them blocked; HAL_IRQClear
+unblocks). The stack: BASIC (TestBed.NVMe's Wait) in a SWI, the kernel
+in Portable_Idle, __PVirt_WFI.
+
+Cause: NativeSupport's SIGILL handler. OS_SynchroniseCodeAreas's cache
+flush (a trap site; every module load and program start) is made with
+interrupts off, so a tick that arrived just before is waiting and the
+signals are blocked: that mask is saved in the trap's frame. The handler
+runs RISC OS SWIs (sync_patch: OS_Module, OS_ChangeEnvironment;
+da_place), the SWIs take the waiting interrupt, HAL_IRQClear unblocks
+the signals, and the handler's sigreturn puts the saved mask back:
+blocked, nothing waiting. No timer signal again; RISC OS runs on without
+ticks and sleeps for good when it next idles.
+
+0.49: ill_handler and fault_handler note irq_pending on entry, and when
+it has changed by the time they return, set the frame's uc_sigmask to
+match (sigmask_settle; both directions, counted, shown by
+*NativeSupport). With a build that also wrote a line each time: 60
+starts, 8 corrections (all in PreDesk.TestBed), no stalls. Not
+explained: 8 in 60 is more often than the stall was seen (2 in 57), so
+before 0.49 most such starts must have recovered; how isn't known. Not
+changed: the HAL (a ROM change; __PVirt_WFI could refuse to sleep with
+the signals blocked and nothing pending, as a second defence).
+
+riscos-support 1.0.0067-1's postinst also adds
+"nvme_core.default_ps_max_latency_us=0 pcie_aspm=off" to cmdline.txt on
+a Pi 5, 500 or CM5 (/proc/device-tree/model), once, keeping
+cmdline.txt.old: andym's Argon ONE UP lost its NVMe drive when idle
+(battery icon gone, "Disc Error") and ran for hours with them. Tried on
+a copy of the file only (this container can't mount FAT).
 
 ### NVMe drives through NVMeFS, as on RISC OS itself; 4K sectors (16 Nov 2026; riscos-support 1.0.0066-1, riscos-harddisc 1.0.0061-1)
 

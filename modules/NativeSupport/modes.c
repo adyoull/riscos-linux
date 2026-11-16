@@ -231,11 +231,63 @@ abort_instead (unsigned w, unsigned faults_before, void *si, void *uc)
   return 1;
 }
 
+/* (0.49) The signal mask a handler returns with. The port keeps the
+   interrupt signals (its timer's, SIGIO, SIGUSR1/2) blocked exactly while
+   the vcpu has an interrupt waiting to be taken: its interrupt handler
+   leaves them blocked, HAL_IRQClear unblocks them. A handler here may run
+   RISC OS SWIs (a synchronisation's sync_patch, da_place), and those can
+   take the waiting interrupt: HAL_IRQClear unblocks the signals, and then
+   this handler's sigreturn put back the mask saved when the trap was
+   taken - blocked, with nothing waiting any more. No timer signal came
+   again: no ticks, and RISC OS slept for ever the next time it was idle
+   (an hourglass at start-up, about one start in 25 under QEMU with
+   NativeSupport, in PreDesk as modules load or as a program starts: the
+   trap is OS_SynchroniseCodeAreas's cache flush, made with interrupts
+   off, so a tick that arrived just before it is still waiting). The other
+   way round (an interrupt that arrived during the SWIs, the saved mask
+   unblocked) only let a second interrupt replace the first. So: when the
+   vcpu's waiting interrupt changed while the handler ran, the mask it
+   returns with is made to match. */
+#define UC_SIGMASK(uc)	((unsigned *) ((char *) (uc) + 104))
+#define VCPU_IRQ_PENDING 12
+#define ASYNC_LO	0xbffffb15u	/* all but SIGINT, ILL, ABRT, BUS, FPE, SEGV, SYS */
+static unsigned
+irq_waiting (void)
+{
+  unsigned v = get_tls ();
+  return v ? *(volatile uint8_t *) (v + VCPU_IRQ_PENDING) : 0;
+}
+
+static void
+sigmask_settle (void *uc, unsigned waiting_before)
+{
+  unsigned waiting = irq_waiting ();
+  if (!waiting == !waiting_before)
+    return;
+  unsigned *m = UC_SIGMASK (uc);
+  if (waiting)
+    {
+      m[0] |= ASYNC_LO;
+      m[1] = ~0u;
+      ns.mask_blocked++;
+    }
+  else
+    {
+      m[0] &= ~ASYNC_LO;
+      m[1] = 0;
+      ns.mask_freed++;
+#ifdef NS_MASK_TRACE
+      lsys (4, 2, (unsigned) "NS: signal mask freed\n", 22, 0, 0, 0);
+#endif
+    }
+}
+
 /* The signal handlers: the event kept, the check, then the work */
 static void
 ill_handler (int sig, void *si, void *uc)
 {
   unsigned *R = UC_REGS (uc);
+  unsigned waiting = irq_waiting ();
   struct ev *e = &evs[evn++ % EV_N];
   e->sig = sig;
   e->pc = R[15];
@@ -259,12 +311,14 @@ ill_handler (int sig, void *si, void *uc)
   e->vm1 = vmode_now ();
   e->sp1 = R[13];
   spsr_t_check (e);
+  sigmask_settle (uc, waiting);
 }
 
 static void
 fault_handler (int sig, void *si, void *uc)
 {
   unsigned *R = UC_REGS (uc);
+  unsigned waiting = irq_waiting ();
   struct ev *e = &evs[evn++ % EV_N];
   e->sig = sig;
   e->pc = R[15];
@@ -288,6 +342,7 @@ fault_handler (int sig, void *si, void *uc)
   e->vm1 = vmode_now ();
   e->sp1 = R[13];
   spsr_t_check (e);
+  sigmask_settle (uc, waiting);
 }
 
 static void
