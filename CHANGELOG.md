@@ -8,6 +8,36 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The Dev Kit's GPU firmware: firmware-qcom-soc, two files kept (16 Nov 2026; riscos-kernel-wdk2023 7.2.0-7.1, riscos-support 1.0.0069-1)
+
+The owner asked about GPU drivers in the Pinebook and Dev Kit kernels.
+They are already built in (7.2.0-7): lima (Pinebook, Mali-400), panfrost
+with devfreq (Pinebook Pro, Mali-T860), msm (Dev Kit, Adreno 690); the
+Pinebook dtbs have the GPU on (A64 mali has no status line; the
+Pinebook Pro's &gpu is okay). Debian's Mesa has panfrost, lima and
+freedreno, and rol-3d opens /dev/dri card and render nodes generically,
+so with riscos-risc3d (support 1.0.0068-1) they may draw already:
+untested. The Dev Kit lacked a660_sqe.fw and a660_gmu.bin. Debian has
+them only in firmware-qcom-soc (20250410-2: 92.5 MB, 305 MB installed,
+224 entries; firmware-qcom-media is video only); postmarketOS's
+firmware-qcom-adreno-a660 is not Debian's. The owner: do it with dpkg's
+path-exclude.
+
+riscos-support's /usr/lib/riscos/qcom-gpu-firmware (run by its postinst
+and riscos-kernel-wdk2023's): only where /proc/device-tree/compatible
+has microsoft,blackrock; writes /etc/dpkg/dpkg.cfg.d/riscos-qcom-firmware
+(path-exclude /usr/lib/firmware/qcom/*, path-include the two files) and
+deletes the package's other files already unpacked (from dpkg-query -L,
+so init's zap shader in qcom/sc8280xp/microsoft/blackrock, which no
+package owns, is kept), then empty directories. No installed firmware
+package of the images has files in qcom/ (checked the wdk root's dpkg
+lists). riscos-kernel-wdk2023 7.2.0-7.1: 7.2.0-7's files unchanged
+(7.2.0-rol7: a repackage, hence .1), Depends riscos-support (>=
+1.0.0069-1), firmware-qcom-soc. Tested with dpkg on a scratch root: 187
+files removed, two kept, zap untouched, second run silent; a non-Dev-Kit
+compatible does nothing; dpkg -i with the same exclusions unpacks only
+the two (124K). apt simulation: the upgrade takes both.
+
 ### RISC3D part of ROL: riscos-risc3d in the repository, recommended by riscos-support; RISC3D 0.04-7 staged (16 Nov 2026; riscos-support 1.0.0068-1, riscos-harddisc 1.0.0064-1)
 
 RISC3D's handoff (2026-11-16-risc3d-make-riscos-risc3d-part-of-rol.md,
