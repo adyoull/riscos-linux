@@ -8,7 +8,7 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### The FAT partition as !Boot.Loader (16 Nov 2026; riscos-support 1.0.0064-1)
+### The FAT partition as !Boot.Loader (16 Nov 2026; riscos-support 1.0.0065-1)
 
 Asked on the ROOL forum: "is there an easy way to access the firmware
 partition from within RISC OS?" There wasn't: init mounts partition 1 of
@@ -47,6 +47,16 @@ bytes were in HardDisc4's copy after shutdown; LOGS still written;
 fsck.fat finds the partition clean. Not tried on a Pi or the Dev Kit,
 nor a kernel update end to end. A file saved there with a RISC OS type
 and no extension gets `,xxx` on its name, as on a USB FAT disc.
+
+CMOS.bak (1.0.0065-1; 1.0.0064-1, without it, wasn't published): the
+owner asked for a backup, to protect the CMOS over the move. When init
+first puts HardDisc4's CMOS on the partition it also writes it there as
+CMOS.bak, if there is none; and riscos-support's postinst copies
+!Boot/Loader/CMOS to CMOS.bak at every update (whichever directory is
+there at the time: HardDisc4's before the first restart, the
+partition's after). Tested: CMOS removed from the partition, started,
+shut down: CMOS and CMOS.bak there, identical to HardDisc4's; the
+postinst lines run against a copy.
 
 ### Touchpads: hold with one finger, drag with another (16 Nov 2026; riscos-support 1.0.0062-1)
 

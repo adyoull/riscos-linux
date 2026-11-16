@@ -1213,7 +1213,7 @@ loader_read_cmos (void)
 }
 
 static void
-loader_write_cmos (ssize_t n)
+loader_write (const char *to, ssize_t n)
 {
   int fd = open (LOADER "/CMOS.new", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
   if (fd < 0)
@@ -1223,9 +1223,15 @@ loader_write_cmos (ssize_t n)
   fsync (fd);
   close (fd);
   if (ok)
-    rename (LOADER "/CMOS.new", LOADER "/CMOS");
+    rename (LOADER "/CMOS.new", to);
   else
     unlink (LOADER "/CMOS.new");
+}
+
+static void
+loader_write_cmos (ssize_t n)
+{
+  loader_write (LOADER "/CMOS", n);
 }
 
 static void
@@ -1243,8 +1249,15 @@ loader_mount (void)
       return;
     }
   loader_mounted = 1;
+  /* the first time: HardDisc4's settings go to the partition, and stay
+     there as CMOS.bak too (the settings as they were before the move;
+     riscos-support's updates keep CMOS.bak current after that) */
   if (have > 0 && access (LOADER "/CMOS", F_OK))
-    loader_write_cmos (have);
+    {
+      loader_write_cmos (have);
+      if (access (LOADER "/CMOS.bak", F_OK))
+	loader_write (LOADER "/CMOS.bak", have);
+    }
 }
 
 /* at the end: the partition's CMOS, while it is still mounted... */
