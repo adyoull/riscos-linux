@@ -8,6 +8,23 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### rol-modd: the Huawei switch message corrected, sent as usb_modeswitch sends it (17 Nov 2026; riscos-support 1.0.0071-1)
+
+The owner: "look at how armbian treats that USB modem". Armbian (like
+Debian/Ubuntu) has usb-modeswitch + usb-modeswitch-data: udev rule
+40-usb_modeswitch.rules runs usb_modeswitch for any 12d1 device's
+interface 00 of class 08 (ATTR{bInterfaceNumber}=="00"), and
+usb_modeswitch.d/12d1:1f01 ("Huawei E353 (3.se) and others",
+TargetProductList 14db,14dc) says HuaweiNewMode=1: usb_modeswitch.c sends
+"55534243123456780000000000000011062000000101000100000000000000" to the
+bulk OUT endpoint, reads the 13-byte CSW from bulk IN, clears both
+endpoints, releases the interface. rol-modd's message (since 1.0.0055-1)
+had a stray 0: "...11 06 20 00 00 00 01 01 00 01..." against "...11 06
+20 00 00 01 01 00 01...": the stick accepted the transfer and ignored
+it. Fixed (checked byte for byte against the string), plus the CSW read
+and CLEAR_HALTs. Sources: salsa.debian.org debian/usb-modeswitch and
+usb-modeswitch-data (2026-05-01). 1.0.0070-1 (below) never published.
+
 ### rol-modd: a Huawei stick asked once, through interface 0 (17 Nov 2026; riscos-support 1.0.0070-1)
 
 Raik's logs: "rol-modd: Huawei stick at USB 7/3: asked to switch to its

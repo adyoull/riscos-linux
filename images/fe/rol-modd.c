@@ -384,7 +384,7 @@ huawei (const char *sys)
   /* only mass storage interfaces on the device? */
   DIR *d = opendir (dev);
   struct dirent *e;
-  int other = 0, out_ep = -1;
+  int other = 0, out_ep = -1, in_ep = -1;
   while (d && (e = readdir (d)))
     if (strchr (e->d_name, ':'))
       {
@@ -406,6 +406,8 @@ huawei (const char *sys)
         long addr = read_hex (p, "bEndpointAddress"), attr = read_hex (p, "bmAttributes");
         if (addr >= 0 && !(addr & 0x80) && (attr & 3) == 2)
           out_ep = (int) addr;
+        else if (addr >= 0 && (addr & 0x80) && (attr & 3) == 2)
+          in_ep = (int) addr;
       }
   if (d)
     closedir (d);
@@ -432,16 +434,33 @@ huawei (const char *sys)
       say ("Huawei stick: %s: %s", node, strerror (errno));
       return;
     }
-  /* Huawei's "new mode" message, as usb_modeswitch sends it */
+  /* Huawei's "new mode" message, as usb_modeswitch sends it (its
+     HuaweiNewMode: "55534243123456780000000000000011062000000101000100000000000000",
+     the switch usb-modeswitch-data gives these sticks). Up to 1.0.0070-1
+     the command had a 0 too many after "06 20 00 00", which the sticks
+     took without error and ignored. */
   static unsigned char msg[31] = {
     0x55, 0x53, 0x42, 0x43, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0, 0, 0, 0x11,
-    0x06, 0x20, 0, 0, 0, 0x01, 0x01, 0, 0x01, 0, 0, 0, 0, 0, 0 };
+    0x06, 0x20, 0, 0, 0x01, 0x01, 0, 0x01, 0, 0, 0, 0, 0, 0, 0 };
   struct usbdevfs_ioctl dis = { .ifno = ifnum, .ioctl_code = USBDEVFS_DISCONNECT };
   ioctl (fd, USBDEVFS_IOCTL, &dis);
   unsigned int i = ifnum;
   ioctl (fd, USBDEVFS_CLAIMINTERFACE, &i);
   struct usbdevfs_bulktransfer bt = { .ep = out_ep, .len = sizeof msg, .timeout = 2000, .data = msg };
   int r = ioctl (fd, USBDEVFS_BULK, &bt);
+  /* then read its status (the 13-byte CSW) and clear both endpoints, as
+     usb_modeswitch does; errors there don't matter (a stick that has
+     already gone away gives them) */
+  if (r >= 0 && in_ep >= 0)
+    {
+      unsigned char csw[13];
+      struct usbdevfs_bulktransfer rd = { .ep = in_ep, .len = sizeof csw, .timeout = 1000, .data = csw };
+      ioctl (fd, USBDEVFS_BULK, &rd);
+      unsigned int ep = in_ep;
+      ioctl (fd, USBDEVFS_CLEAR_HALT, &ep);
+      ep = out_ep;
+      ioctl (fd, USBDEVFS_CLEAR_HALT, &ep);
+    }
   say ("Huawei stick at USB %ld/%ld: asked to switch to its network mode%s%s", bus, num,
        r < 0 ? ": " : "", r < 0 ? strerror (errno) : "");
   ioctl (fd, USBDEVFS_RELEASEINTERFACE, &i);
