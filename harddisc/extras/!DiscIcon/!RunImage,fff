@@ -1,8 +1,11 @@
 REM >!RunImage
 REM DiscIcon: puts HardDisc4 on the icon bar as a hard disc (like ADFS's
 REM or SCSI's drive icons) instead of Pinboard's folder: Select or Adjust
-REM opens it, Menu offers Open '$' and Free. No Dismount: HardDisc4 is the
-REM disc RISC OS runs from (its !Boot), so it can't be taken away.
+REM opens it, Menu offers Open '$', Free and Close windows (every window
+REM on the IXFS disc, ROL, which HardDisc4 is on, as a disc's Dismount
+REM closes them on RISC OS itself; other discs' windows stay). No
+REM Dismount: HardDisc4 is the disc RISC OS runs from (its !Boot), so it
+REM can't be taken away.
 REM USB discs and SD cards (Linux mounts them in IXFS:$.riscos.media, and
 REM lists them in IXFS:$.riscos.mediactl.discs) get an icon each while
 REM they're there, with Open '$', Free and Eject (which asks Linux to
@@ -25,6 +28,7 @@ fs%=0 : ws%=0
 ON ERROR PROCderegister : ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
 MAXD%=13 : ROOT%=MAXD%
 DIM blk% 1024, menu% 28+24*3, icon%(MAXD%), dname$(MAXD%), dpath$(MAXD%), ind%(MAXD%)
+DIM itemtext% 32 : REM a menu item's text longer than 11 characters
 FOR i%=0 TO MAXD% : DIM b% 80 : ind%(i%)=b% : icon%(i%)=-1 : NEXT
 list$="IXFS:$.riscos.mediactl.discs" : listed$="" : nextcheck%=0
 ejecting$="" : ejectby%=0
@@ -251,16 +255,22 @@ $menu%=dname$(d%)
 menu%?12=7 : menu%?13=2 : menu%?14=7 : menu%?15=0
 menu%!16=200 : menu%!20=44 : menu%!24=0
 i%=menu%+28 : PROCitem(i%,0,"Open '$'")
-IF d%=ROOT% OR d%=0 THEN
+IF d%=ROOT% THEN
   i%+=24 : PROCitem(i%,&80,"Free")
 ELSE
   i%+=24 : PROCitem(i%,0,"Free")
-  i%+=24 : PROCitem(i%,&80,"Eject")
+  i%+=24 : IF d%=0 THEN PROCitem(i%,&80,"Close windows") ELSE PROCitem(i%,&80,"Eject")
 ENDIF
 ENDPROC
 
 DEF PROCitem(i%,f%,t$)
-i%!0=f% : i%!4=-1 : i%!8=&07000021 : $(i%+12)=t$
+i%!0=f% : i%!4=-1 : i%!8=&07000021
+REM a menu item holds 12 characters; a longer text is indirected
+IF LEN(t$)>11 THEN
+  $itemtext%=t$ : i%!8=&07000121 : i%!12=itemtext% : i%!16=-1 : i%!20=LEN(t$)+1
+ELSE
+  $(i%+12)=t$
+ENDIF
 ENDPROC
 
 DEF PROCclick
@@ -282,17 +292,34 @@ CASE c% OF
   WHEN 0 : OSCLI "Filer_OpenDir "+dpath$(menudisc%)
   WHEN 1 : PROCfree(menudisc%)
   WHEN 2 :
-    REM (HardDisc4 and IXFS:$ have no third item)
-    IF menudisc%=ROOT% OR menudisc%=0 THEN ENDPROC
-    REM ask Linux to unmount it: the icon goes when it has
-    OSCLI "Filer_CloseDir "+dpath$(menudisc%)
-    PROCdropdir
-    f%=OPENOUT("IXFS:$.riscos.mediactl.eject-"+dname$(menudisc%))
-    IF f% THEN CLOSE#f%
-    ejecting$=dname$(menudisc%) : SYS "OS_ReadMonotonicTime" TO ejectby% : ejectby%+=1000
-    nextcheck%=0
+    IF menudisc%=ROOT% THEN ENDPROC
+    IF menudisc%=0 THEN
+      REM every window on the IXFS disc (HardDisc4, IXFS:$ and what is in
+      REM it), as a disc's Dismount does; other discs' windows stay
+      PROCclosedirs(ROOT%)
+    ELSE
+      REM ask Linux to unmount it: the icon goes when it has
+      OSCLI "Filer_CloseDir "+dpath$(menudisc%)
+      PROCdropdir
+      f%=OPENOUT("IXFS:$.riscos.mediactl.eject-"+dname$(menudisc%))
+      IF f% THEN CLOSE#f%
+      ejecting$=dname$(menudisc%) : SYS "OS_ReadMonotonicTime" TO ejectby% : ejectby%+=1000
+      nextcheck%=0
+    ENDIF
 ENDCASE
 IF blk%!8=1 AND dname$(menudisc%)<>"" THEN SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
+ENDPROC
+
+REM a disc's directory windows closed, by the name they were opened with
+REM and by its full name (IXFS::ROL.$...), which the Filer shows
+DEF PROCclosedirs(d%)
+LOCAL c%,n%
+SYS "XOS_CLI","Filer_CloseDir "+dpath$(d%)
+SYS "XOS_FSControl",37,dpath$(d%),blk%+512,0,0,256 TO ;n%
+IF (n% AND 1)=0 THEN
+  c%=blk%+512 : WHILE ?c%>=32 : c%+=1 : ENDWHILE : ?c%=13
+  SYS "XOS_CLI","Filer_CloseDir "+$(blk%+512)
+ENDIF
 ENDPROC
 
 REM --- the Free window --------------------------------------------------

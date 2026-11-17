@@ -8,6 +8,15 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Close windows on HardDisc4's menu (17 Nov 2026; riscos-harddisc 1.0.0070-1)
+
+The owner: add Ralph's window-clearing back, as a menu item, for the IXFS
+disc's windows only. !DiscIcon: HardDisc4's menu is Open '$', Free,
+Close windows; PROCclosedirs(ROOT%): Filer_CloseDir IXFS:$ and its
+canonical name IXFS::ROL.$ (OS_FSControl 37), each closing the
+subdirectories' windows too, so HardDisc4, IXFS:$.riscos and USB media
+windows (they're inside IXFS) go; SCSI::, RAM:, Resources: stay.
+
 ### No Dismount on HardDisc4 (17 Nov 2026; riscos-harddisc 1.0.0069-1)
 
 Ralph (forum): HardDisc4's icon bar Dismount removed the icon (!DiscIcon
