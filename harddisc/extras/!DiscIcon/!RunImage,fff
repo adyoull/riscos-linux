@@ -1,7 +1,9 @@
 REM >!RunImage
 REM DiscIcon: puts HardDisc4 on the icon bar as a hard disc (like ADFS's
 REM or SCSI's drive icons) instead of Pinboard's folder: Select or Adjust
-REM opens it, Menu offers Open '$', Free and Dismount (removes the icon).
+REM opens it, Menu offers Open '$', Free and Dismount, which closes its
+REM directory windows, as a disc filer's Dismount does (HardDisc4 stays:
+REM it is RISC OS's own disc, and the icon stays as a native drive's does).
 REM USB discs and SD cards (Linux mounts them in IXFS:$.riscos.media, and
 REM lists them in IXFS:$.riscos.mediactl.discs) get an icon each while
 REM they're there, with Open '$', Free and Eject (which asks Linux to
@@ -282,16 +284,31 @@ CASE c% OF
   WHEN 1 : PROCfree(menudisc%)
   WHEN 2 :
     IF menudisc%=ROOT% THEN ENDPROC
-    IF menudisc%=0 THEN quit%=TRUE : ENDPROC
-    REM ask Linux to unmount it: the icon goes when it has
-    OSCLI "Filer_CloseDir "+dpath$(menudisc%)
-    PROCdropdir
-    f%=OPENOUT("IXFS:$.riscos.mediactl.eject-"+dname$(menudisc%))
-    IF f% THEN CLOSE#f%
-    ejecting$=dname$(menudisc%) : SYS "OS_ReadMonotonicTime" TO ejectby% : ejectby%+=1000
-    nextcheck%=0
+    IF menudisc%=0 THEN
+      PROCclosedirs(0)
+    ELSE
+      REM ask Linux to unmount it: the icon goes when it has
+      OSCLI "Filer_CloseDir "+dpath$(menudisc%)
+      PROCdropdir
+      f%=OPENOUT("IXFS:$.riscos.mediactl.eject-"+dname$(menudisc%))
+      IF f% THEN CLOSE#f%
+      ejecting$=dname$(menudisc%) : SYS "OS_ReadMonotonicTime" TO ejectby% : ejectby%+=1000
+      nextcheck%=0
+    ENDIF
 ENDCASE
 IF blk%!8=1 AND dname$(menudisc%)<>"" THEN SYS "Wimp_CreateMenu",,menu%,blk%!0-64,96+44*3
+ENDPROC
+
+REM a disc's directory windows closed, by the name they were opened with
+REM and by its full name (IXFS::ROL.$...), which the Filer shows
+DEF PROCclosedirs(d%)
+LOCAL c%,n%
+SYS "XOS_CLI","Filer_CloseDir "+dpath$(d%)
+SYS "XOS_FSControl",37,dpath$(d%),blk%+512,0,0,256 TO ;n%
+IF (n% AND 1)=0 THEN
+  c%=blk%+512 : WHILE ?c%>=32 : c%+=1 : ENDWHILE : ?c%=13
+  SYS "XOS_CLI","Filer_CloseDir "+$(blk%+512)
+ENDIF
 ENDPROC
 
 REM --- the Free window --------------------------------------------------
