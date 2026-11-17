@@ -8,6 +8,24 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### RISC OS Open's Iconv in place of the lite one (17 Nov 2026; riscos-harddisc 1.0.0068-1)
+
+The owner's Pi 4: RiscOSM 2.36 "Bad memory access" at start-up, its
+ErrorLog showing iconv_open() having returned -1 and RiscOSM passing that
+to iconv() (in OvList_Initialise > Convert) and later iconv_close(). The
+images had this test bed's modules/Iconv ("0.90 lite", from October) in
+HardDisc4's !System.310.Modules, where RISC OS Open's distribution keeps
+Iconv, and 0.91 in TestBed.Modules (used only by rol-run). With no Iconv
+in !System.500.Modules ahead of it, UnixLib's "RMEnsure Iconv 0.04 RMLoad
+System:Modules.Iconv" got the lite one. Reproduced under QEMU (500's
+Iconv moved away: "SORRY! A serious internal error (5)"). riscos-rolpkg's
+place-iconv (run by the postinst) puts RISC OS Open's Iconv 0.12 (taken
+from !System.500.Modules at build time; build.sh refuses a lite one)
+over every lite copy in !System, adds it to 310 if there's none, removes
+the lite TestBed copy and any start-up line loading it. After it RiscOSM
+started normally. The image roots (generic, Dev Kit) were fixed the same
+way. modules/Iconv stays for rol-run.
+
 ### ROL$VideoCore: the VideoCore stand-ins only on a Pi 3 or 4 (17 Nov 2026; riscos-support 1.0.0072-1, riscos-harddisc 1.0.0067-1)
 
 The owner's Pi 4 decodes H.264 in hardware under ROL (Reel, Matinee,
