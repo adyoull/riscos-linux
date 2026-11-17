@@ -8,6 +8,24 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The pointer as a VM display's cursor (17 Nov 2026; riscos-support 1.0.0073-1)
+
+UTM report (Mac mini, M-series): the pointer jerky, sometimes markedly.
+rol-fb drew RISC OS's pointer into the picture at its 25 Hz redraw (and
+hid the display's cursor); under UTM RISC OS is emulated (no AArch32),
+so redraws lag further. rol-fb: on a virtio_gpu display (DRM_IOCTL_VERSION
+name) the pointer goes to the display's cursor: hwcur_shape() builds a
+64x64 ARGB image of ptr_shape/ptr_pal at the pointer scale (ps <= 2, else
+the software pointer) into one of two dumb buffers in turn, with the
+active point as hot spot (DRM_IOCTL_MODE_CURSOR2); an unchanged image is
+only moved. hwcur_update() runs after every input read and moves the
+cursor at once (top left plus hot spot, as the kernel's virtio-gpu
+passes it to the host). out_rect() leaves the software pointer out and
+redraw() ignores pointer moves while it's on. QEMU (-trace
+virtio_gpu_update_cursor): tablet moves to 200,200 ... 47,766 gave one
+MOVE each, immediately; idle desktop, no traffic; the hourglass's frames
+are each an update. Not tried in UTM.
+
 ### Close windows on HardDisc4's menu (17 Nov 2026; riscos-harddisc 1.0.0070-1)
 
 The owner: add Ralph's window-clearing back, as a menu item, for the IXFS

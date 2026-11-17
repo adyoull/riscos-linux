@@ -110,6 +110,17 @@ static int ptr_h, ptr_ax, ptr_ay, ptr_changed;
 /* the pointer's scale: the desktop's, in whole multiples (a 1920 x 1080
    desktop on a 4K monitor is shown twice the size, so is the pointer) */
 static int ps = 1;
+/* A VM's display (virtio-gpu: UTM, QEMU): RISC OS's pointer goes to the
+   display's own cursor, which the host draws over the picture as fast as
+   its own pointer, wherever the tablet puts it, instead of being drawn
+   into the picture at the next frame (at most 25 a second, behind an
+   emulated RISC OS: jerky, UTM on an Apple Silicon Mac). Up to 64 x 64
+   pixels, so at most twice the size; larger (a desktop scaled 3 times or
+   more), or on real hardware, the pointer is drawn into the picture. */
+static int hwcur_ok;		/* the display is a VM's (virtio_gpu) */
+static int hwcur_on;		/* the pointer is the display's cursor now */
+static int hwcur_dirty = 1;	/* its shape, colours or scale changed */
+static int hwcur_x = -99999, hwcur_y = -99999;	/* where it was put */
 static uint32_t start_addr, active_addr;
 static int have_start, have_active;
 static int pcmouse, realmonitor;
@@ -361,6 +372,108 @@ drm_hide_cursor (void)
     fprintf (stderr, "rol-fb: no hardware cursor to hide (%s)\n", strerror (errno));
 }
 
+/* The pointer as the display's cursor (hwcur_ok): its shape into one of
+   two 64 x 64 ARGB buffers (in turn, so that the host is sent each new
+   one), its active point as the cursor's hot spot. Returns 0 if the
+   cursor can't show it (then the pointer is drawn into the picture). */
+static int
+hwcur_shape (void)
+{
+  static uint32_t handle[2];
+  static uint32_t *map[2];
+  static int cur;
+  static uint32_t last[64 * 64];
+  static int last_hx = -1, last_hy = -1;
+  uint32_t img[64 * 64];
+  if (ps > 2)
+    return 0;
+  memset (img, 0, sizeof img);
+  for (int y = 0; y < ptr_h * ps && y < 64; y++)
+    for (int x = 0; x < 32 * ps && x < 64; x++)
+      {
+	unsigned c = ptr_shape[y / ps][x / ps];
+	if (c)
+	  img[y * 64 + x] = ptr_pal[c] | 0xFF000000u;
+      }
+  /* the same as the cursor already has (RISC OS sends its shape and
+     colours again and again): only moved */
+  if (hwcur_on && handle[cur] && last_hx == ptr_ax * ps && last_hy == ptr_ay * ps
+      && !memcmp (img, last, sizeof img))
+    {
+      struct drm_mode_cursor2 m = { .flags = DRM_MODE_CURSOR_MOVE, .crtc_id = drm_crtc,
+				    .x = hwcur_x, .y = hwcur_y };
+      ioctl (drm_fd, DRM_IOCTL_MODE_CURSOR2, &m);
+      return 1;
+    }
+  cur ^= 1;
+  if (!handle[cur])
+    {
+      struct drm_mode_create_dumb cd = { .width = 64, .height = 64, .bpp = 32 };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd))
+	return 0;
+      struct drm_mode_map_dumb md = { .handle = cd.handle };
+      void *m = MAP_FAILED;
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md) == 0)
+	m = mmap (NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, md.offset);
+      if (m == MAP_FAILED)
+	{
+	  struct drm_mode_destroy_dumb d = { .handle = cd.handle };
+	  ioctl (drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+	  return 0;
+	}
+      handle[cur] = cd.handle;
+      map[cur] = m;
+    }
+  memcpy (map[cur], img, sizeof img);
+  struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE,
+				.crtc_id = drm_crtc, .width = 64, .height = 64,
+				.handle = handle[cur], .hot_x = ptr_ax * ps, .hot_y = ptr_ay * ps };
+  c.x = hwcur_x, c.y = hwcur_y;
+  if (ioctl (drm_fd, DRM_IOCTL_MODE_CURSOR2, &c))
+    {
+      fprintf (stderr, "rol-fb: the display's cursor: %s (the pointer is drawn)\n", strerror (errno));
+      hwcur_ok = 0;
+      return 0;
+    }
+  memcpy (last, img, sizeof img);
+  last_hx = ptr_ax * ps, last_hy = ptr_ay * ps;
+  return 1;
+}
+
+/* The display's cursor where the pointer is (its top left, output
+   pixels), and its shape if that changed; at once, whenever the pointer
+   moves (a tablet's report), not at the next frame. */
+static void
+hwcur_update (void)
+{
+  if (!hwcur_ok || drm_fd < 0 || width <= 0 || height <= 0 || sw <= 0)
+    return;
+  int px = ox + (int) ((long long) mx * sw / width) - ptr_ax * ps;
+  int py = oy + (int) ((long long) my * sh / height) - ptr_ay * ps;
+  if (hwcur_dirty)
+    {
+      int was = hwcur_on;
+      hwcur_x = px, hwcur_y = py;
+      hwcur_on = hwcur_shape ();
+      hwcur_dirty = 0;
+      if (was != hwcur_on)
+	{
+	  if (!hwcur_on)
+	    drm_hide_cursor ();
+	  /* the picture redrawn with or without the pointer in it */
+	  ptr_changed = 1;
+	}
+      return;
+    }
+  if (hwcur_on && (px != hwcur_x || py != hwcur_y))
+    {
+      struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_MOVE, .crtc_id = drm_crtc,
+				    .x = px, .y = py };
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_CURSOR2, &c) == 0)
+	hwcur_x = px, hwcur_y = py;
+    }
+}
+
 static void ov_under (void);
 static void blk_free (void);
 
@@ -446,6 +559,7 @@ drm_setup (const struct drm_mode_modeinfo *mode)
       { drm_old (old_fb, old_handle, old_map, old_size); return -1; }
     }
   drm_hide_cursor ();
+  hwcur_on = 0, hwcur_dirty = 1;
   if (desk_plane && !ov_need && desk_on)
     {
       /* the desktop back on the primary (just set): its plane off */
@@ -501,6 +615,15 @@ drm_open (void)
     }
   if (drm_fd < 0)
     return -1;
+  {
+    char name[32] = "";
+    struct drm_version v = { .name_len = sizeof name - 1, .name = name };
+    if (ioctl (drm_fd, DRM_IOCTL_VERSION, &v) == 0 && strcmp (name, "virtio_gpu") == 0)
+      {
+	hwcur_ok = 1;
+	fprintf (stderr, "rol-fb: a VM's display: the pointer is its cursor\n");
+      }
+  }
   if (host_w == 0 || drm_setup (&mode))
     {
       drm_release ();
@@ -1726,6 +1849,7 @@ make_maps (void)
     ps = 1;
   if (ps > 8)
     ps = 8;
+  hwcur_dirty = 1;
   for (int x = 0; x < fb_w; x++)
     xmap[x] = x < ox || x >= ox + sw ? -1 : (int) ((long long) (x - ox) * width / sw);
   for (int y = 0; y < fb_h; y++)
@@ -1750,7 +1874,7 @@ out_rect (int x0, int y0, int x1, int y1, int px, int py)
       const uint32_t *row = back + (size_t) y * fb_w;
       unsigned char *d = fb + (size_t) y * fb_stride;
       int pr = y - py;
-      int has_ptr = pr >= 0 && pr < ptr_h * ps && pr < 32 * ps;
+      int has_ptr = !hwcur_on && pr >= 0 && pr < ptr_h * ps && pr < 32 * ps;
       pr = has_ptr ? pr / ps : 0;
       if (fb_bpp == 32)
 	{
@@ -1890,7 +2014,7 @@ redraw (int force)
 	}
     }
   int screen_changed = sy1 >= 0;
-  if (!screen_changed && !ptr_changed && mx == last_mx && my == last_my)
+  if (!screen_changed && !ptr_changed && (hwcur_on || (mx == last_mx && my == last_my)))
     return;
   struct drm_clip_rect clips[3];
   int nclips = 0;
@@ -1960,7 +2084,7 @@ redraw (int force)
 	}
     }
   /* the pointer: put back what was under it, and draw it where it is */
-  if (!full && (ptr_changed || mx != last_mx || my != last_my || screen_changed))
+  if (!full && (ptr_changed || (!hwcur_on && (mx != last_mx || my != last_my || screen_changed))))
     {
       int rx[2] = { last_px, px }, ry[2] = { last_py, py };
       for (int i = 0; i < 2; i++)
@@ -2057,7 +2181,7 @@ read_messages (void)
 	    {
 	      uint32_t v = c.w[1];
 	      ptr_pal[c.w[2]] = (((v >> 8) & 0xFF) << 16) | (((v >> 16) & 0xFF) << 8) | ((v >> 24) & 0xFF);
-	      ptr_changed = 1;
+	      ptr_changed = 1, hwcur_dirty = 1;
 	    }
 	  break;
 	case C_POINTER:			/* width, height, active x, y, visible, data */
@@ -2079,7 +2203,7 @@ read_messages (void)
 	    for (int y = 0; y < 32; y++)
 	      for (int x = 0; x < 32; x++)
 		ptr_shape[y][x] = y < ptr_h ? (src[y * 8 + x / 4] >> ((x & 3) * 2)) & 3 : 0;
-	    ptr_changed = 1;
+	    ptr_changed = 1, hwcur_dirty = 1;
 	    break;
 	  }
 	case C_VERSION:
@@ -3162,6 +3286,7 @@ main (int argc, char **argv)
       for (int i = ninputs - 1; i >= 0; i--)
 	if (p[2 + i].revents & (POLLIN | POLLERR | POLLHUP))
 	  read_input (i);
+      hwcur_update ();
       t = now_ms ();
       if (t >= next_frame)
 	{
