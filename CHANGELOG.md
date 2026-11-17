@@ -8,6 +8,36 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### PreDesk.AArdvarkLoader a plain file; the Pinebook Pro touchpad's sticky fingers (17 Nov 2026; riscos-harddisc 1.0.0065-1, riscos-kernel-generic 7.2.0-8)
+
+Raik's logs (Pinebook Pro, after support 1.0.0069 / harddisc 1.0.0064):
+Wi-Fi joins in 3-4 s every start; the internal NVMe went to NVMeFS ("512
+byte sectors: given to RISC OS (NVMeFS)": the first real machine); his
+PreDesk.SndSetup failed "Repeat: File 'MixVolume' not found" because
+SoundControl (TestBed) loaded after the PreDesk files. The owner: "Move to
+plain aardvark loader". harddisc/extras/AArdvarkLoader,feb ("IfThere
+Choices:Boot.TestBed Then Obey Choices:Boot.TestBed") replaces
+!AArdvarkLoader and mkaardvark.py; the postinst no longer deletes a
+PreDesk.AArdvarkLoader (1.0.0063-1's cleanup of 1.0.0062-1's file, which
+would now delete the packaged one). QEMU: AArdvarkLoader runs first; a
+SndSetup with "RMEnsure SCSILinux 0 Error ..." and "MixVolume 0 0 0 0"
+runs clean; with a failing SetUpNet too, the modules still load.
+
+Touchpad: Raik's clicks became Menu then Adjust and the pointer moved only
+with the pad held. rol-fb's finger count is the kernel's BTN_TOOL_*, and
+BTN_TOUCH up resets it, so the kernel itself kept lifted contacts: the
+HAILUCK pad (258a:001e, HID_GROUP_MULTITOUCH, MT_CLS_DEFAULT) drops
+releases and only Win 8 classes have MT_QUIRK_STICKY_FINGERS. Patch
+kernel/generic-7.2/0202 (riscos-linux): MT_CLS_PINEBOOK_PRO (0x0117:
+ALWAYS_VALID, CONTACT_CNT_ACCURATE, STICKY_FINGERS) and an MT_USB_DEVICE
+entry (group MULTITOUCH, so the keyboard interface isn't taken).
+modules.builtin.modinfo has hid_multitouch.alias=hid:b0003g0002v0000258Ap0000001E.
+7.2.0-rol8 (LOCALVERSION; config files updated); 2 min incremental build;
+QEMU virt to the desktop. Risk: if the pad sends nothing while a finger
+rests still, that finger is released after 100 ms (a still touch could
+then be taken for a tap). Not on a Pinebook Pro yet. The wdk kernel
+(7.2.0-7.1) is unchanged; the source tree now has the patch for its next build.
+
 ### The Dev Kit's GPU firmware: firmware-qcom-soc, two files kept (16 Nov 2026; riscos-kernel-wdk2023 7.2.0-7.1, riscos-support 1.0.0069-1)
 
 The owner asked about GPU drivers in the Pinebook and Dev Kit kernels.

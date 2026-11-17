@@ -1,0 +1,40 @@
+diff --git a/drivers/hid/hid-multitouch.c b/drivers/hid/hid-multitouch.c
+index edb37b4c8..668e5ce53 100644
+--- a/drivers/hid/hid-multitouch.c
++++ b/drivers/hid/hid-multitouch.c
+@@ -235,6 +235,7 @@ static void mt_post_parse(struct mt_device *td, struct mt_application *app);
+ #define MT_CLS_APPLE_TOUCHBAR			0x0114
+ #define MT_CLS_YOGABOOK9I			0x0115
+ #define MT_CLS_EGALAX_P80H84			0x0116
++#define MT_CLS_PINEBOOK_PRO			0x0117
+ #define MT_CLS_SIS				0x0457
+ 
+ #define MT_DEFAULT_MAXCONTACT	10
+@@ -411,6 +412,16 @@ static const struct mt_class mt_classes[] = {
+ 			MT_QUIRK_STICKY_FINGERS |
+ 			MT_QUIRK_FORCE_GET_FEATURE,
+ 	},
++	/*
++	 * The Pinebook Pro's touchpad (HAILUCK, USB 258a:001e) sometimes
++	 * leaves out a finger's release: the default class, plus releasing
++	 * the fingers when the pad has sent nothing for a while.
++	 */
++	{ .name = MT_CLS_PINEBOOK_PRO,
++		.quirks = MT_QUIRK_ALWAYS_VALID |
++			MT_QUIRK_CONTACT_CNT_ACCURATE |
++			MT_QUIRK_STICKY_FINGERS,
++	},
+ 	{ .name = MT_CLS_GOOGLE,
+ 		.quirks = MT_QUIRK_ALWAYS_VALID |
+ 			MT_QUIRK_CONTACT_CNT_ACCURATE |
+@@ -2726,6 +2737,10 @@ static const struct hid_device_id mt_devices[] = {
+ 		HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
+ 			   I2C_VENDOR_ID_HANTICK, I2C_PRODUCT_ID_HANTICK_5288) },
+ 
++	/* Pinebook Pro touchpad (HAILUCK keyboard) */
++	{ .driver_data = MT_CLS_PINEBOOK_PRO,
++		MT_USB_DEVICE(USB_VENDOR_ID_258A, 0x001e) },
++
+ 	/* Generic MT device */
+ 	{ HID_DEVICE(HID_BUS_ANY, HID_GROUP_MULTITOUCH, HID_ANY_ID, HID_ANY_ID) },
+ 
