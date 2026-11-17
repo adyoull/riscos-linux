@@ -8,6 +8,29 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### AArdvarkLoader through *X (17 Nov 2026; riscos-harddisc 1.0.0066-1)
+
+Forum (17 Nov): andym, Argon ONE UP (CM5), after harddisc 1.0.0064-1:
+640x480, max 640x500; "Boot was clearly stopping at AardvarkLoader";
+without it, *Linux "not found" (LinuxShell is in the TestBed list; David
+Pitt pointed that out). Cause: PreDesk.!AArdvarkLoader runs in BootRun's
+directories pass, before PreDesk.Configure (whose Monitor file does
+LoadModeFile and WimpMode X<ROL$ScreenWidth> ...); an error from any
+TestBed line ends the Obey file, the error ends Repeat, and Configure
+never runs. Which line fails on the CM5 isn't known (no log yet); the
+likeliest is LoadVC (IfThere IXFS:$.dev.vchiq: RMLoad VCHIQ, which
+refuses where it can't use the VideoCore). Before 1.0.0063-1 the same
+error ended only the PreDesk files after TestBed (none), unseen, but
+also skipped the rest of the list (LinuxOverlay, SCSILinux,
+MemMapEntries...). Fix: BootCmds' *X ("execute, ignoring errors") on
+every command line of Choices:Boot.TestBed (postinst awk at the end,
+idempotent), of TestBed.Codec.LoadVC and TestBed.NVMe.Load, and in
+AArdvarkLoader ("IfThere Choices:Boot.TestBed Then X Obey
+Choices:Boot.TestBed"). harddisc/extras TestBed,feb source too. QEMU:
+"RMLoad Nowhere:Nothing" inserted before LinuxShell: no Repeat error;
+SndSetup (RMEnsure SCSILinux ... Error) ran clean, Configure ran, rol-fb
+1280x800. 1.0.0065-1 never published.
+
 ### rol-modd: the Huawei switch message corrected, sent as usb_modeswitch sends it (17 Nov 2026; riscos-support 1.0.0071-1)
 
 The owner: "look at how armbian treats that USB modem". Armbian (like

@@ -6,6 +6,6 @@
 | machines), so the programs decode in software there.
 |
 | Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
-RMEnsure VCHIQ 0 RMLoad <Obey$Dir>.VCHIQ
-RMEnsure BCMSupport 0 RMLoad <Obey$Dir>.BCMSupport
-RMEnsure PCI 0 RMLoad <Obey$Dir>.PCI
+X RMEnsure VCHIQ 0 RMLoad <Obey$Dir>.VCHIQ
+X RMEnsure BCMSupport 0 RMLoad <Obey$Dir>.BCMSupport
+X RMEnsure PCI 0 RMLoad <Obey$Dir>.PCI

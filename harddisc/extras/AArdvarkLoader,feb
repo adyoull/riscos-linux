@@ -2,8 +2,9 @@
 | sound, USB and the rest) before the other files here, so that they can
 | use them (Configure's SndSetup needs SoundControl for *MixVolume) and so
 | that one of them failing can't leave them unloaded. The list is
-| Choices:Boot.TestBed. Keep this file's name: it is first in the
+| Choices:Boot.TestBed; through *X, so that nothing in it failing stops
+| the rest of start-up. Keep this file's name: it is first in the
 | alphabet so that it runs first.
 |
 | Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
-IfThere Choices:Boot.TestBed Then Obey Choices:Boot.TestBed
+IfThere Choices:Boot.TestBed Then X Obey Choices:Boot.TestBed
