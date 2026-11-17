@@ -8,6 +8,25 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### ROL$VideoCore: the VideoCore stand-ins only on a Pi 3 or 4 (17 Nov 2026; riscos-support 1.0.0072-1, riscos-harddisc 1.0.0067-1)
+
+The owner's Pi 4 decodes H.264 in hardware under ROL (Reel, Matinee,
+FFmpeg through LoadVC's VCHIQ, BCMSupport and PCI). TestBed loaded the
+stand-ins wherever Linux has a /dev/vchiq, which the Pi 5 and CM5
+kernels create too, though the BCM2712 has no H.264 decoder and VCHIQ
+won't load there (andym's CM5). init.c: video_core(), after
+read_model(), reads /proc/device-tree/compatible (NUL-separated) and
+sets RISC_OS_ROL_VideoCore (ROL$VideoCore) to 1 for brcm,bcm2835/6/7 and
+brcm,bcm2711, else 0. TestBed: "X If \"<ROL$VideoCore>\"<>\"0\" Then
+IfThere IXFS:$.dev.vchiq Then Obey ...LoadVC": unset (an older init)
+still loads, as before. riscos-harddisc's postinst changes the existing
+line in place (once; its comment too); harddisc/extras TestBed,feb
+source too. Checked: the function against the compatible lists of a Pi
+3, 4 and 5, a Pinebook Pro and QEMU's virt (1, 1, 0, 0, 0; no file: 0);
+under QEMU ROL$VideoCore : 0, a test line under the same condition didn't
+run and VCHIQ wasn't loaded; *If with the variable unset, 0 and 1 (loads,
+doesn't, loads). Not yet run on a Pi.
+
 ### AArdvarkLoader through *X (17 Nov 2026; riscos-harddisc 1.0.0066-1)
 
 Forum (17 Nov): andym, Argon ONE UP (CM5), after harddisc 1.0.0064-1:

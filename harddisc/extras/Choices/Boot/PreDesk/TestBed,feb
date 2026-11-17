@@ -54,5 +54,6 @@ X RMEnsure USBDriver 0 RMLoad <IXFS$HardDisc4>.TestBed.Modules.USBDriver
 X RMEnsure LinuxCodec 0 RMLoad <IXFS$HardDisc4>.TestBed.Codec.LinuxCodec
 | VideoCore stand-ins (VCHIQ, BCMSupport, PCI over Linux's /dev/vchiq and
 | /dev/vcio): ReelHWAccel's H.264 decoding and encoding for Reel, Matinee
-| and FFmpeg on a Pi 3 or 4. Only where Linux has a VideoCore.
-X IfThere IXFS:$.dev.vchiq Then Obey <IXFS$HardDisc4>.TestBed.Codec.LoadVC
+| and FFmpeg on a Pi 3 or 4. Only there: ROL$VideoCore is 0 on other machines
+| (the Pi 5 and CM5 have a /dev/vchiq, but no H.264 decoder).
+X If "<ROL$VideoCore>"<>"0" Then IfThere IXFS:$.dev.vchiq Then Obey <IXFS$HardDisc4>.TestBed.Codec.LoadVC

@@ -51,6 +51,38 @@ read_model (void)
     }
 }
 
+/* ROL$VideoCore in RISC OS: 1 on a Pi whose VideoCore decodes H.264 for
+   RISC OS programs (the VideoCore stand-ins VCHIQ, BCMSupport and PCI:
+   ReelHWAccel's decoding for Reel, Matinee and FFmpeg), 0 elsewhere.
+   From the chip in the device tree's compatible list: BCM2835/6/7 (Pi 1
+   to 3, Zero 2) and BCM2711 (Pi 4, 400, CM4). The Pi 5 and CM5 (BCM2712)
+   have a /dev/vchiq too, but no H.264 decoder, and VCHIQ won't load
+   there. TestBed loads the stand-ins unless this is 0 (and Linux has a
+   /dev/vchiq), so an older init (no variable) loads them as before. */
+static void
+video_core (void)
+{
+  static const char *const chips[] = {
+    "brcm,bcm2835", "brcm,bcm2836", "brcm,bcm2837", "brcm,bcm2711"
+  };
+  char c[512];
+  int vc = 0;
+  int fd = open ("/proc/device-tree/compatible", O_RDONLY | O_CLOEXEC);
+  ssize_t n = fd >= 0 ? read (fd, c, sizeof c - 1) : -1;
+  if (fd >= 0)
+    close (fd);
+  if (n > 0)
+    {
+      c[n] = 0;
+      /* NUL-separated strings */
+      for (char *s = c; s < c + n && !vc; s += strlen (s) + 1)
+	for (unsigned i = 0; i < sizeof chips / sizeof *chips; i++)
+	  if (strcmp (s, chips[i]) == 0)
+	    vc = 1;
+    }
+  setenv ("RISC_OS_ROL_VideoCore", vc ? "1" : "0", 1);
+}
+
 /* Switch off or restart (HOW is RB_POWER_OFF or RB_AUTOBOOT) with the
    root file system clean. Everything still running (rol-fb, rol-usbd,
    dhcp, Updates' apt...) gets SIGTERM, then after up to 3 s SIGKILL, so
@@ -1987,6 +2019,7 @@ main (void)
     job_mode ();
   host_job ();
   read_model ();
+  video_core ();
   int wdk = strstr (model, "Windows Dev Kit") != NULL;
   /* a real monitor (only its own modes; others scaled): a Pi, the Dev Kit */
   int pi = strstr (model, "Raspberry Pi") != NULL || wdk;
