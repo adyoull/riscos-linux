@@ -8,15 +8,14 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
-### Dismount on HardDisc4 closes its windows (17 Nov 2026; riscos-harddisc 1.0.0069-1)
+### No Dismount on HardDisc4 (17 Nov 2026; riscos-harddisc 1.0.0069-1)
 
 Ralph (forum): HardDisc4's icon bar Dismount removed the icon (!DiscIcon
-quit) and left its directory windows open; a native disc's Dismount
-closes them and the icon stays. !DiscIcon: Dismount for HardDisc4 now
-calls PROCclosedirs(0): Filer_CloseDir with <IXFS$HardDisc4> and with
-its canonical name (OS_FSControl 37: IXFS::ROL.$.riscos.HardDisc4),
-which also closes subdirectories' windows. QEMU: windows opened both
-ways closed, IXFS:$.riscos left open, the icon kept.
+quit) and left its directory windows open. The owner: HardDisc4 isn't to
+be dismountable from the desktop. !DiscIcon's HardDisc4 menu is now Open
+'$' and Free, as IXFS:$'s; Eject stays for USB discs and cards. (A first
+version that closed the windows instead was not delivered.) QEMU: the
+menu has the two items, Free works, the icon stays.
 
 ### RISC OS Open's Iconv in place of the lite one (17 Nov 2026; riscos-harddisc 1.0.0068-1)
 
