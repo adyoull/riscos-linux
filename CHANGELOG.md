@@ -8,6 +8,21 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### rol-modd: a Huawei stick asked once, through interface 0 (17 Nov 2026; riscos-support 1.0.0070-1)
+
+Raik's logs: "rol-modd: Huawei stick at USB 7/3: asked to switch to its
+network mode" twice within 90 ms, no error, and the stick never
+re-enumerated (no "USB disconnect"); no network. He says it is an E3272
+acting as a router (HiLink, 192.168.8.1 by DHCP); "the old port" was
+RISC OS on Linux on a distribution, where usb_modeswitch switched it.
+The kernel's usb-storage only handles the old E220 IDs (SET_FEATURE),
+not these. usb_modeswitch sends HuaweiNewMode (our message) once, to
+interface 0. rol-modd now returns unless bInterfaceNumber is 0 (the
+E3272 has two mass storage interfaces: CD and memory card) and remembers
+the last bus/device it asked (its start-up scan and the kernel's event
+can both report the interface). Built -O2 -static (aarch64-linux-gnu-gcc
+13.3, as before). Not tried with a stick.
+
 ### PreDesk.AArdvarkLoader a plain file; the Pinebook Pro touchpad's sticky fingers (17 Nov 2026; riscos-harddisc 1.0.0065-1, riscos-kernel-generic 7.2.0-8)
 
 Raik's logs (Pinebook Pro, after support 1.0.0069 / harddisc 1.0.0064):

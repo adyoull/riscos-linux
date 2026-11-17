@@ -375,6 +375,12 @@ huawei (const char *sys)
     return;
   long nif = read_num (dev, "bNumInterfaces");
   int ifnum = (int) read_hex (sys, "bInterfaceNumber");
+  /* once a stick, to its first interface, as usb_modeswitch does: an
+     E3272 (Raik's) has two (its CD drive and its memory card), and the
+     message sent to the second straight after the first left it as it
+     was (asked twice, never switched) */
+  if (ifnum != 0)
+    return;
   /* only mass storage interfaces on the device? */
   DIR *d = opendir (dev);
   struct dirent *e;
@@ -406,6 +412,13 @@ huawei (const char *sys)
   long bus = read_num (dev, "busnum"), num = read_num (dev, "devnum");
   if (out_ep < 0 || bus < 0 || num < 0)
     return;
+  /* and once only: rol-modd can see the same interface twice (its scan
+     at start-up and the kernel's event); a stick still switching that is
+     asked again may stay as it is */
+  static long last_bus = -1, last_num = -1;
+  if (bus == last_bus && num == last_num)
+    return;
+  last_bus = bus, last_num = num;
   if (dry)
     {
       say ("would switch the Huawei stick at USB %ld/%ld to its network mode", bus, num);
