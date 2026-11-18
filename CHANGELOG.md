@@ -8,6 +8,14 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The current directory: HardDisc4 (18 Nov 2026; riscos-harddisc 1.0.0072-1)
+
+Ralph (forum): crash dumps for ARM aborts never appeared; the CSD was
+IXFS::ROL.$ (Linux's /, not writable by uid 1000). Native RISC OS starts
+with the CSD at the boot disc's $. PreDesk.AArdvarkLoader now does
+"X Dir <IXFS$HardDisc4>" before loading the TestBed list. QEMU: *Ex
+after start-up: "CSD IXFS::ROL.$.riscos.HardDisc4".
+
 ### rol-fb: no connector probe every second; ahead of RISC OS (18 Nov 2026; riscos-support 1.0.0078-1)
 
 RISC3D's handoff (2026-11-18-risc3d-pause-every-second-rol-fb-connector-

@@ -6,5 +6,11 @@
 | the rest of start-up. Keep this file's name: it is first in the
 | alphabet so that it runs first.
 |
+| Also: the current directory is HardDisc4, as RISC OS itself starts in
+| the root of the disc it boots from. It was IXFS::ROL.$ (Linux's root),
+| where RISC OS can't write, so programs saving there (crash dumps, for
+| one) failed.
+|
 | Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
+X Dir <IXFS$HardDisc4>
 IfThere Choices:Boot.TestBed Then X Obey Choices:Boot.TestBed
