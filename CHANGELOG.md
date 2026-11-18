@@ -8,6 +8,18 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The sound's logs in LOGS (18 Nov 2026; riscos-support 1.0.0075-1)
+
+Chris's Dev Kit: still no sound after the CMA fix (7.2.0-7.2: no
+allocation failures, the Burr-Brown adapter found), and LOGS had nothing
+from rol-snd. init.c fat_logs_once(): copies /riscos/sound/log.txt,
+/proc/asound/cards, /proc/asound/pcm and /riscos/sound/config to
+LOGS/sound-log.txt, sound-cards.txt, sound-devices.txt, sound-config.txt,
+removing an earlier copy when the source isn't there. QEMU (intel-hda +
+hda-duplex): the four (three; no config) on the FAT after a periodic
+copy. (Seen there: rol-snd "write: Input/output error" again and again
+on QEMU's HDA with no audio back end: QEMU's, not looked into.)
+
 ### The Dev Kit's CMA 512 MiB (18 Nov 2026; riscos-kernel-wdk2023 7.2.0-7.2)
 
 Chris Gransden: USB sound stopped (two adapters). kernel-log: "nvme nvme0:

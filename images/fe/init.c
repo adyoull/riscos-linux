@@ -1532,6 +1532,19 @@ fat_logs_once (void)
       /* the network's: rol-netd's and wpa_supplicant's (Wi-Fi) */
       copy_file ("/riscos/net/log.txt", "/run/fatlog/LOGS/network-log.txt");
       copy_file ("/run/wpa_supplicant.log", "/run/fatlog/LOGS/wifi-log.txt");
+      /* the sound's: rol-snd's (which card it chose, and why it couldn't
+	 play), Linux's sound cards and their devices, and the card chosen
+	 by hand, if one was (an earlier session's copy goes if there's
+	 none now) */
+      static const char *const snd[][2] = {
+	{ "/riscos/sound/log.txt", "/run/fatlog/LOGS/sound-log.txt" },
+	{ "/proc/asound/cards", "/run/fatlog/LOGS/sound-cards.txt" },
+	{ "/proc/asound/pcm", "/run/fatlog/LOGS/sound-devices.txt" },
+	{ "/riscos/sound/config", "/run/fatlog/LOGS/sound-config.txt" },
+      };
+      for (unsigned k = 0; k < sizeof snd / sizeof *snd; k++)
+	if (copy_file (snd[k][0], snd[k][1]))
+	  unlink (snd[k][1]);
       if (umount ("/run/fatlog"))
 	umount2 ("/run/fatlog", MNT_DETACH);
     }
