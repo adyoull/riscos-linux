@@ -8,6 +8,18 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The Dev Kit's CMA 512 MiB (18 Nov 2026; riscos-kernel-wdk2023 7.2.0-7.2)
+
+Chris Gransden: USB sound stopped (two adapters). kernel-log: "nvme nvme0:
+allocated 128 MiB host memory buffer (32 segments)" (Phison E13T
+1987:5013, DRAM-less), then "cma: ... alloc failed ... 0 free of 32768
+total pages" during USB enumeration: the blackrock DT's linux,cma pool
+(128 MiB) all taken by the HMB, so xhci/snd-usb-audio coherent
+allocations failed. Patch 0003 (kernel/generic-7.2, the shared tree):
+linux,cma size 0x20000000. Only the dtb rebuilt (dtc diff: just that
+size); Image and modules are 7.2.0-7's (rol7), so the package is
+7.2.0-7.2. Not booted on a Dev Kit.
+
 ### Touchpad: two fingers Adjust; a lost finger let go (18 Nov 2026; riscos-support 1.0.0074-1, riscos-kernel-generic 7.2.0-9)
 
 Raik (Pinebook Pro): at first the pad works, then every click is Menu,

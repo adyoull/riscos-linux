@@ -1,0 +1,28 @@
+From: Andrew Youll <adyoull@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:30:00 +0000
+Subject: [PATCH] arm64: dts: qcom: sc8280xp-blackrock: 512 MiB for CMA
+
+A DRAM-less NVMe drive (Phison E13T, 1987:5013) took all of the
+128 MiB CMA pool for its host memory buffer, and USB sound devices then
+got no DMA memory. The Dev Kit has 32 GB: give CMA 512 MiB.
+
+---
+diff --git a/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts b/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
+index 125af356e..679a97f63 100644
+--- a/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
++++ b/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
+@@ -227,9 +227,13 @@ vreg_wwan: regulator-wwan {
+ 	};
+ 
+ 	reserved-memory {
++		/*
++		 * 512 MiB (was 128): a DRAM-less NVMe drive's host memory
++		 * buffer took all of 128 MiB, and USB sound got none.
++		 */
+ 		linux,cma {
+ 			compatible = "shared-dma-pool";
+-			size = <0x0 0x8000000>;
++			size = <0x0 0x20000000>;
+ 			reusable;
+ 			linux,cma-default;
+ 		};
