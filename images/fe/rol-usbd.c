@@ -40,6 +40,8 @@
 #include <poll.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
 
 #define SYS "/sys/bus/usb/devices"
 #define RO_UID 1000
@@ -145,6 +147,8 @@ struct disc
   int unreadable;		/* tried and no file system found */
   int filecore;			/* its partition is RISC OS's (&AD) */
   int given;			/* a FileCore disc, given to RISC OS (SCSILinux) */
+  int refused;			/* a FileCore disc SCSIFS can't use (its sectors) */
+  int sector;			/* then its sector size */
   long long bytes;		/* its size, when given */
   char fcname[12];		/* its FileCore disc name, when given */
   int removable;		/* Linux's removable flag (of the whole disc) */
@@ -321,7 +325,7 @@ write_list (void)
    open file for it (read-write, or read-only if write-protected) - RISC OS
    can't open Linux's /dev itself. */
 static int
-filecore_disc (const char *node, char *name, size_t nsz)
+filecore_disc (const char *node, char *name, size_t nsz, int *sector)
 {
   unsigned char b[512];
   int f = open (node, O_RDONLY | O_CLOEXEC);
@@ -346,6 +350,7 @@ filecore_disc (const char *node, char *name, size_t nsz)
   unsigned log2ss = dr[0], nzones = dr[9] | (dr[42] << 8);
   if (log2ss < 8 || log2ss > 12 || dr[5] > 16 || nzones == 0)
     return 0;
+  *sector = 1 << log2ss;
   /* the ID length FileCore uses (8 to 21 bits), and a size that fits the
      disc and is most of it: so that a FAT disc whose bytes happen to sum
      right is never taken for FileCore */
@@ -384,32 +389,74 @@ write_filecore_list (void)
   rename (tmp, CTL "/filecore");
 }
 
-/* A FileCore disc: give it to RISC OS instead of mounting it */
-static int
-give_if_filecore (struct disc *d)
+static void
+kmsg (const char *msg)
 {
-  char node[64];
-  snprintf (node, sizeof node, "/dev/%s", d->dev);
-  if (!filecore_disc (node, d->fcname, sizeof d->fcname))
-    return 0;
-  int f = open (node, O_RDONLY | O_CLOEXEC);
-  d->bytes = 0;
-  if (f >= 0)
-    {
-      d->bytes = lseek (f, 0, SEEK_END);
-      close (f);
-    }
-  d->given = d->filecore = 1;
-  write_filecore_list ();
-  char msg[200];
-  snprintf (msg, sizeof msg, "rol-usbd: %s: FileCore disc \"%s\", %lld bytes: given to RISC OS (SCSIFS)\n",
-	    d->dev, d->fcname, d->bytes);
   int k = open ("/dev/kmsg", O_WRONLY | O_CLOEXEC);
   if (k >= 0)
     {
       if (write (k, msg, strlen (msg)) < 0) { }
       close (k);
     }
+}
+
+/* A FileCore disc: give it to RISC OS instead of mounting it. Not one with
+   sectors over 1024 bytes (a 4K drive): RISC OS's SCSIFS, which reads USB
+   discs on RISC OS itself too, can't use them ("Sector size not
+   supported"). It is refused instead, and RISC OS says so in plain words
+   (!DiscIcon shows /riscos/mediactl/message). */
+static int
+give_if_filecore (struct disc *d)
+{
+  char node[64];
+  int sector = 0, devss = 512;
+  snprintf (node, sizeof node, "/dev/%s", d->dev);
+  if (!filecore_disc (node, d->fcname, sizeof d->fcname, &sector))
+    return 0;
+  int f = open (node, O_RDONLY | O_CLOEXEC);
+  d->bytes = 0;
+  if (f >= 0)
+    {
+      d->bytes = lseek (f, 0, SEEK_END);
+      if (ioctl (f, BLKSSZGET, &devss) < 0)
+	devss = 512;
+      close (f);
+    }
+  d->filecore = 1;
+  if (devss > 1024 || sector > 1024)
+    {
+      if (!d->refused)
+	{
+	  d->refused = 1;
+	  d->sector = devss > sector ? devss : sector;
+	  char msg[400];
+	  snprintf (msg, sizeof msg, "rol-usbd: %s: FileCore disc \"%s\", %lld bytes, %d-byte sectors (its record says %d): "
+		    "SCSIFS can't use sectors over 1024 bytes, so it is not given to RISC OS\n",
+		    d->dev, d->fcname, d->bytes, devss, sector);
+	  kmsg (msg);
+	  /* for the desktop: !DiscIcon reports it and deletes the file */
+	  /* (one line, under 230 characters: a BASIC string and an error) */
+	  snprintf (msg, sizeof msg,
+		    "%s%s%s is a RISC OS disc with %d-byte sectors. RISC OS reads USB discs with SCSIFS, which "
+		    "can't use sectors over 1024 bytes, so it can't be opened. It can be used in an NVMe slot.",
+		    d->fcname[0] ? "The USB disc '" : "A USB disc", d->fcname[0] ? d->fcname : "", d->fcname[0] ? "'" : "", d->sector);
+	  int m = open (CTL "/.message", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	  if (m >= 0)
+	    {
+	      if (write (m, msg, strlen (msg)) < 0) { }
+	      close (m);
+	      if (chown (CTL "/.message", RO_UID, RO_GID)) { }
+	      rename (CTL "/.message", CTL "/message");
+	    }
+	}
+      return 1;
+    }
+  d->given = 1;
+  write_filecore_list ();
+  char msg[200];
+  snprintf (msg, sizeof msg, "rol-usbd: %s: FileCore disc \"%s\", %lld bytes: given to RISC OS (SCSIFS)\n",
+	    d->dev, d->fcname, d->bytes);
+  kmsg (msg);
   return 1;
 }
 
@@ -617,7 +664,7 @@ discs_look (void)
 	 whole, and none of its partitions is mounted. */
       int whole_fc = 0;
       for (int k = 0; k < MAXD; k++)
-	if (discs[k].dev[0] && discs[k].given && !strcmp (discs[k].dev, e->d_name))
+	if (discs[k].dev[0] && (discs[k].given || discs[k].refused) && !strcmp (discs[k].dev, e->d_name))
 	  whole_fc = 1;
       if (!whole_fc)
 	{
@@ -627,8 +674,9 @@ discs_look (void)
 	    if (discs[k].dev[0] && discs[k].mounted && !strncmp (discs[k].dev, e->d_name, el))
 	      busy = 1;
 	  char wn[64], fn[12];
+	  int ss;
 	  snprintf (wn, sizeof wn, "/dev/%s", e->d_name);
-	  if (!busy && filecore_disc (wn, fn, sizeof fn))
+	  if (!busy && filecore_disc (wn, fn, sizeof fn, &ss))
 	    whole_fc = 1;
 	}
       for (int pass = whole_fc ? 1 : 0; pass < 2; pass++)
@@ -670,7 +718,7 @@ discs_look (void)
 	      present[i] = 1;
 	      snprintf (p, sizeof p, "/sys/block/%.64s/removable", e->d_name);
 	      discs[i].removable = (read_file (p, t, sizeof t) > 0 && t[0] == '1') || sd_card (e->d_name);
-	      if (!discs[i].mounted && !discs[i].ejected && !discs[i].given && discs[i].tries < 3)
+	      if (!discs[i].mounted && !discs[i].ejected && !discs[i].given && !discs[i].refused && discs[i].tries < 3)
 		{
 		  discs[i].tries++;
 		  if (!give_if_filecore (&discs[i]))
@@ -796,6 +844,9 @@ dev_discs (const char *n, char *out, size_t sz)
 	      else if (discs[i].given)
 		snprintf (what + w, sizeof what - w, "%sFileCore disc %s (RISC OS's SCSIFS)", sep,
 			  discs[i].fcname[0] ? discs[i].fcname : discs[i].dev);
+	      else if (discs[i].refused)
+		snprintf (what + w, sizeof what - w, "%sFileCore disc %s with %d-byte sectors (SCSIFS can't use it)", sep,
+			  discs[i].fcname[0] ? discs[i].fcname : discs[i].dev, discs[i].sector);
 	      else if (discs[i].ejected)
 		snprintf (what + w, sizeof what - w, "%s%s ejected", sep, discs[i].dev);
 	      else if (discs[i].unreadable)

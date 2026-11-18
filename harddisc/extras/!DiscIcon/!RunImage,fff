@@ -111,6 +111,9 @@ IF (f% AND 1)=0 AND t%=1 THEN
   ENDIF
 ENDIF
 IF ejecting$<>"" THEN PROCejectcheck(l$)
+REM a message from Linux (a disc that can't be used, and why): shown once
+SYS "XOS_File",17,"IXFS:$.riscos.mediactl.message" TO t%;f%
+IF (f% AND 1)=0 AND t%=1 THEN PROCmediamsg
 IF l$=listed$ THEN ENDPROC
 listed$=l$
 REM gone
@@ -127,6 +130,18 @@ WHILE l$<>""
   NEXT
   IF NOT found% AND j%>0 AND n$<>"" THEN PROCadd(j%,n$,"IXFS:$.riscos.media."+n$)
 ENDWHILE
+ENDPROC
+
+DEF PROCmediamsg
+LOCAL f%,m$,e%
+f%=OPENIN("IXFS:$.riscos.mediactl.message")
+IF f%=0 THEN ENDPROC
+IF NOT EOF#f% THEN m$=GET$#f%
+CLOSE#f%
+SYS "XOS_File",6,"IXFS:$.riscos.mediactl.message"
+IF m$="" THEN ENDPROC
+e%=blk%+512 : !e%=0 : $(e%+4)=LEFT$(m$,240)+CHR$0
+SYS "Wimp_ReportError",e%,1,"HardDisc4"
 ENDPROC
 
 REM which disc an icon bar icon is (-1: none of ours)

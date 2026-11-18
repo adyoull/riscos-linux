@@ -8,6 +8,20 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### 4K FileCore USB discs refused, with a message (18 Nov 2026; riscos-support 1.0.0077-1, riscos-harddisc 1.0.0071-1)
+
+Chris (Dev Kit): a 4K WD SN570 in a USB adapter went to SCSIFS (which
+takes 256/512/1024 only: "Sector size not supported"); the owner: "Add
+the error and refuse". rol-usbd: filecore_disc() also returns the
+record's sector size; give_if_filecore() reads BLKSSZGET and, when either
+is over 1024, marks the disc refused (not given, not tried again),
+writes a kmsg line and /riscos/mediactl/message (one line, < 230
+characters, owned by RISC OS's user); the USB list text says "with
+4096-byte sectors (SCSIFS can't use it)". !DiscIcon: each second, if
+IXFS:$.riscos.mediactl.message exists, reads it, deletes it and shows it
+(Wimp_ReportError). QEMU: usb-storage with logical_block_size=4096 on the
+512 GiB 4K FileCore image, hot-plugged: the message once, no icon.
+
 ### rol-snd: a better card takes over while playing (18 Nov 2026; riscos-support 1.0.0076-1)
 
 Chris (Dev Kit): no sound until *RMReInit LinuxAudio (which closes the
