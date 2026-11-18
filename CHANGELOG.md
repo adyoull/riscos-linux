@@ -8,6 +8,26 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### rol-fb: no connector probe every second; ahead of RISC OS (18 Nov 2026; riscos-support 1.0.0078-1)
+
+RISC3D's handoff (2026-11-18-risc3d-pause-every-second-rol-fb-connector-
+probe): games pause, picture and sound, every second on Chris's Dev Kit.
+drm_check_resize (each second) -> drm_pick -> GETCONNECTOR with
+count_modes 0, which in drm_mode_getconnector (drm_connector.c:3374)
+calls fill_modes: detect + EDID over DDC/AUX for every connector, under
+mode_config.mutex; rol-fb answers no overlay SHOW meanwhile. Now
+drm_pick_probe(probe): the once-a-second check asks with room for 64
+modes and 16 encoders at once (no probe, as drmModeGetConnectorCurrent),
+probing only after a drm HOTPLUG=1 uevent (NETLINK_KOBJECT_UEVENT, group
+1, read without waiting at the check). Start-up and mode choosing still
+probe. A VM's resize is such an event (virtio-gpu re-probes itself).
+Also: rol-fb setpriority(-10) after forking RISC OS (which keeps 0), for
+David's UTM report that the pointer still stutters under load after the
+display cursor change. QEMU: desktop as before; pointer moves reached the
+host in 3 ms (median) idle and with BASIC drawing flat out (the stall
+wasn't reproduced there: QEMU's probe is cheap, and its RISC OS isn't
+emulated in user mode as UTM's is). Not tried on a Dev Kit or in UTM.
+
 ### 4K FileCore USB discs refused, with a message (18 Nov 2026; riscos-support 1.0.0077-1, riscos-harddisc 1.0.0071-1)
 
 Chris (Dev Kit): a 4K WD SN570 in a USB adapter went to SCSIFS (which

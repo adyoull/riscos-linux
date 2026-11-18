@@ -42,6 +42,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
+#include <linux/netlink.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/syscall.h>
@@ -259,9 +261,27 @@ static int have_cur_mode;
 /* --- the output: DRM/KMS (follows the VM window's size), else fbdev --- */
 
 /* The connector's preferred mode (the host's window size with UTM's
-   dynamic resolution), or its first. */
+   dynamic resolution), or its first.
+
+   probe: Linux asks the connectors afresh (reads each screen's EDID over
+   DDC or DP AUX: tens of milliseconds a connector, holding the display's
+   lock). Only at the start, when a mode is chosen, and after a hotplug
+   event; the once-a-second check takes what Linux already knows (asking
+   with room for the modes at once, as libdrm's drmModeGetConnectorCurrent
+   does). Probing every second held rol-fb up each time, so a game waiting
+   for its frame to be shown (RISC3D) paused, picture and sound, every
+   second (Chris Gransden's Dev Kit; RISC3D's handoff of 18 Nov 2026). A
+   VM's resize (UTM) is a hotplug event: Linux itself asks the host then. */
+static int drm_pick_probe (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id, int probe);
+
 static int
 drm_pick (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id)
+{
+  return drm_pick_probe (mode, conn_id, crtc_id, 1);
+}
+
+static int
+drm_pick_probe (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id, int probe)
 {
   struct drm_mode_card_res res = { 0 };
   if (ioctl (drm_fd, DRM_IOCTL_MODE_GETRESOURCES, &res))
@@ -277,11 +297,17 @@ drm_pick (struct drm_mode_modeinfo *mode, uint32_t *conn_id, uint32_t *crtc_id)
     return -1;
   for (uint32_t i = 0; i < res.count_connectors; i++)
     {
-      struct drm_mode_get_connector c = { .connector_id = conns[i] };
-      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) || c.connection != 1 || !c.count_modes)
-	continue;
       struct drm_mode_modeinfo modes[64];
       uint32_t cencs[16];
+      struct drm_mode_get_connector c = { .connector_id = conns[i] };
+      if (!probe)
+	{
+	  /* not zero modes: Linux gives the modes it has, without asking */
+	  c.count_modes = 64, c.modes_ptr = (uintptr_t) modes;
+	  c.count_encoders = 16, c.encoders_ptr = (uintptr_t) cencs;
+	}
+      if (ioctl (drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) || c.connection != 1 || !c.count_modes)
+	continue;
       if (c.count_modes > 64)
 	c.count_modes = 64;
       if (c.count_encoders > 16)
@@ -634,13 +660,54 @@ drm_open (void)
   return 0;
 }
 
+/* Linux's hotplug events for displays (a screen connected or taken away,
+   a VM's window resized): then the next check asks the connectors afresh */
+static int uevent_fd = -1;
+
+static int
+drm_hotplugged (void)
+{
+  if (uevent_fd == -1)
+    {
+      uevent_fd = socket (AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
+      struct sockaddr_nl a = { .nl_family = AF_NETLINK, .nl_groups = 1 };
+      if (uevent_fd >= 0 && bind (uevent_fd, (struct sockaddr *) &a, sizeof a))
+	{
+	  close (uevent_fd);
+	  uevent_fd = -2;
+	}
+      if (uevent_fd < 0)
+	uevent_fd = -2;
+    }
+  if (uevent_fd < 0)
+    return 0;
+  int hit = 0;
+  char b[4096];
+  ssize_t n;
+  while ((n = recv (uevent_fd, b, sizeof b - 1, 0)) > 0)
+    {
+      b[n] = 0;
+      int drm = 0, hp = 0;
+      for (char *k = b; k < b + n; k += strlen (k) + 1)
+	{
+	  if (!strcmp (k, "SUBSYSTEM=drm"))
+	    drm = 1;
+	  else if (!strcmp (k, "HOTPLUG=1"))
+	    hp = 1;
+	}
+      if (drm && hp)
+	hit = 1;
+    }
+  return hit;
+}
+
 /* The window changed size? Then a new framebuffer, and 1 to tell RISC OS. */
 static int
 drm_check_resize (void)
 {
   struct drm_mode_modeinfo mode;
   uint32_t conn, crtc;
-  if (drm_fd < 0 || drm_pick (&mode, &conn, &crtc))
+  if (drm_fd < 0 || drm_pick_probe (&mode, &conn, &crtc, drm_hotplugged ()))
     return 0;
   if (mode.hdisplay == host_w && mode.vdisplay == host_h)
     return 0;
@@ -3242,6 +3309,14 @@ main (int argc, char **argv)
   close (sv[1]);
   sock = sv[0];
   riscos_pid = pid;
+  /* ahead of RISC OS for the processor (RISC OS itself keeps the normal
+     priority, set before this): the pointer, keys and the picture are
+     handled at once even while RISC OS is busy. In a VM with two
+     processors, where RISC OS is emulated (UTM on an Apple Silicon Mac),
+     a busy RISC OS kept rol-fb waiting and the pointer stuttered. rol-fb
+     draws at most 25 frames a second, so RISC OS loses little by it. */
+  if (setpriority (PRIO_PROCESS, 0, -10))
+    perror ("rol-fb: setpriority");
   /* never wait for RISC OS to read its input: if it hangs, rol-fb must
      still see Ctrl+Break (events are dropped while it isn't reading) */
   fcntl (sock, F_SETFL, fcntl (sock, F_GETFL) | O_NONBLOCK);
