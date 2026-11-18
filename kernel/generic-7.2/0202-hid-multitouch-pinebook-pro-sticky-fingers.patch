@@ -10,24 +10,26 @@ index edb37b4c8..668e5ce53 100644
  #define MT_CLS_SIS				0x0457
  
  #define MT_DEFAULT_MAXCONTACT	10
-@@ -411,6 +412,16 @@ static const struct mt_class mt_classes[] = {
+@@ -411,6 +412,18 @@ static const struct mt_class mt_classes[] = {
  			MT_QUIRK_STICKY_FINGERS |
  			MT_QUIRK_FORCE_GET_FEATURE,
  	},
 +	/*
 +	 * The Pinebook Pro's touchpad (HAILUCK, USB 258a:001e) sometimes
-+	 * leaves out a finger's release: the default class, plus releasing
-+	 * the fingers when the pad has sent nothing for a while.
++	 * leaves out a finger's release: the default class, plus a finger
++	 * the pad no longer reports in a frame counts as lifted, and the
++	 * fingers are released when the pad has sent nothing for a while.
 +	 */
 +	{ .name = MT_CLS_PINEBOOK_PRO,
 +		.quirks = MT_QUIRK_ALWAYS_VALID |
 +			MT_QUIRK_CONTACT_CNT_ACCURATE |
++			MT_QUIRK_NOT_SEEN_MEANS_UP |
 +			MT_QUIRK_STICKY_FINGERS,
 +	},
  	{ .name = MT_CLS_GOOGLE,
  		.quirks = MT_QUIRK_ALWAYS_VALID |
  			MT_QUIRK_CONTACT_CNT_ACCURATE |
-@@ -2726,6 +2737,10 @@ static const struct hid_device_id mt_devices[] = {
+@@ -2726,6 +2739,10 @@ static const struct hid_device_id mt_devices[] = {
  		HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
  			   I2C_VENDOR_ID_HANTICK, I2C_PRODUCT_ID_HANTICK_5288) },
  

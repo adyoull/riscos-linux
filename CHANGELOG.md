@@ -8,6 +8,23 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Touchpad: two fingers Adjust; a lost finger let go (18 Nov 2026; riscos-support 1.0.0074-1, riscos-kernel-generic 7.2.0-9)
+
+Raik (Pinebook Pro): at first the pad works, then every click is Menu,
+no drag or Select; he wants Select/Adjust from the pad (Menu on the Pine
+key), as native RISC OS, where the pad is a USB mouse and two fingers
+are its right button. Every click Menu = rol-fb counting two fingers
+(BTN_TOOL_DOUBLETAP), so the kernel kept a contact the pad stopped
+reporting: MT_CLS_PINEBOOK_PRO had STICKY_FINGERS (released only after
+the pad goes quiet) but not NOT_SEEN_MEANS_UP (INPUT_MT_DROP_UNUSED:
+a contact not in a frame is released). Kernel patch 0202 adds it;
+7.2.0-rol9 (built with LOCALVERSION= so no "-dirty"); modules and dtbs
+identical to rol8. rol-fb: clickpad press and tap with two fingers =
+Adjust, three = Menu (were Menu, Adjust); the first 100 pad clicks
+logged ("rol-fb: pad click N: F finger(s), touching T, slots k:x,y ..."),
+so the next logs show any lost finger. QEMU boot with rol9 and the new
+rol-fb: normal (no touchpad there to test).
+
 ### The pointer as a VM display's cursor (17 Nov 2026; riscos-support 1.0.0073-1)
 
 UTM report (Mac mini, M-series): the pointer jerky, sometimes markedly.

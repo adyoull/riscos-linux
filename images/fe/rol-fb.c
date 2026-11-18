@@ -2563,8 +2563,8 @@ touchpad_key (struct touchpad *t, int code, int down)
 	  if (held < 200 && t->travel < 2 * t->res_x && t->maxf
 	      && !t->clicked && now_ms () - last_key_ms > 300)
 	    {
-	      int key = t->maxf >= 3 ? RO_ADJUST : t->maxf == 2 ? RO_MENU : RO_SELECT;
-	      unsigned bit = t->maxf >= 3 ? 1 : t->maxf == 2 ? 2 : 4;
+	      int key = t->maxf >= 3 ? RO_MENU : t->maxf == 2 ? RO_ADJUST : RO_SELECT;
+	      unsigned bit = t->maxf >= 3 ? 2 : t->maxf == 2 ? 1 : 4;
 	      button (key, bit, 1);
 	      button (key, bit, 0);
 	    }
@@ -2589,12 +2589,27 @@ touchpad_key (struct touchpad *t, int code, int down)
       }
     case BTN_LEFT:
       /* the pad's button (a clickpad: the whole pad): with two fingers
-	 on it Menu, three Adjust */
+	 on it Adjust, three Menu. As RISC OS itself on a Pinebook Pro,
+	 whose pad is a mouse there: its two-finger click is the right
+	 button, Adjust (Menu is usually a key, such as the Pine key) */
       if (down && !t->pressed_bit)
 	{
 	  int f = t->fingers;
-	  t->pressed = f >= 3 ? RO_ADJUST : f == 2 ? RO_MENU : RO_SELECT;
-	  t->pressed_bit = f >= 3 ? 1 : f == 2 ? 2 : 4;
+	  t->pressed = f >= 3 ? RO_MENU : f == 2 ? RO_ADJUST : RO_SELECT;
+	  t->pressed_bit = f >= 3 ? 2 : f == 2 ? 1 : 4;
+	  /* (the first 100 clicks logged, with the fingers the pad says are
+	     on it: a finger that stays after it is lifted turned every
+	     click into Menu, a Pinebook Pro's) */
+	  static int logged;
+	  if (logged < 100)
+	    {
+	      char b[200];
+	      int n = snprintf (b, sizeof b, "rol-fb: pad click %d: %d finger(s), touching %d, slots", ++logged, f, t->touching);
+	      for (int k = 0; k < TP_SLOTS && n < (int) sizeof b - 24; k++)
+		if (t->f[k].id >= 0 && t->mt)
+		  n += snprintf (b + n, sizeof b - n, " %d:%d,%d", k, t->f[k].x, t->f[k].y);
+	      fprintf (stderr, "%s\n", b);
+	    }
 	  t->clicked = 1;
 	  button (t->pressed, t->pressed_bit, 1);
 	}
