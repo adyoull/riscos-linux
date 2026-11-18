@@ -71,6 +71,11 @@ done
 # I2C, and the CW2015 fuel gauge. Built in: nothing loads them by alias.
 c -e I2C_CHARDEV -e I2C_DESIGNWARE_CORE -e I2C_DESIGNWARE_PLATFORM -e HID_MULTITOUCH \
   -e I2C_HID_OF -e BATTERY_CW2015
+# the Pi 4's, Pi 5's and CM5's HEVC (H.265) decoder (rpivid, Linux's V4L2
+# stateless driver with the request API) for ReelHWAccel's hevcdec under
+# ROL; only the Pi tree has it. Built in: /dev/video* and /dev/media*
+# are there at start-up, for init to give to the video group.
+c -e VIDEO_RPIVID
 mk ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig >/dev/null
 # things that default to on once modules are possible, and aren't wanted
 c -d KPROBES -d RTLWIFI_DEBUG -d IWLWIFI_DEVICE_TRACING -d RTW88_DEBUG -d RTW89_DEBUGMSG -d ATH10K_DEBUG

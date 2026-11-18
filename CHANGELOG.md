@@ -8,6 +8,24 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### HEVC: the Pi's decoder for ReelHWAccel (18 Nov 2026; riscos-kernel-pi 6.6.78-17)
+
+Owner: "How can we get HEVC working on ROL via Reelhwaccel". hevcdec
+(ReelHWAccel) is a stateless decoder that drives the rpivid HEVC block's
+registers itself (OS_Memory 13, BCMSupport's clock, PMP memory); under
+ROL the block is Linux's. The Pi kernel now has CONFIG_VIDEO_RPIVID=y
+(drivers/staging/media/rpivid, compatible raspberrypi,rpivid-vid-decoder:
+codec@7eb10000 in bcm2711-rpi-4-b, codec@800000 "okay" in bcm2712-rpi-5-b
+and the CM5's), with MEDIA_CONTROLLER_REQUEST_API; in kernel-modules.sh
+too. Built in, so /dev/video* and /dev/media* exist when init's
+protect_setup gives them to the video group (0660). LOCALVERSION
+-v8-rol17; oneUpPower.ko rebuilt against it; the module list is the
+same. The hevcdec back end (V4L2 request API through
+IXSupport_LinuxSyscall) is handed to ReelHWAccel
+(handoffs/2026-11-18-rol-hevcdec-linux-backend-rpivid.md). Booted under
+QEMU raspi3b to the root mount (media and videodev initialise); not run
+on a Pi 4 or 5.
+
 ### The current directory: HardDisc4 (18 Nov 2026; riscos-harddisc 1.0.0072-1)
 
 Ralph (forum): crash dumps for ARM aborts never appeared; the CSD was
