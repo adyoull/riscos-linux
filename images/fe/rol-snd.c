@@ -15,7 +15,10 @@
  * The card: the one named in /riscos/sound/config ("device=" an ALSA card
  * id, as in /proc/asound/cards, or a number; "auto" or nothing for the
  * first of: a USB card, an HDMI port with a screen that takes sound, the
- * headphone socket, any other).
+ * headphone socket, any other). Looked at again every second while
+ * playing: a USB card plugged in (or a screen with speakers connected)
+ * takes over at once, and when the card in use goes, the next best one
+ * plays.
  *
  *   rol-snd [-f FIFO] [-d CARD] [-v]
  *
@@ -65,6 +68,14 @@ read_file (const char *p, char *buf, size_t n)
   close (fd);
   buf[r > 0 ? r : 0] = 0;
   return r > 0 ? (int) r : 0;
+}
+
+static long
+mono_ms (void)
+{
+  struct timespec t;
+  clock_gettime (CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1000L + t.tv_nsec / 1000000;
 }
 
 /* --- choosing the card ---------------------------------------------------- */
@@ -184,6 +195,25 @@ read_config (void)
 	snprintf (sets[nsets].value, sizeof sets[nsets].value, "%s", v + 1);
 	nsets++;
       }
+}
+
+/* while playing: a card the choice now prefers (a USB card plugged in, a
+   screen with speakers connected, or another named in the config) */
+static struct card playing_card (void);
+static int
+better_card (void)
+{
+  struct card now = playing_card (), c;
+  read_config ();
+  if (now.num < 0 || choose_card (&c))
+    return 0;
+  if (c.num == now.num && c.dev == now.dev)
+    return 0;
+  /* by name: the one named; auto: only one that scores higher (no
+     changing back and forth between equals) */
+  if (strcmp (want_card, "auto") && want_card[0])
+    return 1;
+  return c.score > now.score;
 }
 
 /* --- the card's mixer ----------------------------------------------------
@@ -327,6 +357,15 @@ static struct
   unsigned iec_count;		/* the frame within the block of 192 */
   unsigned char iec_status[24];	/* the channel status sent with them */
 } pcm = { .fd = -1 };
+
+static struct card
+playing_card (void)
+{
+  struct card c = { .num = -1 };
+  if (pcm.fd >= 0)
+    c = pcm.card;
+  return c;
+}
 
 static void
 mask_one (struct snd_pcm_hw_params *p, int param, unsigned bit)
@@ -641,6 +680,7 @@ main (int argc, char **argv)
   chmod (fifo_path, 0666);
   static int16_t buf[65536], out[3 * 65536];
   unsigned cur_rate = 0;
+  long last_look = mono_ms ();
   for (;;)
     {
       /* wait for RISC OS (LinuxAudio opens the FIFO when sound starts) */
@@ -687,6 +727,17 @@ main (int argc, char **argv)
 	    {
 	      unsigned n = resample (buf, frames, out, sizeof out / 4);
 	      pcm_write (out, n);
+	    }
+	  /* each second: a better card? then it plays from the next buffer */
+	  long t = mono_ms ();
+	  if (t - last_look >= 1000)
+	    {
+	      last_look = t;
+	      if (pcm.fd >= 0 && better_card ())
+		{
+		  logmsg ("another sound card is preferred now: changing to it");
+		  pcm_close ();
+		}
 	    }
 	}
       close (fd);

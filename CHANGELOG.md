@@ -8,6 +8,21 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### rol-snd: a better card takes over while playing (18 Nov 2026; riscos-support 1.0.0076-1)
+
+Chris (Dev Kit): no sound until *RMReInit LinuxAudio (which closes the
+FIFO, so rol-snd chooses its card again). rol-snd chose at pcm_open only
+(the first buffer, a rate change, or after the card failed), so a USB
+adapter enumerated later was never used. The owner: "make it that usb
+takes precedence over internal when plugged in". Now, while playing,
+once a second better_card(): read_config, choose_card; the same card ->
+nothing; a card named by device= that differs, or (auto) one scoring
+higher -> "another sound card is preferred now: changing to it",
+pcm_close, and the next buffer opens the new one. A card that goes
+already failed the write and was chosen again. QEMU (-audiodev none,
+intel-hda + hda-duplex, qemu-xhci; device_add usb-audio, then device_del):
+HDA -> QEMU USB Audio within a second -> "write: No such device" -> HDA.
+
 ### The sound's logs in LOGS (18 Nov 2026; riscos-support 1.0.0075-1)
 
 Chris's Dev Kit: still no sound after the CMA fix (7.2.0-7.2: no
