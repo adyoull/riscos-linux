@@ -8,6 +8,23 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### PackMan put back when missing (19 Nov 2026; riscos-support 1.0.0079-1)
+
+Owner: PackMan "seems to have vanished on my install"; "can we add it to
+the support .deb so that if it is missing it is installed?". PackMan was
+only ever in the images (HardDisc4.Apps.Admin.!PackMan, PackMan 0.9.8-1
+with its own Status record), never in a package, and no package removes
+it. riscos-support now has /usr/share/riscos/packman-app (the images'
+!PackMan, its Info and Status line; Apache 2.0) and
+/usr/lib/riscos/place-packman (riscos-rolpkg packages/riscos-support),
+run by the postinst: only when no !PackMan directory with a !RunImage is
+found in HardDisc4 (6 levels), it copies !PackMan to Apps.Admin (uid
+1000), replaces Info.PackMan and sets or adds PackMan's Status line (in
+place, no trailing newline). The image roots have both. Tried on copies
+of the generic image's disc: present (Status unchanged), deleted,
+deleted with Admin, Info gone and a 0.9.9-1 record, moved (left alone),
+no record (line added); not run on a machine.
+
 ### HEVC: cacheable frames (19 Nov 2026; riscos-kernel-pi 6.6.78-18)
 
 ReelHWAccel's results (owner's Pi 4, 6.6.78-17, HEVCTest 0.1.15): every
