@@ -8,6 +8,20 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Pinebook Pro Wi-Fi: no firmware WPA2 handshake (19 Nov 2026; riscos-kernel-generic 7.2.0-10)
+
+Raik: Wi-Fi "unstable/slow like before" (power saving was already off,
+1.0.0038-1). Owner: Pine64's Pinebook Pro page lists "Issues have been
+reported with WPA2 networks" (forum thread 8822: brcmfmac "chip crash
+eventing, reason=0x8001" after WPA2 authentication; no fix there).
+CONFIG_CMDLINE (forced) gains brcmfmac.feature_disable=0x2000
+(BRCMF_FEAT_FWSUP, bit 13): the firmware's 4-way handshake offload is not
+used, wpa_supplicant does it. LOCALVERSION -rol10; same module list.
+QEMU: boots to the desktop with the new command line. Not tried on a
+Pinebook Pro; Raik's LOGS (wifi-log, network-log, kernel-log) asked for
+to confirm. (The test bed's kernel-7.2-generic.config had stayed at -rol8;
+now the same as riscos-linux's.)
+
 ### The FAT partition checked at start-up (19 Nov 2026; riscos-support 1.0.0080-1)
 
 George (Pi 4): Updates failed in riscos-kernel-pi 6.6.78-18's and
