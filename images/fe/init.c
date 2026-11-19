@@ -1395,6 +1395,65 @@ cmd_up (void)
     }
 }
 
+/* The FAT partition checked, and repaired if it needs it, before anything
+   mounts it (from riscos-support 1.0.0080-1). A machine switched off or
+   reset without shutting down leaves it marked "not properly unmounted",
+   and sometimes with a broken FAT; Linux then makes it read-only the
+   first time a write meets the damage, and updates can't write the
+   kernel or the Pi's firmware (George's Pi 4, 19 Nov 2026). Linux leaves
+   it marked after an error too, so the next start-up checks it.
+   dosfstools' fsck.fat -a -w (riscos-support depends on it); without it
+   nothing is done. Its report goes to /riscos/fat-check.txt (and LOGS)
+   and a line to the kernel's log; it's given 60 seconds. */
+static void
+fat_check (const char *dev)
+{
+  const char *fsck = NULL;
+  if (access ("/usr/sbin/fsck.fat", X_OK) == 0)
+    fsck = "/usr/sbin/fsck.fat";
+  else if (access ("/sbin/fsck.fat", X_OK) == 0)
+    fsck = "/sbin/fsck.fat";
+  if (!fsck)
+    return;
+  pid_t pid = fork ();
+  if (pid < 0)
+    return;
+  if (pid == 0)
+    {
+      int in = open ("/dev/null", O_RDONLY);
+      int out = open ("/riscos/fat-check.txt", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+      if (in >= 0)
+	dup2 (in, 0);
+      if (out >= 0)
+	{
+	  dup2 (out, 1);
+	  dup2 (out, 2);
+	}
+      alarm (300);
+      execl (fsck, "fsck.fat", "-a", "-w", dev, (char *) NULL);
+      _exit (127);
+    }
+  int st = 0;
+  while (waitpid (pid, &st, 0) < 0 && errno == EINTR)
+    ;
+  int r = WIFEXITED (st) ? WEXITSTATUS (st) : 128 + WTERMSIG (st);
+  char m[200];
+  /* fsck.fat: 0 nothing wrong, 1 errors found and corrected, else not */
+  snprintf (m, sizeof m, "<5>rol-init: %s: FAT checked: %s\n", dev,
+	    r == 0 ? "no errors" : r == 1 ? "errors found and repaired"
+	    : "errors not repaired (see fat-check.txt)");
+  int k = open ("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+  if (k >= 0)
+    {
+      if (write (k, m, strlen (m)) < 0) { }
+      close (k);
+    }
+  if (r == 1)
+    say ("The boot partition was checked and repaired (the machine wasn't shut down properly last time).\n", "");
+  else if (r != 0)
+    say ("The boot partition has errors that couldn't be repaired: see LOGS/fat-check.txt\n", "");
+}
+
 /* A forgotten root password: a file RESETPW (or RESETPW.TXT) on the card's
    FAT partition (the root file system's disk, partition 1) clears it, so
    the next *Linux or !Updates asks for a new one. ROLLBACK (or
@@ -1440,6 +1499,7 @@ reset_root_password (void)
   if (!dev[0])
     return;
   snprintf (fat_dev, sizeof fat_dev, "%s", dev);
+  fat_check (dev);
   mkdir ("/run/fat", 0700);
   if (mount (dev, "/run/fat", "vfat", MS_NOSUID | MS_NODEV | MS_NOEXEC, "shortname=mixed"))
     return;
@@ -1514,8 +1574,8 @@ fat_logs_once (void)
     return;
   /* Mounted for as short a time as possible, and never left mounted: no
      SIGTERM while it is (machine_off waits), no system-wide sync (that
-     waited for every disc, up to 10 seconds: umount writes this one's
-     data itself), and nothing mounted on top of a copy already there. */
+     waited for every disc, up to 10 seconds: syncfs writes this one's
+     data), and nothing mounted on top of a copy already there. */
   sigset_t term, old;
   sigemptyset (&term);
   sigaddset (&term, SIGTERM);
@@ -1530,6 +1590,8 @@ fat_logs_once (void)
       copy_file ("/riscos/kernel-log.prev.txt", "/run/fatlog/LOGS/kernel-log.prev.txt");
       copy_file ("/riscos/previous-end.txt", "/run/fatlog/LOGS/previous-end.txt");
       /* the network's: rol-netd's and wpa_supplicant's (Wi-Fi) */
+      /* the FAT partition's check at start-up (fat_check) */
+      copy_file ("/riscos/fat-check.txt", "/run/fatlog/LOGS/fat-check.txt");
       copy_file ("/riscos/net/log.txt", "/run/fatlog/LOGS/network-log.txt");
       copy_file ("/run/wpa_supplicant.log", "/run/fatlog/LOGS/wifi-log.txt");
       /* the sound's: rol-snd's (which card it chose, and why it couldn't
@@ -1545,6 +1607,19 @@ fat_logs_once (void)
       for (unsigned k = 0; k < sizeof snd / sizeof *snd; k++)
 	if (copy_file (snd[k][0], snd[k][1]))
 	  unlink (snd[k][1]);
+      /* written out now (riscos-support 1.0.0080-1): the partition is
+	 also mounted at the Loader, so this umount isn't its last and
+	 didn't write anything; the FAT stayed in memory for up to half a
+	 minute, and switching off then broke the logs' cluster chains.
+	 syncfs writes only this partition, without waiting for other discs */
+      {
+	int d = open ("/run/fatlog", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (d >= 0)
+	  {
+	    syncfs (d);
+	    close (d);
+	  }
+      }
       if (umount ("/run/fatlog"))
 	umount2 ("/run/fatlog", MNT_DETACH);
     }

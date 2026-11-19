@@ -8,6 +8,29 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The FAT partition checked at start-up (19 Nov 2026; riscos-support 1.0.0080-1)
+
+George (Pi 4): Updates failed in riscos-kernel-pi 6.6.78-18's and
+riscos-kernel-generic's postinst, "cp: cannot create regular file
+'/tmp/tmp.*/bcm2711-rpi-400.dtb.new': Read-only file system". His kernel
+log: "FAT-fs (mmcblk0p1): Volume was not properly unmounted", then at
+20 s (init's LOGS copy) "error, fat_free_clusters: deleting FAT entry
+beyond EOF", "Filesystem has been set read-only". init's fat_check(),
+from reset_root_password() before the first mount of the FAT: Debian's
+fsck.fat -a -w on it (riscos-support Depends: dosfstools), output to
+/riscos/fat-check.txt (LOGS/fat-check.txt), a kmsg line "rol-init: DEV:
+FAT checked: ...", a line on the console for exit 1 or worse; killed
+after 300 s (60 s was too short under QEMU TCG with 684 broken chains).
+Linux leaves the dirty bit set after an error (a read-only superblock
+isn't marked clean), so the next start-up checks it. Also fat_logs_once
+syncfs()es /run/fatlog before umount: the partition is also mounted at
+the Loader, so that umount wrote nothing and a power cut within ~30 s
+broke LOGS' cluster chains (seen under QEMU: every killed run left
+"Contains a free cluster" in LOGS). Tests (QEMU generic, t8 copy): a
+partition with 684 broken chains repaired (67 s under TCG; 0.3 s on the
+host); after the syncfs change, kill after 130 s left only the dirty
+bit, checked in 1.3 s under TCG.
+
 ### PackMan put back when missing (19 Nov 2026; riscos-support 1.0.0079-1)
 
 Owner: PackMan "seems to have vanished on my install"; "can we add it to
