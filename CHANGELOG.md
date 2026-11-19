@@ -8,6 +8,19 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### HEVC: cacheable frames (19 Nov 2026; riscos-kernel-pi 6.6.78-18)
+
+ReelHWAccel's results (owner's Pi 4, 6.6.78-17, HEVCTest 0.1.15): every
+picture matched FFmpeg (8/10-bit, multi-slice, scaling lists, crops,
+1080p and 4K, pipelined); decoding 85-90% of native; converting frames
+with the CPU 3-4x slower than native, the CAPTURE mmap being
+write-combined. kernel/pi-6.6/0202-rpivid-capture-cache-hints.patch:
+`dst_vq->allow_cache_hints = 1` in rpivid_queue_init, so vb2 accepts
+V4L2_MEMORY_FLAG_NON_COHERENT (dma_alloc_noncontiguous, cacheable mmap,
+invalidate at DQBUF, clean at QBUF). OUTPUT queue unchanged.
+LOCALVERSION -v8-rol18; oneUpPower.ko rebuilt; same module list. QEMU
+raspi3b boot to the root mount; not run on a Pi 4 or 5.
+
 ### HEVC: the Pi's decoder for ReelHWAccel (18 Nov 2026; riscos-kernel-pi 6.6.78-17)
 
 Owner: "How can we get HEVC working on ROL via Reelhwaccel". hevcdec

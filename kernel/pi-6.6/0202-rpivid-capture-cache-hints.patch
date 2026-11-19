@@ -1,0 +1,22 @@
+From: Andrew Youll <adyoull@users.noreply.github.com>
+Subject: [PATCH] media: rpivid: allow cache hints on the CAPTURE queue
+
+Lets a program ask for cacheable decoded frames with
+V4L2_MEMORY_FLAG_NON_COHERENT (vb2 then cleans and invalidates them
+at QBUF and DQBUF). ReelHWAccel's hevcdec under RISC OS on Linux reads
+frames with the CPU; write-combined frames converted 3-4 times slower
+than native. The OUTPUT queue is unchanged.
+---
+--- a/drivers/staging/media/rpivid/rpivid_video.c
++++ b/drivers/staging/media/rpivid/rpivid_video.c
+@@ -686,6 +686,10 @@
+ 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+ 	dst_vq->lock = &ctx->ctx_mutex;
+ 	dst_vq->dev = ctx->dev->dev;
++	/* RISC OS on Linux: cacheable frames on request (CREATE_BUFS/REQBUFS
++	 * with V4L2_MEMORY_FLAG_NON_COHERENT), so ReelHWAccel's hevcdec can
++	 * read decoded pictures with the CPU at native speed. */
++	dst_vq->allow_cache_hints = 1;
+ 
+ 	return vb2_queue_init(dst_vq);
+ }
