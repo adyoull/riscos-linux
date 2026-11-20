@@ -164,10 +164,45 @@ static struct
 {
   int fd; char name[32]; int absmax_x, absmax_y;
   int touchpad; struct touchpad tp;
+  int vtablet;		/* an absolute pointer that isn't a screen, pad or pen:
+			   a VM's (UTM's, QEMU's usb-tablet) */
 } inputs[MAX_INPUTS];
+/* How the pointer is placed now, for the log: 1 by an absolute pointer,
+   2 by RISC OS from a mouse's relative moves, 3 by rol-fb from a mouse's
+   relative moves (a VM's absolute pointer is also there) */
+static int ninputs;
+static int ptr_mode, ptr_mode_logs;
+static void
+ptr_mode_set (int m, int i)
+{
+  if (m == ptr_mode)
+    return;
+  ptr_mode = m;
+  if (ptr_mode_logs++ < 100)
+    fprintf (stderr, "rol-fb: pointer: %s (%s)\n",
+	     m == 1 ? "absolute, placed where the device says"
+	     : m == 2 ? "mouse, placed by RISC OS (its mouse speed)"
+	     : m == 3 ? "mouse, placed by rol-fb (a VM's absolute pointer is also there)"
+	     : "mouse, placed by rol-fb (this RISC OS takes no relative moves)",
+	     inputs[i].name);
+}
+/* A VM's absolute pointer is there: a mouse's moves then place the
+   pointer here at once, as the absolute one does, not by way of RISC OS
+   (riscos-support 1.0.0081-1). UTM gives a VM both, and sends relative
+   moves at times (with the mouse captured); drawn where RISC OS said, the
+   pointer then lagged and jumped while a program kept RISC OS busy
+   (David's Mac mini M6, NetSurf). RISC OS's mouse speed doesn't apply to
+   those moves, as it never did to the absolute pointer's. */
+static int
+vtablet_present (void)
+{
+  for (int i = 0; i < ninputs; i++)
+    if (inputs[i].vtablet)
+      return 1;
+  return 0;
+}
 static long now_ms (void);
 static long last_key_ms;		/* typing: a touch then is a palm */
-static int ninputs;
 static int mx, my;				/* pointer, RISC OS pixels from top left */
 static unsigned buttons;			/* bit 0 select, 1 menu, 2 adjust */
 static int key_down[256];
@@ -2384,6 +2419,9 @@ scan_inputs (void)
       for (int k = 0; k < TP_SLOTS; k++)
 	inputs[ninputs].tp.f[k].id = -1;
       inputs[ninputs].touchpad = tp;
+      inputs[ninputs].vtablet = ax.maximum > 0 && ay.maximum > 0 && !tp
+				&& !HAS (keys, BTN_TOOL_PEN) && !HAS (keys, BTN_TOOL_FINGER)
+				&& !HAS (props, INPUT_PROP_DIRECT);
       if (tp)
 	{
 	  /* without a resolution, take the pad as 100 mm by 60 mm */
@@ -2399,7 +2437,7 @@ scan_inputs (void)
       char nm[128] = "";
       ioctl (fd, EVIOCGNAME (sizeof nm), nm);
       fprintf (stderr, "rol-fb: input %s: %s%s\n", e->d_name, nm,
-	       tp ? " (touchpad)" : "");
+	       tp ? " (touchpad)" : inputs[ninputs].vtablet ? " (absolute pointer)" : "");
       set_leds (fd);			/* a keyboard plugged in: RISC OS's LEDs */
       ninputs++;
     }
@@ -2774,7 +2812,8 @@ read_input (int i)
 	    }
 	  else if (e->type == EV_REL)
 	    {
-	      if ((e->code == REL_X || e->code == REL_Y) && ro_version >= 3)
+	      if ((e->code == REL_X || e->code == REL_Y) && ro_version >= 3
+		  && !vtablet_present ())
 		{
 		  /* a mouse, and RISC OS takes relative moves: it applies
 		     its mouse speed, and says where the pointer is */
@@ -2783,11 +2822,20 @@ read_input (int i)
 		  else
 		    rel_dy += e->value;
 		  rel_mouse = 1;
+		  ptr_mode_set (2, i);
 		}
-	      else if (e->code == REL_X)
-		mx = clampi (mx + e->value, 0, w - 1), moved = 1;
-	      else if (e->code == REL_Y)
-		my = clampi (my + e->value, 0, h - 1), moved = 1;
+	      else if (e->code == REL_X || e->code == REL_Y)
+		{
+		  /* placed here (see vtablet_present), from where it is now,
+		     and RISC OS's later positions don't move it back */
+		  if (e->code == REL_X)
+		    mx = clampi (mx + e->value, 0, w - 1);
+		  else
+		    my = clampi (my + e->value, 0, h - 1);
+		  moved = 1;
+		  rel_mouse = 0, abs_seen = 1;
+		  ptr_mode_set (vtablet_present () ? 3 : 4, i);
+		}
 	      else if (e->code == REL_WHEEL || e->code == REL_HWHEEL)
 		{
 		  /* the scroll wheel: no SocketKVM report for it, so as
@@ -2824,6 +2872,7 @@ read_input (int i)
 	      if (e->code == ABS_X && inputs[i].absmax_x > 0)
 		{
 		  rel_mouse = 0, abs_seen = 1;
+		  ptr_mode_set (1, i);
 		  int fx = (int) ((long long) e->value * fb_w / (inputs[i].absmax_x + 1));
 		  mx = clampi (sw > 0 ? (int) ((long long) (fx - ox) * w / sw) : fx, 0, w - 1);
 		  moved = 1;

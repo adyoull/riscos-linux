@@ -8,6 +8,24 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The pointer in UTM with a busy RISC OS (20 Nov 2026; riscos-support 1.0.0081-1)
+
+David (UTM, Mac mini M6, Bluetooth and wired mice; a screen recording):
+smooth at first, jerky once NetSurf runs, smooth when it quits, then
+jerky for good after e.g. StrongED. The 1.0.0020 UTM image: QEMU backend,
+virtio-gpu-pci (hardware cursor), USB 3.0, no PS/2, 2 CPUs. rol-fb took
+any REL_X/REL_Y (ro_version >= 3) as RISC OS's (R_MOUSE_REL, then drew
+the pointer at C_POINTER_POS), so with UTM's relative moves the pointer
+followed a busy RISC OS. rol-fb now marks a "VM's absolute pointer"
+(vtablet: ABS_X/Y, not a touchpad, pen, finger device or DIRECT screen);
+while one is there, REL_X/REL_Y move mx/my here (R_MOUSE, abs_seen=1,
+rel_mouse=0), so later C_POINTER_POS doesn't pull it back. Owner chose
+this over predicting RISC OS's position (which would jump on each
+correction). Logged: "rol-fb: input eventN: ... (absolute pointer)" and
+"rol-fb: pointer: ..." on each change of mode (first 100). QEMU (tablet +
+virtio-mouse): abs to 300,300 then rel +200,+100 opened the Pinboard
+menu around 500,400; the two mode lines logged. Not tried in UTM.
+
 ### Pinebook Pro Wi-Fi: no firmware WPA2 handshake (19 Nov 2026; riscos-kernel-generic 7.2.0-10)
 
 Raik: Wi-Fi "unstable/slow like before" (power saving was already off,
