@@ -8,6 +8,24 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Kernel updates and the 256 MB boot partition (22 Nov 2026; riscos-support 1.0.0082-1, kernels 6.6.78-18.1 and 7.2.0-10.1)
+
+George (ROOL forum): "disc full" updating, 512 KB free on the FAT. Every
+image's FAT is 256 MB (mkimage-generic.sh BOOT_MB) and every image has
+both kernel packages: a fresh FAT holds about 123 MB (BOOTAA64.EFI 69 MB,
+kernel8.img 33 MB, u-boot 13 MB). install-boot-files copied each replaced
+file to NAME.old, then wrote NAME.new beside both: with .old copies from
+an earlier update (225 MB used), writing BOOTAA64.EFI.new ran out. Now:
+stale NAME.new removed; NAME.old removed before writing; NAME.new written
+and synced; NAME renamed to NAME.old and NAME.new to NAME; if there's
+still no room, the other files' .old copies go (said in the message).
+Steady state 225 MB of 256. The kernel packages are repackaged (-18.1,
+-10.1, same files) with Depends riscos-support (>= 1.0.0082-1), so apt
+configures the new installer first. Test (tmpfs of 256 MB holding the
+image's FAT tree plus .old copies of both kernels): the old script failed
+with ENOSPC leaving BOOTAA64.EFI.new; the new one installed both with
+32 MB left, and also recovered the old script's full state.
+
 ### The pointer in UTM with a busy RISC OS (20 Nov 2026; riscos-support 1.0.0081-1)
 
 David (UTM, Mac mini M6, Bluetooth and wired mice; a screen recording):
