@@ -8,6 +8,27 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The running kernel's modules kept over an upgrade (24 Nov 2026; riscos-kernel-pi 6.6.78-18.2, -generic 7.2.0-10.2, -wdk2023 7.2.0-7.3)
+
+Norman (Argon ONE UP, CM5): the battery icon gone. uname -r was still
+6.6.78-v8-rol16, /sys/class/power_supply empty, no "oneup" in dmesg,
+no IXFS:$.riscos.battery.status: the -17/-18 package had replaced -16
+(dpkg removed /usr/lib/modules/6.6.78-v8-rol16) but its kernel never
+reached the full boot partition (see 22 Nov), so -16 ran without
+modules. New preinst (install/upgrade): if /usr/lib/modules/$(uname -r)
+is this package's own (dpkg-query -L $DPKG_MAINTSCRIPT_PACKAGE), copy it
+to /var/lib/riscos/kept-modules/VERSION. postinst (before
+install-boot-files, so a failure there doesn't skip it): the running
+version's copy put back if its folder is gone; copies for versions no
+longer running removed, with a put-back folder no package owns
+(dpkg-query -S). Same in all three kernel packages; wdk2023 now needs
+riscos-support >= 1.0.0082-1 too. Tested by running the scripts with
+paths moved to a scratch tree and stubbed uname/dpkg-query: upgrade
+16->18 with install-boot-files failing left rol16 and rol18 (rol16 with
+its modules); a later 18->19 upgrade, running 18, removed rol16 and its
+copy; the generic package on a Pi kept nothing. Norman's own machine
+needs the boot partition fix (riscos-support 1.0.0082-1) to start -18.
+
 ### Kernel updates and the 256 MB boot partition (22 Nov 2026; riscos-support 1.0.0082-1, kernels 6.6.78-18.1 and 7.2.0-10.1)
 
 George (ROOL forum): "disc full" updating, 512 KB free on the FAT. Every
