@@ -75,7 +75,9 @@ virtual machine.
 Sound: RISC OS Open's own sound modules, played through Linux: HDMI if
 the screen takes sound, else the Pi's headphone socket; a USB sound card
 comes first when one is plugged in. To choose, put a line "device=CARD"
-in /riscos/sound/config on the Linux partition. Volume: Configure, Sound,
+in /riscos/sound/config on the Linux partition (CARD as
+/proc/asound/cards names it: vc4hdmi0 or vc4hdmi1 for a Pi's HDMI
+ports, Headphones for its socket). Volume: Configure, Sound,
 or *MixVolume.
 
 Network: wired Ethernet with DHCP, as it comes. Configure's "Linux

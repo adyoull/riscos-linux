@@ -82,6 +82,74 @@ mono_ms (void)
 
 struct card { int num, dev; char id[32], name[96]; int score; };
 
+/* A card's ELD (what its screen says it can play) as an ALSA control.
+   The HDMI ports of a Raspberry Pi (vc4-hdmi) and of other ASoC cards
+   give it only this way: they have no eld# file in /proc/asound.
+   The number of sound formats its screen lists (0: no screen, or one
+   without speakers); -1: the card has no ELD control. */
+static int
+eld_sound (const unsigned char *eld, unsigned n)
+{
+  unsigned i;
+  if (n < 6)
+    return 0;
+  for (i = 0; i < n && !eld[i]; i++)
+    ;
+  if (i == n)
+    return 0;			/* all zero: no screen there */
+  return eld[5] >> 4;		/* the number of sound formats it lists */
+}
+
+static int
+eld_control (int num)
+{
+  char p[64];
+  static struct snd_ctl_elem_id ids[256];
+  struct snd_ctl_elem_list list;
+  int found = -1;
+  snprintf (p, sizeof p, "/dev/snd/controlC%d", num);
+  int fd = open (p, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0)
+    return -1;
+  memset (&list, 0, sizeof list);
+  list.space = sizeof ids / sizeof ids[0];
+  list.pids = ids;
+  if (ioctl (fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) == 0)
+    for (unsigned i = 0; i < list.used; i++)
+      {
+	struct snd_ctl_elem_info info;
+	struct snd_ctl_elem_value v;
+	if (ids[i].iface != SNDRV_CTL_ELEM_IFACE_PCM || strcmp ((const char *) ids[i].name, "ELD"))
+	  continue;
+	memset (&info, 0, sizeof info);
+	info.id = ids[i];
+	memset (&v, 0, sizeof v);
+	v.id = ids[i];
+	if (ioctl (fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0 || info.type != SNDRV_CTL_ELEM_TYPE_BYTES
+	    || ioctl (fd, SNDRV_CTL_IOCTL_ELEM_READ, &v) < 0)
+	  continue;
+	unsigned n = info.count < sizeof v.value.bytes.data ? info.count : sizeof v.value.bytes.data;
+	int k = eld_sound (v.value.bytes.data, n);
+	if (k > found)
+	  found = k;
+      }
+  close (fd);
+  /* in the log, when it changes: this is what decides between an HDMI
+     port and the headphone socket */
+  static signed char said[32];
+  if (num >= 0 && num < 32 && said[num] != found + 2)
+    {
+      said[num] = found + 2;
+      if (found < 0)
+	logmsg ("card %d: no ELD to read: can't tell whether its screen plays sound", num);
+      else if (found == 0)
+	logmsg ("card %d: no screen that plays sound (from its ELD)", num);
+      else
+	logmsg ("card %d: its screen plays sound (%d format%s in its ELD)", num, found, found == 1 ? "" : "s");
+    }
+  return found;
+}
+
 static int
 card_score (int num, const char *id, const char *name)
 {
@@ -100,10 +168,11 @@ card_score (int num, const char *id, const char *name)
       if ((d = opendir (p)))
 	{
 	  struct dirent *e;
-	  int present = 0;
+	  int present = 0, files = 0;
 	  while ((e = readdir (d)))
 	    if (!strncmp (e->d_name, "eld#", 4))
 	      {
+		files++;
 		snprintf (p, sizeof p, "/proc/asound/card%d/%s", num, e->d_name);
 		/* a screen there that lists sound formats (sad_count above 0:
 		   a monitor without speakers has an ELD too, with none) */
@@ -115,9 +184,12 @@ card_score (int num, const char *id, const char *name)
 		  }
 	      }
 	  closedir (d);
+	  /* no eld# file (a Raspberry Pi's HDMI ports): the ELD control */
+	  if (!files && eld_control (num) > 0)
+	    present = 1;
 	  return present ? 300 : 50;
 	}
-      return 50;
+      return eld_control (num) > 0 ? 300 : 50;
     }
   if (strstr (id, "Headphones") || strstr (name, "Headphones"))
     return 200;

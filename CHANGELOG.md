@@ -8,6 +8,27 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Sound to a Pi's HDMI screen (24 Nov 2026; riscos-support 1.0.0084-1)
+
+Owner's Pi 4, screen with speakers on HDMI: sound-log "playing on card 0
+(Headphones, bcm2835 Headphones)", silent screen. /proc/asound/card1
+(vc4hdmi0) holds only id and pcm0p: vc4-hdmi (ASoC hdmi-codec) makes no
+eld# file (those are the HDA driver's), so card_score gave every Pi HDMI
+port 50, below Headphones (200), ever since the Headphones card appeared
+(riscos-kernel-pi 6.6.78-8). With "device=vc4hdmi0" in /riscos/sound/config
+rol-snd changed over at once ("as IEC958", period 220, buffer 1760) and
+the owner heard Configure's Try and *Sound from the screen: the IEC958
+packing of 1.0.0057-1 is right on real vc4.
+
+rol-snd: for an HDMI card with no eld# file, eld_control() reads the
+card's "ELD" control (PCM interface, bytes) from /dev/snd/controlC<n>:
+all zero = no screen; byte 5 bits 4-7 = the number of sound formats.
+Above 0 scores 300 as an eld# file with sad_count above 0 does. Logged
+when it changes ("card 1: its screen plays sound (1 format in its ELD)").
+Tested: eld_sound() on made-up ELDs (none, a screen without speakers, one
+and three formats), a card with no control device. The control read is
+NOT yet tried on a Pi (QEMU has no vc4 sound).
+
 ### Sound log: level and mixer (24 Nov 2026; riscos-support 1.0.0083-1)
 
 George (Pi 4, headphones; Configure: mute off, volume full, beep loud):
