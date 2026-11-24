@@ -6,6 +6,21 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-31 (to be built, 24 Nov 2026)
+
+- **Downloads are no longer held back by a program's own buffer sizes**
+  (`mixed/Linux/Internet`, `c/main`): SO_SNDBUF and SO_RCVBUF set on a TCP
+  socket were passed to Linux, and on Linux a size set by a program turns
+  off the automatic sizing of that socket's buffers for good. RISC OS
+  programs commonly set 16 or 32 KB, right for RISC OS's own stack, but
+  on Linux that caps a download well below the line's speed. Measured on
+  a Pi 4 over Ethernet (a 100 MB file, 8 s each): no size set 84.5 Mbit/s
+  (161 over the whole file); 8 KB 1.2; 16 KB 4.0; 32 KB 13.9; 64 KB 27.7.
+  Iris got 11 Mbit/s. On a TCP socket the two sizes are now kept by the
+  module and not given to Linux, which sizes the buffers to the
+  connection; Getsockopt gives back the size that was set (or Linux's if
+  none was). UDP sockets pass both on as before.
+
 ## 5.31-30 (built 15 Nov 2026; released as riscos-rom 5.31-30)
 
 - **IXFS gives a directory's names in order** (`mixed/Linux/IXSupport`,

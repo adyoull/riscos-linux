@@ -59,7 +59,26 @@ static struct socket {
   bool async;
   bool nonblocking;
   bool sleeptw;
+  int sndbuf, rcvbuf;   // sizes a program set on a TCP socket (see buffer_option)
 } sockets[512];
+
+// SO_SNDBUF and SO_RCVBUF on a TCP socket are kept here, not given to
+// Linux. RISC OS programs commonly set them (16 or 32 KB suits RISC OS's
+// own stack), and a size set on a Linux socket turns off its automatic
+// sizing for good: with 32 KB a download ran at 14 Mbit/s instead of
+// 85-160 (Iris, 11 Mbit/s over Ethernet; measured on a Pi 4). Linux sizes
+// TCP buffers to the connection by itself. Getsockopt gives back the size
+// that was set; UDP sockets pass both straight on.
+static int *buffer_option(int fd, int level, int optname) {
+  if (fd < 0 || fd >= (int)(sizeof(sockets) / sizeof(sockets[0])) || level != SOL_SOCKET
+      || (optname != SO_SNDBUF && optname != SO_RCVBUF))
+    return NULL;
+  int type = 0;
+  ix_socklen_t len = sizeof(type);
+  if (ix_getsockopt(fd, ix_SOL_SOCKET, ix_SO_TYPE, &type, &len) < 0 || type != SOCK_STREAM)
+    return NULL;
+  return optname == SO_SNDBUF ? &sockets[fd].sndbuf : &sockets[fd].rcvbuf;
+}
 
 static void eprintf(const char *fmt, ...) {
   static char s[1000];
@@ -496,12 +515,26 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
       result = ix_close(r->r[0]);
       break;
     case Socket_Setsockopt - Socket_00: {
+      int *kept = buffer_option(r->r[0], r->r[1], r->r[2]);
+      if (kept) {
+        if (r->r[4] < (int)sizeof(int) || !r->r[3]) { result = -ix_EINVAL; break; }
+        *kept = *(int *)r->r[3];
+        result = 0;
+        break;
+      }
       result = convert_sockopt(r->r[1], r->r[2]);
       int level = r->r[1] == SOL_SOCKET ? ix_SOL_SOCKET : r->r[1];
       if (result >= 0) result = ix_setsockopt(r->r[0], level, result, (void*)r->r[3], r->r[4]);
       break;
     }
     case Socket_Getsockopt - Socket_00: {
+      int *kept = buffer_option(r->r[0], r->r[1], r->r[2]);
+      if (kept && *kept > 0 && r->r[3] && r->r[4] && *(int *)r->r[4] >= (int)sizeof(int)) {
+        *(int *)r->r[3] = *kept;
+        *(int *)r->r[4] = sizeof(int);
+        result = 0;
+        break;
+      }
       result = convert_sockopt(r->r[1], r->r[2]);
       int level = r->r[1] == SOL_SOCKET ? ix_SOL_SOCKET : r->r[1];
       if (result >= 0) result = ix_getsockopt(r->r[0], level, result, (void*)r->r[3], (void*)r->r[4]);
