@@ -6,7 +6,7 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
-## 5.31-31 (to be built, 24 Nov 2026)
+## 5.31-31 (built 24 Nov 2026; released as riscos-rom 5.31-31)
 
 - **Downloads are no longer held back by a program's own buffer sizes**
   (`mixed/Linux/Internet`, `c/main`): SO_SNDBUF and SO_RCVBUF set on a TCP
@@ -20,6 +20,11 @@ one is and what to watch when maintaining it. ROL installs the ROM as the
   module and not given to Linux, which sizes the buffers to the
   connection; Getsockopt gives back the size that was set (or Linux's if
   none was). UDP sockets pass both on as before.
+  - Checked under QEMU against a local server (a 100 MB file, 8 s each):
+    with 5.31-30 a size of 8 KB ran at 61.8 Mbit/s against 264.9 with
+    none; with 5.31-31 every size ran as fast as none (347.8 to 379.1),
+    and Getsockopt read back the size that was set. Not yet measured on a
+    Pi or with Iris.
 
 ## 5.31-30 (built 15 Nov 2026; released as riscos-rom 5.31-30)
 
