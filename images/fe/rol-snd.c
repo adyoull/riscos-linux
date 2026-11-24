@@ -341,6 +341,42 @@ mixer_setup (int card)
 	}
       if (done)
 	logmsg ("mixer: %d control%s set on card %d", done, done == 1 ? "" : "s", card);
+      /* the card's playback volumes and switches as they are now, in the
+	 log (riscos-support 1.0.0083-1: George's Pi 4 played to the
+	 headphone socket and nothing was heard) */
+      int shown = 0;
+      for (unsigned i = 0; i < list.used && shown < 16; i++)
+	{
+	  const char *name = (const char *) ids[i].name;
+	  if (!strstr (name, "Playback") && !strstr (name, "Speaker") && !strstr (name, "Headphone")
+	      && !strstr (name, "Master"))
+	    continue;
+	  struct snd_ctl_elem_info info;
+	  struct snd_ctl_elem_value v;
+	  memset (&info, 0, sizeof info);
+	  memset (&v, 0, sizeof v);
+	  info.id = ids[i];
+	  v.id = ids[i];
+	  if (ioctl (fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0 || ioctl (fd, SNDRV_CTL_IOCTL_ELEM_READ, &v) < 0)
+	    continue;
+	  char val[96] = "";
+	  size_t n = 0;
+	  for (unsigned c = 0; c < info.count && c < 8 && n < sizeof val - 24; c++)
+	    {
+	      if (info.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN)
+		n += snprintf (val + n, sizeof val - n, "%s%s", c ? "," : "", v.value.integer.value[c] ? "on" : "off");
+	      else if (info.type == SNDRV_CTL_ELEM_TYPE_INTEGER)
+		n += snprintf (val + n, sizeof val - n, "%s%ld", c ? "," : "", v.value.integer.value[c]);
+	      else if (info.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+		n += snprintf (val + n, sizeof val - n, "%s%u", c ? "," : "", v.value.enumerated.item[c]);
+	    }
+	  if (info.type == SNDRV_CTL_ELEM_TYPE_INTEGER)
+	    logmsg ("mixer: card %d: %s = %s (%ld to %ld)", card, name, val,
+		    info.value.integer.min, info.value.integer.max);
+	  else if (val[0])
+	    logmsg ("mixer: card %d: %s = %s", card, name, val);
+	  shown++;
+	}
     }
   close (fd);
 }
@@ -681,6 +717,11 @@ main (int argc, char **argv)
   static int16_t buf[65536], out[3 * 65536];
   unsigned cur_rate = 0;
   long last_look = mono_ms ();
+  /* how loud what RISC OS sends is, in the log: every 5 s for the first
+     minute of playing, then when it goes silent or stops being (from
+     riscos-support 1.0.0083-1) */
+  long level_from = mono_ms (), level_start = level_from;
+  int level_peak = 0, level_reports = 0, level_was = -1;
   for (;;)
     {
       /* wait for RISC OS (LinuxAudio opens the FIFO when sound starts) */
@@ -720,6 +761,25 @@ main (int argc, char **argv)
 	      rs.to = pcm.rate;
 	      rs.pos = 0;
 	      rs.last[0] = rs.last[1] = 0;
+	    }
+	  for (unsigned k = 0; k < frames * 2; k++)
+	    {
+	      int a = ((int16_t *) buf)[k];
+	      if (a < 0)
+		a = -a;
+	      if (a > level_peak)
+		level_peak = a;
+	    }
+	  if (mono_ms () - level_from >= 5000)
+	    {
+	      int sound = level_peak > 16;
+	      if (mono_ms () - level_start < 60000 || sound != level_was)
+		if (level_reports++ < 200)
+		  logmsg ("loudest from RISC OS in the last 5 s: %d of 32767%s", level_peak,
+			  sound ? "" : " (silence)");
+	      level_was = sound;
+	      level_peak = 0;
+	      level_from = mono_ms ();
 	    }
 	  if (pcm.rate == cur_rate)
 	    pcm_write (buf, frames);

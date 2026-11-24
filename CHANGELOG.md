@@ -8,6 +8,17 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Sound log: level and mixer (24 Nov 2026; riscos-support 1.0.0083-1)
+
+George (Pi 4, headphones; Configure: mute off, volume full, beep loud):
+sound-log "playing on card 0 (Headphones, bcm2835 Headphones) device 0 at
+44100 Hz", but silent. rol-snd now logs, after mixer_setup, each control
+with Playback/Speaker/Headphone/Master in its name (value, range; first
+16), and the loudest |sample| RISC OS sent per 5 s for the first minute of
+playing, then on each change between silence (<=16) and sound (first 200
+lines). QEMU (qemu-xhci + usb-audio, audiodev none): mixer lines and
+"loudest ... 0 of 32767 (silence)" every 5 s at the desktop.
+
 ### The running kernel's modules kept over an upgrade (24 Nov 2026; riscos-kernel-pi 6.6.78-18.2, -generic 7.2.0-10.2, -wdk2023 7.2.0-7.3)
 
 Norman (Argon ONE UP, CM5): the battery icon gone. uname -r was still
