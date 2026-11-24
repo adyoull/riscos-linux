@@ -8,6 +8,29 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Network transfers at the line's speed (24 Nov 2026; riscos-rom 5.31-31)
+
+Reports of slow networking on ROL, Ethernet too; Iris fetched at 11
+Mbit/s. Measured on the owner's Pi 4 over Ethernet (thinkbroadband's 100
+MB file, 8 s each, through TestAgent): Linux 160.8 Mbit/s over the whole
+file; RISC OS's Internet module, non-blocking, with no buffer size set,
+161.9. With SO_RCVBUF set (Linux doubles the size asked): 8 KB 1.2, 16 KB
+4.0, 32 KB 13.9, 64 KB 27.7, against 84.5 for the same 8 s with none. On
+Linux a buffer size set with setsockopt turns off the automatic sizing of
+that socket's buffers for good, and RISC OS programs set 16 to 64 KB.
+
+mixed/Linux/Internet c/main (riscos-5.31-source): struct socket keeps
+sndbuf and rcvbuf; buffer_option() picks them for SOL_SOCKET SO_SNDBUF and
+SO_RCVBUF on a SOCK_STREAM socket. Setsockopt stores the value (EINVAL if
+the length is under 4) and doesn't call Linux; Getsockopt gives the stored
+value back, or Linux's when none was set. UDP unchanged.
+
+ROM 5.31-31 built with the DDE (32d) in the QEMU build VM (romlinker: 492609
+bytes spare). Tested under QEMU (generic kernel, the t9 image) against a
+local 100 MB file: 5.31-30 asked 8/16/32/64 KB gave 61.8/170.9/290.9/430.1
+Mbit/s against 264.9 with none; 5.31-31 gave 379.1/347.8/358.7/350.9 against
+220.4, and read back 8192/16384/32768/65536. Not yet run on a Pi.
+
 ### Sound to a Pi's HDMI screen (24 Nov 2026; riscos-support 1.0.0084-1)
 
 Owner's Pi 4, screen with speakers on HDMI: sound-log "playing on card 0
