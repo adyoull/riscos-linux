@@ -149,8 +149,8 @@ LinuxInternet
 Resolver
 # Net
 # BootNet
-# Freeway
-# ShareFS
+Freeway
+ShareFS
 MimeMap
 # LanManFS            -options OPTIONS=-DCHECK_ARMBOOT_EXISTS ROMSPRITES=TRUE
 # DHCP                -options OPTIONS=-DMINIMUM_OPTIONS_LENGTH=4
@@ -201,7 +201,7 @@ HeroNames
 callx
 AsmUtils              -type EXP
 TCPIPheaders          -type HDR
-socklib               -type HDR
+socklib
 inetlib
 unixlib               -type HDR
 UnicodeLib            -type HDR

@@ -6,6 +6,41 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-32 (built 25 Nov 2026; released as riscos-rom 5.31-32)
+
+- **Ping: raw ICMP sockets** (`mixed/Linux/Internet`, `c/main`; David
+  Sharp: "ping: ssend socket: EPROTONOSUPPORT"). Socket_Creat refused
+  everything but TCP and UDP, and Linux gives raw sockets only to root.
+  AF_INET, SOCK_RAW, IPPROTO_ICMP is now a Linux ping socket (SOCK_DGRAM,
+  IPPROTO_ICMP; riscos-support 1.0.0085-1's init puts every group in
+  net.ipv4.ping_group_range), made to behave as a raw socket:
+  - Linux gives a reply only to the socket that sent the request; Ping
+    (FreeBSD's) sends on one socket and reads on another. Replies from all
+    the ICMP sockets are gathered in a ring of 32 (1480 bytes kept of
+    each), and each socket reads every packet that came after it was made;
+    SIGIO on any of them marks them all readable.
+  - A made-up IP header goes before each message (version 4, length,
+    TTL from IP_RECVTTL, protocol 1, the sender, the checksum).
+  - The socket is bound to the program's ident at its first send (a Bind
+    before that is kept until then); if the ident is taken, Linux's is
+    rewritten to the program's in the replies (RFC 1624 checksum update).
+  - Getsockopt SO_TYPE says SOCK_RAW. Only echo requests can be sent.
+- **Freeway's interface ioctls** (`c/main`): SIOCGIFCONF, SIOCGIFFLAGS,
+  SIOCGIFADDR, SIOCGIFDSTADDR, SIOCGIFBRDADDR and SIOCGIFNETMASK go to
+  Linux (struct ifreq is 32 bytes in both; addresses turned from Linux's
+  16-bit family to RISC OS's length and family bytes; Linux's NOTRAILERS,
+  MASTER and SLAVE flags dropped, MULTICAST moved to RISC OS's bit). The
+  SIOCS ones give EPERM: Linux sets its own network up.
+- **Freeway and ShareFS in the ROM** (`BuildSys/Components/ROOL/Linux`),
+  as in the BCM2835 ROM, and **socklib built** (it was headers only;
+  Freeway links socklib5zm). Freeway 0.43, ShareFS 3.65.
+- Checked under QEMU with two machines on one network (QEMU's socket
+  multicast, addresses 10.9.0.1 and 10.9.0.2): *FwShow on each listed
+  both hosts and both shared discs within 10 s; *Cat Share::Docs?.$
+  listed the other's disc and *Copy brought a file across unchanged, both
+  ways. Ping: 3 of 3 replies from the QEMU gateway (ttl 255), 2 of 2 from
+  127.0.0.1. Not yet on a Pi or with a native RISC OS machine.
+
 ## 5.31-31 (built 24 Nov 2026; released as riscos-rom 5.31-31)
 
 - **Downloads are no longer held back by a program's own buffer sizes**

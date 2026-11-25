@@ -36,6 +36,8 @@
 #include "netinet/in.h"
 #include "netinet/tcp.h"
 #include "arpa/inet.h"
+#include "sys/sockio.h"
+#include "net/if.h"
 
 #include "Global/HALEntries.h"
 #include "Global/Upcall.h"
@@ -60,7 +62,14 @@ static struct socket {
   bool nonblocking;
   bool sleeptw;
   int sndbuf, rcvbuf;   // sizes a program set on a TCP socket (see buffer_option)
+  // a raw ICMP socket (SOCK_RAW, IPPROTO_ICMP): see "ICMP" below
+  bool icmp, icmp_bound;
+  uint16_t icmp_id_prog, icmp_id_kern;  // ident as the program sends it, as Linux does
+  uint32_t icmp_bind_addr;
+  unsigned icmp_cursor;                 // next packet in icmp_ring for this socket
 } sockets[512];
+
+#define NSOCKETS ((int)(sizeof(sockets) / sizeof(sockets[0])))
 
 // SO_SNDBUF and SO_RCVBUF on a TCP socket are kept here, not given to
 // Linux. RISC OS programs commonly set them (16 or 32 KB suits RISC OS's
@@ -100,6 +109,184 @@ struct ix_sockaddr_in {
 
 typedef unsigned (__kuser_cmpxchg_t)(unsigned oldval, unsigned newval, volatile unsigned *ptr);
 #define __kuser_cmpxchg (*(__kuser_cmpxchg_t *)0xffff0fc0)
+
+static void pollword_sleep(bool tw, const pollword_t *pollword);
+
+// ICMP. RISC OS programs (Ping, from FreeBSD) use raw ICMP sockets, which
+// on Linux need privileges RISC OS doesn't have. Linux's unprivileged
+// "ping sockets" (SOCK_DGRAM, IPPROTO_ICMP; allowed for the groups in
+// net.ipv4.ping_group_range, which init sets) send echo requests and get
+// the replies back, so each raw ICMP socket is one of those, made to
+// behave as a raw socket:
+//  - Linux gives a reply only to the socket that sent the request, while
+//    on a raw socket every ICMP socket sees every packet (Ping sends on
+//    one socket and reads on another). So the replies from all of them
+//    are gathered here (icmp_ring), and each socket reads every packet
+//    that came after it was made.
+//  - Linux gives the ICMP message alone; a raw socket gives the IP header
+//    too: one is made up (with the real TTL, IP_RECVTTL, and the sender).
+//  - Linux puts its own ident in the request (the socket's "port"): the
+//    socket is bound to the program's ident when it first sends, and if
+//    that is taken the replies get the program's ident back.
+// Only echo requests can be sent (Linux's rule); anything else that isn't
+// TCP or UDP is still refused.
+#define ICMP_SLOTS 32
+#define ICMP_KEEP 1480
+static struct icmp_packet {
+  unsigned seq;              // 0: empty
+  int len;                   // the ICMP message's whole length
+  uint32_t src;
+  uint8_t ttl;
+  uint8_t data[ICMP_KEEP];   // (at most this much of it)
+} icmp_ring[ICMP_SLOTS];
+static unsigned icmp_seq = 1;
+
+static bool is_icmp(int fd) {
+  return fd >= 0 && fd < NSOCKETS && sockets[fd].icmp;
+}
+
+// The ident in an ICMP message changed, its checksum kept right (RFC 1624)
+static void icmp_set_id(uint8_t *d, int n, uint16_t from, uint16_t to) {
+  uint16_t id, hc;
+  if (n < 8) return;
+  memcpy(&id, d + 4, 2);
+  if (id != from) return;
+  memcpy(d + 4, &to, 2);
+  memcpy(&hc, d + 2, 2);
+  uint32_t sum = (uint16_t)~hc + (uint16_t)~from + (uint32_t)to;
+  sum = (sum & 0xFFFF) + (sum >> 16);
+  sum = (sum & 0xFFFF) + (sum >> 16);
+  hc = (uint16_t)~sum;
+  memcpy(d + 2, &hc, 2);
+}
+
+// Everything Linux has for any of the ICMP sockets, into icmp_ring
+static void icmp_drain(void) {
+  for (int fd = 0; fd < NSOCKETS; ++fd) {
+    if (!sockets[fd].icmp) continue;
+    for (int k = 0; k < ICMP_SLOTS; ++k) {
+      struct icmp_packet *p = &icmp_ring[icmp_seq % ICMP_SLOTS];
+      struct ix_sockaddr_in from;
+      uint32_t cm[16];
+      struct ix_iovec iov = {p->data, ICMP_KEEP};
+      struct ix_msghdr m = {
+        .msg_name = &from, .msg_namelen = sizeof(from),
+        .msg_iov = &iov, .msg_iovlen = 1,
+        .msg_control = cm, .msg_controllen = sizeof(cm)
+      };
+      memset(&from, 0, sizeof(from));
+      int n = ix_recvmsg(fd, &m, ix_MSG_DONTWAIT | ix_MSG_TRUNC);
+      if (n < 0) break;
+      p->seq = icmp_seq++;
+      if (!icmp_seq) icmp_seq = 1;
+      p->len = n;
+      p->src = from.sin_addr.s_addr;
+      p->ttl = 64;
+      // control messages: (length, level, type, data), 4-byte aligned
+      for (unsigned off = 0; off + 12 <= m.msg_controllen;) {
+        uint32_t *c = (uint32_t *)((char *)cm + off);
+        if (c[0] < 12) break;
+        if (c[1] == 0 /* IPPROTO_IP */ && c[2] == 2 /* IP_TTL */ && c[0] >= 16)
+          p->ttl = (uint8_t)c[3];
+        off += (c[0] + 3) & ~3u;
+      }
+      if (sockets[fd].icmp_id_kern != sockets[fd].icmp_id_prog)
+        icmp_set_id(p->data, n < ICMP_KEEP ? n : ICMP_KEEP,
+                    sockets[fd].icmp_id_kern, sockets[fd].icmp_id_prog);
+    }
+  }
+}
+
+// The oldest packet this socket hasn't read
+static struct icmp_packet *icmp_next(int fd) {
+  struct icmp_packet *best = NULL;
+  for (int i = 0; i < ICMP_SLOTS; ++i) {
+    struct icmp_packet *p = &icmp_ring[i];
+    if (p->seq && (int)(p->seq - sockets[fd].icmp_cursor) >= 0
+        && (!best || (int)(p->seq - best->seq) < 0))
+      best = p;
+  }
+  return best;
+}
+
+static uint16_t ip_checksum(const uint8_t *d, int n) {
+  uint32_t sum = 0;
+  for (int i = 0; i + 1 < n; i += 2) sum += (d[i] << 8) | d[i + 1];
+  if (n & 1) sum += d[n - 1] << 8;
+  while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+  return (uint16_t)~sum;
+}
+
+// Reading a raw ICMP socket: the next packet, with an IP header before it
+static ssize_t icmp_recv(int fd, struct ix_msghdr *m, int flags) {
+  pollword_t *pollword = &sockets[fd].pollword[__NR_recvmsg & 1];
+  while (true) {
+    pollword->s.data = 0;
+    icmp_drain();
+    struct icmp_packet *p = icmp_next(fd);
+    if (p) {
+      int kept = p->len < ICMP_KEEP ? p->len : ICMP_KEEP;
+      int whole = 20 + p->len;
+      uint8_t h[20] = {0x45, 0, (uint8_t)(whole >> 8), (uint8_t)whole, 0, 0, 0, 0,
+                       p->ttl, 1 /* ICMP */, 0, 0};
+      memcpy(h + 12, &p->src, 4);
+      uint16_t sum = ip_checksum(h, 20);
+      h[10] = (uint8_t)(sum >> 8); h[11] = (uint8_t)sum;
+      // copied into the program's buffers: the header, then the message
+      int done = 0;
+      for (size_t i = 0; i < m->msg_iovlen; ++i) {
+        uint8_t *b = m->msg_iov[i].iov_base;
+        int room = (int)m->msg_iov[i].iov_len;
+        while (room > 0 && done < 20 + kept) {
+          int c;
+          if (done < 20) {
+            c = 20 - done; if (c > room) c = room;
+            memcpy(b, h + done, c);
+          } else {
+            c = 20 + kept - done; if (c > room) c = room;
+            memcpy(b, p->data + (done - 20), c);
+          }
+          b += c; room -= c; done += c;
+        }
+      }
+      m->msg_flags = done < whole ? ix_MSG_TRUNC : 0;
+      if (m->msg_name && m->msg_namelen >= sizeof(struct ix_sockaddr_in)) {
+        struct ix_sockaddr_in a = {AF_INET, 0};
+        a.sin_addr.s_addr = p->src;
+        memcpy(m->msg_name, &a, sizeof(a));
+        m->msg_namelen = sizeof(a);
+      } else {
+        m->msg_namelen = 0;
+      }
+      m->msg_controllen = 0;
+      if (!(flags & ix_MSG_PEEK)) sockets[fd].icmp_cursor = p->seq + 1;
+      if (icmp_next(fd)) pollword->s.data = 1;
+      return done;
+    }
+    if (sockets[fd].nonblocking || (flags & ix_MSG_DONTWAIT)) return -ix_EAGAIN;
+    pollword_sleep(sockets[fd].sleeptw, pollword);
+  }
+}
+
+// Before an ICMP socket's first send: bound to the program's ident
+static void icmp_prepare(int fd, const struct msghdr *m) {
+  struct socket *s = &sockets[fd];
+  if (m->msg_iovlen < 1 || m->msg_iov[0].iov_len < 8) return;
+  uint16_t id;
+  memcpy(&id, (const uint8_t *)m->msg_iov[0].iov_base + 4, 2);
+  s->icmp_id_prog = id;
+  if (s->icmp_bound) return;
+  s->icmp_bound = true;
+  struct ix_sockaddr_in a = {AF_INET, id};
+  a.sin_addr.s_addr = s->icmp_bind_addr;
+  if (ix_bind(fd, &a, sizeof(a)) < 0) {
+    a.sin_port = 0;                    // (that ident is taken: Linux picks one)
+    ix_bind(fd, &a, sizeof(a));
+  }
+  struct ix_sockaddr_in b;
+  ix_socklen_t bl = sizeof(b);
+  s->icmp_id_kern = ix_getsockname(fd, &b, &bl) == 0 ? b.sin_port : id;
+}
 
 static void pollword_sleep(bool tw, const pollword_t *pollword) {
   if (tw) {
@@ -164,6 +351,15 @@ static int convert_msg_flags(int ro) {
   return l;
 }
 
+// A Linux sockaddr (16-bit family) made a RISC OS one (length, family)
+static void sockaddr2riscos(void *sa) {
+  uint8_t *b = sa;
+  uint16_t family;
+  memcpy(&family, b, 2);
+  b[0] = 16;
+  b[1] = (uint8_t)family;
+}
+
 static inline void addr2riscos(void *a, unsigned len) {
   struct sockaddr_in *ar = a;
   if (ar) {
@@ -208,6 +404,7 @@ static ssize_t do_msg(int fd, struct ix_msghdr *m, int flags, int syscall) {
 }
 
 static inline ssize_t do_recvmsg(int fd, struct ix_msghdr *m, int flags) {
+  if (is_icmp(fd)) return icmp_recv(fd, m, flags);
   return do_msg(fd, m, flags, __NR_recvmsg);
 }
 
@@ -239,6 +436,7 @@ static ssize_t do_sendmsg(int fd, const struct msghdr *m, int flags) {
   }
   // FIXME: Control message data
 
+  if (is_icmp(fd)) icmp_prepare(fd, m);
   return do_msg(fd, &msg, flags, __NR_sendmsg);
 }
 
@@ -353,10 +551,13 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
   (void)pw;
   int result = -ix_EPROTONOSUPPORT;
   switch (swi_no) {
-    case Socket_Creat - Socket_00:
-      if (r->r[0] == AF_INET && (r->r[1] == SOCK_DGRAM || r->r[1] == SOCK_STREAM)) {
+    case Socket_Creat - Socket_00: {
+      // a raw ICMP socket is a Linux ping socket (see "ICMP" above)
+      bool icmp = r->r[0] == AF_INET && r->r[1] == SOCK_RAW && r->r[2] == IPPROTO_ICMP;
+      int type = icmp ? SOCK_DGRAM : r->r[1];
+      if (r->r[0] == AF_INET && (type == SOCK_DGRAM || type == SOCK_STREAM)) {
         if (socket_server != -1) {
-          int so[3] = {r->r[0], r->r[1] | ix_SOCK_NONBLOCK , r->r[2]};
+          int so[3] = {r->r[0], type | ix_SOCK_NONBLOCK , r->r[2]};
           ix_write(socket_server, so, sizeof(so));
           struct ix_iovec iov = {&result, sizeof(result)};
           struct ix_cmsghdr_fd cmsg;
@@ -371,15 +572,26 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
             result = cmsg.fd;
           }
         } else {
-          result = ix_socket(r->r[0], r->r[1] | ix_SOCK_NONBLOCK | ix_SOCK_CLOEXEC , r->r[2]);
+          result = ix_socket(r->r[0], type | ix_SOCK_NONBLOCK | ix_SOCK_CLOEXEC , r->r[2]);
+        }
+        if (result >= NSOCKETS) {
+          ix_close(result);
+          result = -ix_EMFILE;
         }
         if (result >= 0) {
           memset(&sockets[result], 0, sizeof(sockets[result]));
+          if (icmp) {
+            int on = 1;
+            ix_setsockopt(result, 0 /* IPPROTO_IP */, 12 /* IP_RECVTTL */, &on, sizeof(on));
+            sockets[result].icmp = true;
+            sockets[result].icmp_cursor = icmp_seq;
+          }
           _swix(OS_ClaimDeviceVector, _INR(0, 2), result, sigio, pw);
           _swix(OS_Hardware, _IN(0) | _INR(8, 9), result, 0, EntryNo_HAL_IRQEnable);
         }
       }
       break;
+    }
     case Socket_Read - Socket_00: {
       struct ix_iovec iov = {(void*)r->r[1], r->r[2]};
       struct ix_msghdr msg = {
@@ -482,6 +694,13 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
       }
       break;
     case Socket_Bind - Socket_00:
+      if (is_icmp(r->r[0])) {
+        // kept until the first send, which binds it with the ident too
+        const struct sockaddr_in *a = (const struct sockaddr_in *)r->r[1];
+        sockets[r->r[0]].icmp_bind_addr = a->sin_addr.s_addr;
+        result = 0;
+        break;
+      }
       SET_ADDRESS(r->r[1], ix_bind(r->r[0], &addr_linux, sizeof(addr_linux)))
       break;
     case Socket_Accept - Socket_00:
@@ -512,6 +731,7 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
     case Socket_Close - Socket_00:
       _swix(OS_Hardware, _IN(0) | _INR(8, 9), r->r[0], 0, EntryNo_HAL_IRQDisable);
       _swix(OS_ReleaseDeviceVector, _INR(0, 2), r->r[0], sigio, pw);
+      if (r->r[0] >= 0 && r->r[0] < NSOCKETS) sockets[r->r[0]].icmp = false;
       result = ix_close(r->r[0]);
       break;
     case Socket_Setsockopt - Socket_00: {
@@ -540,6 +760,9 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
       if (result >= 0) result = ix_getsockopt(r->r[0], level, result, (void*)r->r[3], (void*)r->r[4]);
       if (result >= 0 && level == ix_SOL_SOCKET) {
         switch (r->r[2]) {
+          case SO_TYPE:
+            if (is_icmp(r->r[0])) *(int*)r->r[3] = SOCK_RAW;
+            break;
           case SO_ERROR:
             // FIXME What is optlen is too small?
             if (*(int*)r->r[3]) *(int*)r->r[3] = _swix(IXSupport_ConvertError, _IN(0), *(int*)r->r[3])->errnum - 0x20E00;
@@ -585,6 +808,53 @@ _kernel_oserror *swi_handler(int swi_no, _kernel_swi_regs *r, void *pw) {
           break;
         case FIONREAD:
           result = ix_ioctl(r->r[0], ix_FIONREAD, (int *)r->r[2]);
+          break;
+
+        // The interfaces (Freeway: ShareFS's and Access's discovery), from
+        // Linux. struct ifreq is 32 bytes in both, the name then the
+        // union; addresses come in Linux's sockaddr (a 16-bit family),
+        // given in RISC OS's (a length byte, then the family byte).
+        case SIOCGIFCONF: {
+          struct ifconf *c = (struct ifconf *)r->r[2];
+          result = ix_ioctl(r->r[0], 0x8912, c);
+          if (result >= 0)
+            for (int off = 0; off + (int)sizeof(struct ifreq) <= c->ifc_len; off += sizeof(struct ifreq))
+              sockaddr2riscos(c->ifc_buf + off + IFNAMSIZ);
+          break;
+        }
+        case SIOCGIFFLAGS: {
+          struct ifreq *f = (struct ifreq *)r->r[2];
+          result = ix_ioctl(r->r[0], 0x8913, f);
+          if (result >= 0) {
+            unsigned l = (uint16_t)f->ifr_flags;
+            // the same bits up to ALLMULTI, but for Linux's NOTRAILERS
+            // (RISC OS's SMART); Linux's MASTER and SLAVE aren't RISC OS's
+            unsigned ro = l & 0x3DF;
+            if (l & 0x1000) ro |= IFF_MULTICAST;
+            f->ifr_flags = (short)ro;
+            f->ifr_flagshigh = 0;
+          }
+          break;
+        }
+        case SIOCGIFADDR:
+        case SIOCGIFDSTADDR:
+        case SIOCGIFBRDADDR:
+        case SIOCGIFNETMASK: {
+          uint32_t req = (uint32_t)r->r[1];
+          int linux_req = req == SIOCGIFADDR ? 0x8915 : req == SIOCGIFDSTADDR ? 0x8917
+                        : req == SIOCGIFBRDADDR ? 0x8919 : 0x891B;
+          struct ifreq *f = (struct ifreq *)r->r[2];
+          result = ix_ioctl(r->r[0], linux_req, f);
+          if (result >= 0) sockaddr2riscos((char *)f + IFNAMSIZ);
+          break;
+        }
+        // Linux's network is set up by Linux (rol-netd), not by RISC OS
+        case SIOCSIFADDR:
+        case SIOCSIFFLAGS:
+        case SIOCSIFBRDADDR:
+        case SIOCSIFNETMASK:
+        case SIOCSIFDSTADDR:
+          result = -ix_EPERM;
           break;
 
         default:
@@ -640,6 +910,11 @@ int sigio_handler(_kernel_swi_regs *regs, void *pw) {
 
   if (band & (ix_POLLIN | ix_POLLERR | ix_POLLHUP))
     sockets[s].pollword[__NR_recvmsg & 1].s.data = 1;
+
+  // every raw ICMP socket sees every ICMP packet (see "ICMP" above)
+  if (sockets[s].icmp && (band & ix_POLLIN))
+    for (int i = 0; i < NSOCKETS; ++i)
+      if (sockets[i].icmp) sockets[i].pollword[__NR_recvmsg & 1].s.data = 1;
 
   if (band & (ix_POLLOUT))
     sockets[s].pollword[__NR_sendmsg & 1].s.data = 1;
