@@ -8,6 +8,41 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### systemd kept out of Updates (25 Nov 2026; riscos-support 1.0.0089-1)
+
+The owner's Pi went from riscos-support 1.0.0084-1 to 1.0.0088-1, and the
+update failed: "Errors were encountered while processing: systemd-sysv".
+
+- **Cause** (found with apt's Debug::pkgDepCache::AutoInstall): apt followed
+  this chain of dependencies:
+  - riscos-support Recommends riscos-print;
+  - riscos-print Depends cups-daemon, which Recommends colord;
+  - colord Depends polkitd, which Depends libpam-systemd;
+  - libpam-systemd Depends systemd and systemd-sysv.
+
+  riscos-support 1.0.0088-1 conflicts with these, so the problem
+  resolver kept riscos-support back, but left the systemd chain marked.
+  systemd was configured, and systemd-sysv failed on /usr/sbin/init
+  (riscos-support 1.0.0084-1's file).
+- **The earlier check missed it:** it was `apt-get install ./debs`, not
+  Updates' full-upgrade.
+- **The fix** (riscos-support 1.0.0089-1):
+  - a Pin-Priority -1 for systemd, systemd-sysv, sysvinit-core and udev
+    (/etc/apt/preferences.d/riscos-init, written by the postinst);
+  - no Recommends of riscos-print; rol-info installs it once, after the
+    update, when the pin is in place (/var/lib/riscos/print-offered);
+  - Conflicts only with systemd-sysv and sysvinit-core.
+- **Reproduced and tested** on a copy of an image root, with riscos-support
+  1.0.0084-1 and riscos-harddisc 1.0.0072-1 (chroot, real apt):
+  - final52's full-upgrade gave the Pi's failure exactly;
+  - after purging the half-installed packages (see rolpkg's CHANGELOG),
+    final53's full-upgrade gave riscos-support 1.0.0089-1;
+  - rol-info then installed riscos-print, with colord left out as
+    uninstallable and no systemd;
+  - autoremove took the leftovers.
+- A failed machine can't recover through Updates: apt-get full-upgrade
+  stops at "Unmet dependencies" before anything is resolved.
+
 ### Inet$LocalDomain from DHCP (25 Nov 2026; riscos-support 1.0.0088-1, riscos-harddisc 1.0.0075-1)
 
 The web browser project reported that some host names resolved to
