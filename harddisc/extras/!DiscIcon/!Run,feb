@@ -1,7 +1,13 @@
 | DiscIcon: HardDisc4 as a hard disc icon on the icon bar
-| (and NetWatch: RISC OS's name servers follow Linux's network)
+| (and NetWatch: RISC OS's name servers follow Linux's network; Battery:
+| the battery's icon, on a machine with one)
 |
 | Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
-IfThere <Obey$Dir>.^.!NetWatch Then Filer_Run <Obey$Dir>.^.!NetWatch
+| (Filer_Run keeps its name as given and starts the task later, by when
+| Obey$Dir may be another file's (SparkFS's AutoRun at start-up: "File
+| ...!SparkFS.AutoRun.^.!NetWatch.!Run not found"): DiscIcon$Dir holds.)
+Set DiscIcon$Dir <Obey$Dir>
+IfThere <DiscIcon$Dir>.^.!NetWatch Then Filer_Run <DiscIcon$Dir>.^.!NetWatch
+IfThere <DiscIcon$Dir>.^.!Battery Then Filer_Run <DiscIcon$Dir>.^.!Battery
 WimpSlot -min 64k -max 64k
 BASIC -quit <Obey$Dir>.!RunImage

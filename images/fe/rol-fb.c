@@ -2374,6 +2374,30 @@ set_leds (int fd)
     }
 }
 
+/* Game controllers (joysticks, gamepads) are left alone: not RISC OS's
+   pointer (a pad's stick is an absolute X and Y, and was taken for a VM's
+   pointer, moving the pointer and, from riscos-support 1.0.0081-1, making
+   the mouse's moves local) and not grabbed, so nothing else is kept from
+   them. rol-usbd gives a USB one to RISC OS's own USB stack, where
+   RISC OS's USB joystick drivers find it. As Linux's joydev decides: a
+   button in the joystick or gamepad ranges (BTN_JOYSTICK to BTN_THUMBR),
+   with no pen, finger or touch. ignored[]: the nodes left alone, by their
+   inode and time, so a node reused for another device is looked at again. */
+#define MAX_IGNORED 16
+static struct { ino_t ino; time_t ctime; } ignored[MAX_IGNORED];
+static int nignored;
+
+static int
+game_controller (const unsigned long *keys)
+{
+#define HASK(n) ((keys[(n) / (8 * sizeof (long))] >> ((n) % (8 * sizeof (long)))) & 1)
+  int pad = 0;
+  for (int b = BTN_JOYSTICK; b <= BTN_THUMBR; b++)
+    pad |= HASK (b);
+  return pad && !HASK (BTN_TOOL_PEN) && !HASK (BTN_TOOL_FINGER) && !HASK (BTN_TOUCH);
+#undef HASK
+}
+
 static void
 scan_inputs (void)
 {
@@ -2381,6 +2405,28 @@ scan_inputs (void)
   if (!d)
     return;
   struct dirent *e;
+  /* the left-alone nodes still there, by inode and time */
+  int keep = 0;
+  for (int k = 0; k < nignored; k++)
+    {
+      struct stat st;
+      char p[300];
+      int there = 0;
+      DIR *d2 = opendir ("/dev/input");
+      struct dirent *e2;
+      while (d2 && (e2 = readdir (d2)))
+	{
+	  snprintf (p, sizeof p, "/dev/input/%s", e2->d_name);
+	  if (!strncmp (e2->d_name, "event", 5) && stat (p, &st) == 0
+	      && st.st_ino == ignored[k].ino && st.st_ctime == ignored[k].ctime)
+	    there = 1;
+	}
+      if (d2)
+	closedir (d2);
+      if (there)
+	ignored[keep++] = ignored[k];
+    }
+  nignored = keep;
   while ((e = readdir (d)) && ninputs < MAX_INPUTS)
     {
       if (strncmp (e->d_name, "event", 5))
@@ -2392,12 +2438,37 @@ scan_inputs (void)
 	continue;
       char path[300];
       snprintf (path, sizeof path, "/dev/input/%s", e->d_name);
+      struct stat nst;
+      if (stat (path, &nst) == 0)
+	for (int k = 0; k < nignored; k++)
+	  known |= nst.st_ino == ignored[k].ino && nst.st_ctime == ignored[k].ctime;
+      if (known)
+	continue;
       /* read and write: writing EV_LED events sets a keyboard's LEDs */
       int fd = open (path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
       if (fd < 0)
 	fd = open (path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
       if (fd < 0)
 	continue;
+      {
+	unsigned long k[KEY_MAX / (8 * sizeof (long)) + 1];
+	memset (k, 0, sizeof k);
+	ioctl (fd, EVIOCGBIT (EV_KEY, sizeof k), k);
+	if (game_controller (k))
+	  {
+	    char nm[128] = "";
+	    ioctl (fd, EVIOCGNAME (sizeof nm), nm);
+	    fprintf (stderr, "rol-fb: input %s: %s (a game controller: left alone)\n", e->d_name, nm);
+	    close (fd);
+	    if (nignored < MAX_IGNORED && stat (path, &nst) == 0)
+	      {
+		ignored[nignored].ino = nst.st_ino;
+		ignored[nignored].ctime = nst.st_ctime;
+		nignored++;
+	      }
+	    continue;
+	  }
+      }
       struct input_absinfo ax = { 0 }, ay = { 0 };
       ioctl (fd, EVIOCGABS (ABS_X), &ax);
       ioctl (fd, EVIOCGABS (ABS_Y), &ay);

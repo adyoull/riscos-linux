@@ -40,6 +40,7 @@
 #include <poll.h>
 #include <time.h>
 #include <unistd.h>
+#include <limits.h>
 #include <sys/ioctl.h>
 #include <linux/fs.h>
 
@@ -61,6 +62,116 @@ read_int (const char *dir, const char *leaf, int base)
     return -1;
   b[n] = 0;
   return (int) strtol (b, NULL, base);
+}
+
+/* --- game controllers ---------------------------------------------- */
+
+/* A USB joystick or gamepad goes to RISC OS, as on RISC OS itself, where
+   its USB joystick drivers (Richard Walker's USBJoystick and others) drive
+   it through the USB stack: Linux's HID driver (usbhid) is taken off it
+   and then, with no driver, it's given as above. Only plain controllers:
+   one whose Linux input devices have joystick or gamepad buttons
+   (BTN_JOYSTICK to BTN_THUMBR, as Linux's joydev decides) and no keyboard
+   or mouse among them (a keyboard with a joystick stays Linux's). Pads
+   with a driver of their own (Xbox pads: xpad) aren't HID, and stay
+   Linux's, as RISC OS's HID drivers couldn't drive them either. */
+
+static void kmsg (const char *msg);
+
+/* bit b of a sysfs capabilities file (hex longs, most significant first) */
+static int
+cap_bit (const char *dir, const char *leaf, int b)
+{
+  char p[600], buf[1024];
+  snprintf (p, sizeof p, "%s/capabilities/%s", dir, leaf);
+  int fd = open (p, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return 0;
+  ssize_t n = read (fd, buf, sizeof buf - 1);
+  close (fd);
+  if (n <= 0)
+    return 0;
+  buf[n] = 0;
+  char *w[64];
+  int nw = 0;
+  for (char *t = strtok (buf, " \n"); t && nw < 64; t = strtok (NULL, " \n"))
+    w[nw++] = t;
+  int bits = 8 * sizeof (long), i = nw - 1 - b / bits;
+  if (i < 0)
+    return 0;
+  unsigned long v = strtoul (w[i], NULL, 16);
+  return (v >> (b % bits)) & 1;
+}
+
+/* 1: device n (as "1-1.2") is a game controller and nothing else */
+static int
+game_controller (const char *n)
+{
+  DIR *d = opendir ("/sys/class/input");
+  if (!d)
+    return 0;
+  char want[80];
+  snprintf (want, sizeof want, "/%s:", n);
+  int pad = 0, other = 0;
+  struct dirent *e;
+  while ((e = readdir (d)))
+    {
+      if (strncmp (e->d_name, "input", 5))
+	continue;
+      char p[300], real[PATH_MAX];
+      snprintf (p, sizeof p, "/sys/class/input/%s", e->d_name);
+      if (!realpath (p, real) || !strstr (real, want))
+	continue;
+      int joy = 0;
+      for (int b = 0x120; b <= 0x13e && !joy; b++)	/* BTN_JOYSTICK..BTN_THUMBR */
+	joy = cap_bit (real, "key", b);
+      int keyboard = cap_bit (real, "key", 30);	/* KEY_A */
+      int mouse = cap_bit (real, "key", 0x110) && cap_bit (real, "rel", 0);	/* BTN_LEFT, REL_X */
+      if (joy && !cap_bit (real, "key", 0x14a))	/* (not BTN_TOUCH) */
+	pad = 1;
+      if (keyboard || mouse)
+	other = 1;
+    }
+  closedir (d);
+  return pad && !other;
+}
+
+/* usbhid taken off device n's interfaces; 1 if none has a driver now */
+static int
+release_controller (const char *n)
+{
+  DIR *s = opendir (SYS);
+  if (!s)
+    return 0;
+  size_t nl = strlen (n);
+  int left = 0;
+  struct dirent *f;
+  while ((f = readdir (s)))
+    if (!strncmp (f->d_name, n, nl) && f->d_name[nl] == ':')
+      {
+	char p[600], t[300];
+	snprintf (p, sizeof p, "%s/%s/driver", SYS, f->d_name);
+	ssize_t l = readlink (p, t, sizeof t - 1);
+	if (l <= 0)
+	  continue;
+	t[l] = 0;
+	const char *b = strrchr (t, '/') ? strrchr (t, '/') + 1 : t;
+	int fd = -1;
+	if (!strcmp (b, "usbhid"))
+	  fd = open ("/sys/bus/usb/drivers/usbhid/unbind", O_WRONLY | O_CLOEXEC);
+	if (fd < 0 || write (fd, f->d_name, strlen (f->d_name)) < 0)
+	  left = 1;
+	if (fd >= 0)
+	  close (fd);
+      }
+  closedir (s);
+  if (!left)
+    {
+      char m[160];
+      snprintf (m, sizeof m, "rol-usbd: %s: a game controller: given to RISC OS (its USB joystick driver)", n);
+      kmsg (m);
+    }
+  return !left;
 }
 
 /* seen[bus][dev]: when it was first seen (0: not yet), so a device is only
@@ -92,22 +203,28 @@ look (void)
       if (now - seen[bus][dev] < 2)
 	continue;
       /* any interface with a driver? */
-      int ifaces = 0, driven = 0;
+      int ifaces = 0, driven = 0, hid = 0;
       DIR *s = opendir (SYS);
       struct dirent *f;
       size_t nl = strlen (n);
       while (s && (f = readdir (s)))
 	if (!strncmp (f->d_name, n, nl) && f->d_name[nl] == ':')
 	  {
-	    char p[600];
-	    struct stat st;
+	    char p[600], t[300];
 	    ifaces++;
 	    snprintf (p, sizeof p, "%s/%s/driver", SYS, f->d_name);
-	    if (lstat (p, &st) == 0)
-	      driven = 1;
+	    ssize_t l = readlink (p, t, sizeof t - 1);
+	    if (l > 0)
+	      {
+		driven = 1;
+		t[l] = 0;
+		hid |= !strcmp (strrchr (t, '/') ? strrchr (t, '/') + 1 : t, "usbhid");
+	      }
 	  }
       if (s)
 	closedir (s);
+      if (hid && game_controller (n) && release_controller (n))
+	driven = 0;
       char node[64];
       snprintf (node, sizeof node, "/dev/bus/usb/%03d/%03d", bus, dev);
       struct stat st;

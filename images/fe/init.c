@@ -2081,6 +2081,15 @@ main (void)
       if (write (fd, "1", 1) < 0) { }
       close (fd);
     }
+  /* ping: RISC OS's raw ICMP sockets are Linux's unprivileged ping sockets
+     (the Internet module, from RISC OS 5.31-32), which Linux allows only
+     for the groups in this range (as systemd sets it on other systems) */
+  fd = open ("/proc/sys/net/ipv4/ping_group_range", O_WRONLY | O_CLOEXEC);
+  if (fd >= 0)
+    {
+      if (write (fd, "0 2147483647", 12) < 0) { }
+      close (fd);
+    }
 
   setenv ("PATH", "/opt/riscos:/sbin:/bin", 1);
   setenv ("HOME", "/root", 1);

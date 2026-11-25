@@ -8,6 +8,45 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Joysticks, ping, ShareFS, RISC3D 0.10 (25 Nov 2026; riscos-rom 5.31-32, riscos-support 1.0.0085-1, riscos-harddisc 1.0.0073-1)
+
+From David Sharp's RoMac report, checked here first, then the owner: "Yes"
+to each, joystick SWIs "the joystick USB ones ... so it can be used
+without modification".
+
+- **USB game controllers to RISC OS** (rol-usbd): a device with an
+  interface on usbhid whose input devices (/sys/class/input, by realpath
+  under the device) have a button in 0x120-0x13e and none has KEY_A or
+  BTN_LEFT with REL_X is a game controller: usbhid is unbound from its
+  interfaces (/sys/bus/usb/drivers/usbhid/unbind) and, with no driver,
+  the usbfs node goes to RISC OS as before. RISC OS's USB joystick drivers
+  (Richard Walker's USBJoystick 0.20: Joystick_Read through USBDriver)
+  then work unchanged. Kernel log: "rol-usbd: 1-1: a game controller:
+  given to RISC OS". Tested in a chroot with a made-up sysfs: a gamepad
+  given (unbind written), a keyboard and a keyboard+joystick kept.
+- **rol-fb leaves game controllers alone**: not opened as an input or
+  grabbed (a pad's ABS_X/Y made it a vtablet: the stick moved the pointer
+  and, from 1.0.0081-1, the mouse's moves went local). game_controller():
+  BTN_JOYSTICK..BTN_THUMBR without BTN_TOOL_PEN, BTN_TOOL_FINGER or
+  BTN_TOUCH; the nodes left alone are remembered by inode and ctime.
+- **init**: net.ipv4.ping_group_range "0 2147483647", for RISC OS
+  5.31-32's raw ICMP sockets (Linux ping sockets). Ping in QEMU: 3/3 from
+  the gateway, 2/2 from 127.0.0.1.
+- **!DiscIcon's !Run**: DiscIcon$Dir for the Filer_Run of NetWatch and
+  Battery (Filer_Run keeps the name and starts the task later, after
+  another Obey file can have changed Obey$Dir: SparkFS's AutoRun).
+- **NetWatch** issues Service_InternetStatus 0 when the status file's
+  address changes (and at its start when there is one), so Freeway
+  re-reads the interfaces once DHCP is done.
+- **ShareFS between two RISC OS on Linux VMs** (QEMU socket multicast,
+  manual addresses): found within 10 s, catalogued and a file copied both
+  ways.
+- **riscos-harddisc 1.0.0073-1**: RISC3D 0.10.0.2-1 and MesaLibs
+  20.3.5.0.23-1 staged as PackMan packages (from RISC3D-0.10-2.zip and
+  riscos-packages' MesaLibs_20.3.5.0.23-1.zip); install-packman-packages
+  maps PackMan's Resources to !Boot.Resources when looking for a copy
+  already there (packages with an adopt list still replace hand copies).
+
 ### Network transfers at the line's speed (24 Nov 2026; riscos-rom 5.31-31)
 
 Reports of slow networking on ROL, Ethernet too; Iris fetched at 11
