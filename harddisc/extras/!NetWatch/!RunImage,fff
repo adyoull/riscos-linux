@@ -12,13 +12,19 @@ REM finds the network that came up after RISC OS started. DHCP's domain
 REM name goes in Inet$LocalDomain, as RISC OS's own DHCP puts it there:
 REM the Resolver adds it to a name it can't find, and with none it adds
 REM "localhost", which name servers answer with 127.0.0.1.
+REM ShareFS starts its desktop task (the Discs icon) only if Freeway is
+REM running when the desktop starts; with the network up later (a fast
+REM start, a manual address, Wi-Fi) it never appeared. So once the network
+REM is up, NetWatch starts it (*Desktop_ShareFSFiler) if it isn't running,
+REM for half a minute after the address changes, as ShareFS can take a
+REM moment to see the network.
 REM Copyright (c) 2026 Andrew Youll. MIT licence.
 ON ERROR SYS "XWimp_CloseDown" : END
-DIM blk% 256, msgs% 4, stat% 1024 : msgs%!0=0
+DIM blk% 256, msgs% 4, stat% 1024, tl% 512 : msgs%!0=0
 SYS "Wimp_Initialise",310,&4B534154,"NetWatch",msgs% TO ,task%
 SYS "XOS_ReadVarVal","Inet$Resolvers",blk%,255,0,3 TO ,,len%;f%
 IF f% AND 1 THEN cur$="" ELSE blk%?len%=13 : cur$=$blk%
-addr$="?" : dom$="?"
+addr$="?" : dom$="?" : share%=0
 PROCcheck
 REPEAT
   SYS "OS_ReadMonotonicTime" TO now%
@@ -62,6 +68,33 @@ ENDIF
 IF new% THEN SYS "XOS_CLI","ResolverConfig"
 IF a$<>addr$ THEN
   addr$=a$
-  IF a$<>"" THEN SYS "XOS_ServiceCall",0,&B0
+  IF a$<>"" THEN SYS "XOS_ServiceCall",0,&B0 : share%=7
 ENDIF
+REM (not on the first check after the address: ShareFS may be starting)
+IF share%>0 THEN
+  share%-=1
+  IF share%<6 THEN PROCsharefs
+ENDIF
+ENDPROC
+
+REM ShareFS's desktop task started, if ShareFS is there and it isn't running
+DEF PROCsharefs
+LOCAL f%,r%,e%,p%,q%,n$
+SYS "XOS_Module",18,"ShareFS" TO ;f%
+IF f% AND 1 THEN share%=0 : ENDPROC
+r%=0
+REPEAT
+  SYS "XTaskManager_EnumerateTasks",r%,tl%,512 TO r%,e% ;f%
+  IF f% AND 1 THEN ENDPROC
+  p%=tl%
+  WHILE p%<e%
+    q%=p%!4 : n$=""
+    WHILE q%?0>=32 AND LEN(n$)<20 : n$+=CHR$(q%?0) : q%+=1 : ENDWHILE
+    IF n$="ShareFS" THEN share%=0 : ENDPROC
+    p%+=16
+  ENDWHILE
+UNTIL r%<0
+REM (an error: ShareFS hasn't seen the network yet; tried again in 5 s)
+SYS "XWimp_StartTask","Desktop_ShareFSFiler" TO ;f%
+IF (f% AND 1)=0 THEN share%=0
 ENDPROC

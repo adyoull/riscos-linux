@@ -8,6 +8,26 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### ShareFS's Discs icon with a late network (25 Nov 2026; riscos-harddisc 1.0.0076-1)
+
+David Sharp reported that on his Pi 5 the Discs icon and ShareFS's task were
+missing, while ShareFS worked from the command line.
+
+- **Reproduced under QEMU** by switching the network link off from QEMU
+  (`set_link n0 off`) at start-up and back on after the desktop was up:
+  - no Discs icon, even after the network came up;
+  - `*Desktop_ShareFSFiler` said "ShareFS is not fully initialised ...
+    Freeway is not running" until NetWatch had sent
+    Service_InternetStatus, then "Window Manager is in use" (from the
+    ShellCLI).
+- **The fix, in NetWatch:** when the address changes, starting on the
+  second 5 s check, it starts the task with Wimp_StartTask
+  "Desktop_ShareFSFiler" if ShareFS is loaded and no task named
+  "ShareFS" is running (TaskManager_EnumerateTasks). It tries for up to
+  30 s.
+- **Tested:** the Discs icon appeared about 20 s after the link came up,
+  with no command window. A normal start still has one Discs icon.
+
 ### systemd kept out of Updates (25 Nov 2026; riscos-support 1.0.0089-1)
 
 The owner's Pi went from riscos-support 1.0.0084-1 to 1.0.0088-1, and the
