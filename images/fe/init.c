@@ -323,7 +323,7 @@ network_up (void)
     return;
   /* wait (up to 12 seconds) for an address, so RISC OS starts with its
      name servers; a wired link takes a moment to come up, Wi-Fi longer */
-  char buf[2048] = "", state[32] = "", dns[100] = "", addr[32] = "";
+  char buf[2048] = "", state[32] = "", dns[100] = "", addr[32] = "", domain[64] = "";
   for (int i = 0; i < 24; i++)
     {
       usleep (500000);
@@ -333,12 +333,13 @@ network_up (void)
       ssize_t n = read (fd, buf, sizeof buf - 1);
       close (fd);
       buf[n > 0 ? n : 0] = 0;
-      state[0] = dns[0] = addr[0] = 0;
+      state[0] = dns[0] = addr[0] = domain[0] = 0;
       for (char *l = strtok (buf, "\n"); l; l = strtok (NULL, "\n"))
 	{
 	  if (!strncmp (l, "state=", 6)) snprintf (state, sizeof state, "%s", l + 6);
 	  if (!strncmp (l, "dns=", 4)) snprintf (dns, sizeof dns, "%s", l + 4);
 	  if (!strncmp (l, "address=", 8)) snprintf (addr, sizeof addr, "%s", l + 8);
+	  if (!strncmp (l, "domain=", 7)) snprintf (domain, sizeof domain, "%s", l + 7);
 	}
       if (!strcmp (state, "configured") || !strcmp (state, "off")
 	  || !strcmp (state, "nointerface") || (i >= 8 && !strcmp (state, "nolink")))
@@ -354,6 +355,10 @@ network_up (void)
       /* RISC OS's Resolver reads Inet$Resolvers (servers separated by spaces) */
       setenv ("RISC_OS_Inet_Resolvers", dns, 1);
     }
+  /* and DHCP's domain name, as RISC OS's own DHCP sets it: the Resolver
+     adds it to a name it can't find (with none, "localhost") */
+  if (domain[0])
+    setenv ("RISC_OS_Inet_LocalDomain", domain, 1);
   say ("\n", "");
   if (dns[0] && addr[0])
     {

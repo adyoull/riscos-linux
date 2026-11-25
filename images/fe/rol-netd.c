@@ -326,6 +326,7 @@ static struct
   uint32_t ip, mask, gw, dns[3];
   int ndns;
   double expires;               /* DHCP: when the lease ends (0: manual) */
+  char domain[64];              /* DHCP's domain name (option 15), or "" */
 } cur;
 
 static void
@@ -337,6 +338,11 @@ write_resolv (void)
       inet_ntop (AF_INET, &cur.dns[i], a, sizeof a);
       size_t l = strlen (text);
       snprintf (text + l, sizeof text - l, "nameserver %s\n", a);
+    }
+  if (cur.domain[0])
+    {
+      size_t l = strlen (text);
+      snprintf (text + l, sizeof text - l, "search %s\n", cur.domain);
     }
   int f = open (resolv, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
   if (f >= 0)
@@ -360,7 +366,7 @@ unconfigure (void)
 
 static void
 configure (const char *ifn, uint32_t ip, uint32_t mask, uint32_t gw,
-           const uint32_t *dns, int ndns, double expires)
+           const uint32_t *dns, int ndns, double expires, const char *domain)
 {
   if (strcmp (cur.ifn, ifn) || cur.ip != ip || cur.mask != mask || cur.gw != gw)
     {
@@ -377,6 +383,7 @@ configure (const char *ifn, uint32_t ip, uint32_t mask, uint32_t gw,
   cur.ndns = ndns;
   memcpy (cur.dns, dns, sizeof cur.dns);
   cur.expires = expires;
+  snprintf (cur.domain, sizeof cur.domain, "%s", domain);
   write_resolv ();
 }
 
@@ -581,6 +588,7 @@ dhcp_input (const char *hostname)
   uint32_t mask = htonl (0xFFFFFF00), gw = 0, server = 0, dns[3] = { 0 };
   int ndns = 0;
   uint32_t lease = 0;
+  char domain[64] = "";
   for (uint8_t *o = d.opt; o + 1 < (uint8_t *) &d + n && *o != 255;)
     {
       if (*o == 0) { o++; continue; }
@@ -594,6 +602,22 @@ dhcp_input (const char *hostname)
         for (int i = 0; i + 4 <= len && ndns < 3; i += 4)
           memcpy (&dns[ndns++], v + i, 4);
       if (code == 54 && len >= 4) memcpy (&server, v, 4);
+      /* the domain name, which RISC OS's own DHCP puts in Inet$LocalDomain:
+         the Resolver adds it to a name it can't find (with none, it adds
+         "localhost", which name servers answer with 127.0.0.1); a name's
+         characters only, no trailing dot or NUL */
+      if (code == 15 && len >= 1)
+        {
+          int k = 0;
+          for (int i = 0; i < len && k < (int) sizeof domain - 1; i++)
+            if (isalnum (v[i]) || v[i] == '-' || v[i] == '.')
+              domain[k++] = v[i];
+            else
+              break;
+          while (k && domain[k - 1] == '.')
+            k--;
+          domain[k] = 0;
+        }
       if (code == 51 && len >= 4) lease = (uint32_t) v[0] << 24 | v[1] << 16 | v[2] << 8 | v[3];
       o += 2 + len;
     }
@@ -611,7 +635,7 @@ dhcp_input (const char *hostname)
       if (!lease || lease > 0x7FFFFFFF)
         lease = 0x7FFFFFFF;
       double t = now ();
-      configure (dh.ifn, d.yiaddr, mask, gw, dns, ndns, t + lease);
+      configure (dh.ifn, d.yiaddr, mask, gw, dns, ndns, t + lease, domain);
       dh.state = D_BOUND;
       dh.renew = t + lease / 2.0;
       char a[INET_ADDRSTRLEN];
@@ -935,7 +959,7 @@ status_write (const char *all, const char *type)
       inet_ntop (AF_INET, &cur.dns[i], a, sizeof a);
       ADD ("%s%s", i ? " " : "", a);
     }
-  ADD ("\nlease=%ld\n", cur.expires ? (long) (cur.expires - now ()) : 0L);
+  ADD ("\ndomain=%s\nlease=%ld\n", cur.domain, cur.expires ? (long) (cur.expires - now ()) : 0L);
   ADD ("rx=%lld\ntx=%lld\n",
        want_ifn[0] ? read_num ("/sys/class/net/%s/statistics/rx_bytes", want_ifn) : 0,
        want_ifn[0] ? read_num ("/sys/class/net/%s/statistics/tx_bytes", want_ifn) : 0);
@@ -993,7 +1017,7 @@ apply_manual (const char *ifn)
   for (char *t = strtok (d, ", "); t && ndns < 3; t = strtok (NULL, ", "))
     if (!parse_ip (t, &dns[ndns]))
       ndns++;
-  configure (ifn, ip, mask, gw, dns, ndns, 0);
+  configure (ifn, ip, mask, gw, dns, ndns, 0, "");
   say ("%s has address %s (manual)", ifn, conf.address);
 }
 

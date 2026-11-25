@@ -8,14 +8,17 @@ REM *ResolverConfig so that the Resolver uses them. When Linux's address
 REM changes (or there is one when it starts), it tells RISC OS's network
 REM modules (Service_InternetStatus 0, "address changed", as RISC OS's own
 REM network stack does), so Freeway (ShareFS's and Access's discovery)
-REM finds the network that came up after RISC OS started.
+REM finds the network that came up after RISC OS started. DHCP's domain
+REM name goes in Inet$LocalDomain, as RISC OS's own DHCP puts it there:
+REM the Resolver adds it to a name it can't find, and with none it adds
+REM "localhost", which name servers answer with 127.0.0.1.
 REM Copyright (c) 2026 Andrew Youll. MIT licence.
 ON ERROR SYS "XWimp_CloseDown" : END
 DIM blk% 256, msgs% 4, stat% 1024 : msgs%!0=0
 SYS "Wimp_Initialise",310,&4B534154,"NetWatch",msgs% TO ,task%
 SYS "XOS_ReadVarVal","Inet$Resolvers",blk%,255,0,3 TO ,,len%;f%
 IF f% AND 1 THEN cur$="" ELSE blk%?len%=13 : cur$=$blk%
-addr$="?"
+addr$="?" : dom$="?"
 PROCcheck
 REPEAT
   SYS "OS_ReadMonotonicTime" TO now%
@@ -29,7 +32,7 @@ UNTIL FALSE
 
 DEF PROCcheck
 REM the status file in one read (a few hundred bytes), not a byte at a time
-LOCAL f%,n%,i%,j%,l$,dns$,a$
+LOCAL f%,n%,i%,j%,l$,dns$,a$,d$,new%
 f%=OPENIN("IXFS:$.riscos.net.status")
 IF f%=0 THEN ENDPROC
 SYS "OS_GBPB",4,f%,stat%,1023 TO ,,,n%
@@ -41,13 +44,22 @@ WHILE i%<n%
   stat%?j%=13 : l$=$(stat%+i%) : stat%?j%=10
   IF LEFT$(l$,4)="dns=" THEN dns$=MID$(l$,5)
   IF LEFT$(l$,8)="address=" THEN a$=MID$(l$,9)
+  IF LEFT$(l$,7)="domain=" THEN d$=MID$(l$,8)
   i%=j%+1
 ENDWHILE
 IF dns$<>"" AND dns$<>cur$ THEN
   cur$=dns$
   OSCLI "Set Inet$Resolvers "+dns$
-  SYS "XOS_CLI","ResolverConfig"
+  new%=TRUE
 ENDIF
+REM (left alone until Linux has an address: a domain only comes with one;
+REM one taken away by a later lease is taken away here too)
+IF a$<>"" AND d$<>dom$ THEN
+  IF d$<>"" THEN OSCLI "Set Inet$LocalDomain "+d$ ELSE IF dom$<>"?" THEN SYS "XOS_CLI","Unset Inet$LocalDomain"
+  dom$=d$
+  new%=TRUE
+ENDIF
+IF new% THEN SYS "XOS_CLI","ResolverConfig"
 IF a$<>addr$ THEN
   addr$=a$
   IF a$<>"" THEN SYS "XOS_ServiceCall",0,&B0

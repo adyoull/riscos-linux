@@ -8,6 +8,37 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Inet$LocalDomain from DHCP (25 Nov 2026; riscos-support 1.0.0088-1, riscos-harddisc 1.0.0075-1)
+
+The web browser project reported that some host names resolved to
+127.0.0.1 on ROL.
+
+- **Cause, found with a test name server on 10.0.2.2 under QEMU:**
+  - Resolver 0.76 is a binary blob, the same as on native RISC OS.
+  - After NXDOMAIN or SERVFAIL (but not a timeout), it retries the name
+    with Inet$LocalDomain appended, or with "localhost" when
+    Inet$LocalDomain is unset or empty.
+  - Name servers answer *.localhost with 127.0.0.1 (RFC 6761), and the
+    Resolver caches that answer for the original name.
+  - Other values tested: Inet$LocalDomain "." retries the name itself;
+    Inet$SearchDomains "lan" appends ".lan".
+- **Native RISC OS** sets Inet$LocalDomain from DHCP option 15 (whoami's
+  BOOTPDOMAINNAMEVAR). ROL never set it.
+- **Concurrent lookups are not crossed:** 240 Resolver lookups, 10 at a
+  time, with random answer delays and loopback, NXDOMAIN and dropped
+  answers mixed in, gave no wrong address. The Resolver numbers queries
+  0001, 0002 and so on.
+- **The fix:**
+  - rol-netd reads DHCP option 15 (letters, digits, "-" and "." only),
+    writes `domain=` in its status file and `search` in resolv.conf.
+  - init passes it as Inet$LocalDomain (RISC_OS_Inet_LocalDomain).
+  - NetWatch sets Inet$LocalDomain when the domain changes, unsets one
+    that a later lease removes, then runs ResolverConfig.
+  - Manual addresses set no domain.
+- **Tested** with QEMU's `domainname=home`: Inet$LocalDomain=home, a
+  missing name was retried as NAME.home (which failed), and resolv.conf
+  has "search home".
+
 ### ROL's own init kept (25 Nov 2026; riscos-support 1.0.0087-1)
 
 The owner: "Can we add a guard that uninstalls systemd / udev and
