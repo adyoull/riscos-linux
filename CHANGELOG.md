@@ -8,6 +8,43 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Ink and toner levels; the chosen printer kept in CUPS (25 Nov 2026; riscos-support 1.0.0090-1, riscos-print 1.0.0090-1, riscos-harddisc 1.0.0077-1)
+
+A user found that Linux printing picked up an Epson WF-7520, and asked for
+ink levels under Options. CUPS's web page had shown the printer, then lost it.
+
+- **rol-print:**
+  - ippfind now gives each found printer's {service_uri}, preferring
+    ipp:// to ipps://, as ipptool would refuse a printer's own
+    certificate. Queues without one use their lpstat -v device URI.
+  - write_options adds the printer's supplies: `ipptool -tv -T 8 URI
+    /usr/share/riscos/print/supplies.test`, a Get-Printer-Attributes
+    request for the marker-* attributes and printer-supply with its
+    description.
+  - It reads marker-names, levels, colors and low-levels if the printer
+    gives them, else PWG printer-supply. A level is turned into a
+    percentage of maxcapacity, and named colorants into colours.
+    ippeveprinter only gives printer-supply.
+  - The plug-in's Options file gets `supply=NAME<tab>LEVEL<tab>#RRGGBB<tab>LOW`
+    lines, or `supplies=none`. A printer that isn't IPP is asked
+    through CUPS, at ipp://localhost:631/printers/NAME.
+  - When the plug-in writes config, keep_chosen() makes the chosen
+    printer a CUPS printer of its own, with `lpadmin -p NAME -E -v URI
+    -m everywhere`, unless /etc/cups/printers.conf already has it.
+    CUPS doesn't write temporary queues there, though lpstat -v shows
+    one while it exists.
+- **!LinuxPrint:**
+  - an "Ink and toner" group under Settings, placed by
+    PROCoptions_fit. Each supply has a name, a gauge, a fill (Wimp
+    colour from #RRGGBB: black 7, yellow 9, cyan 15, magenta 11, else 4)
+    and its level, with "Some left" (-3), "Not known" (-1/-2) and "(low)";
+  - the CUPS web page note tells you to start the browser first when
+    Alias$URLOpen_HTTP isn't set.
+- **Tested under QEMU** with CUPS's ippeveprinter:
+  - the Options window showed "Toner Waste Tank 25%" and "Black Toner
+    75%";
+  - Set logged "kept Example Printer as a printer of its own".
+
 ### ShareFS's Discs icon with a late network (25 Nov 2026; riscos-harddisc 1.0.0076-1)
 
 David Pitt reported that on his Pi 5 the Discs icon and ShareFS's task were

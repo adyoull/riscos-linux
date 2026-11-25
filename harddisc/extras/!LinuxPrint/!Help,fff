@@ -16,12 +16,15 @@ The list
 
   Click a printer to choose it for the buttons below the list. The radio
   button beside it is the one "Linux" prints on: Make default (or click
-  the radio button), then Set. With none ticked, CUPS chooses (its
-  default, or the first it found).
+  the radio button), then Set. Linux then keeps that printer as one of
+  its own, so it stays in CUPS's web pages. With none ticked, CUPS
+  chooses (its default, or the first it found).
 
   Options...  The printer's settings, as CUPS has them (paper size, paper
               source, quality, colour and the rest): choose from each
-              menu, then Set.
+              menu, then Set. Below them, the ink or toner the printer
+              says it has left, when it says (most network printers do;
+              one added by an address that isn't IPP doesn't).
   Test page   CUPS's test page on that printer.
   Remove      Takes away a printer added here (the ones found by
               themselves go when they're switched off).
@@ -35,6 +38,7 @@ The list
 CUPS web page
   CUPS's own pages (http://localhost:631/) in the web browser, with every
   setting it has. Changes there ask for root's user name and password.
+  Start the web browser first if it doesn't open by itself.
 
 Status
   The last job, whether CUPS is running, and whether !Printers has

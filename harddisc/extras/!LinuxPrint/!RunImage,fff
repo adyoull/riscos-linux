@@ -6,19 +6,20 @@ REM shows the printers CUPS can use (<LinuxPrint$Path>Printers, which
 REM rol-print keeps up to date), chooses the one Linux prints on
 REM (<LinuxPrint$Path>config), and asks rol-print (<LinuxPrint$Path>request)
 REM to add or remove a printer, print a test page, change a printer's
-REM settings (as CUPS has them: <LinuxPrint$Path>Options) or set up Linux
-REM in !Printers.
+REM settings (as CUPS has them: <LinuxPrint$Path>Options, with the ink or
+REM toner the printer says it has left) or set up Linux in !Printers.
 REM Copyright (c) 2026 Andrew Youll. MIT licence.
 ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
 DIM blk% 4096, ind% 24576, menu% 28+24*64, mtext% 64*64
-MAXR%=6 : MAXF%=6 : MAXO%=10 : MAXC%=60
+MAXR%=6 : MAXF%=6 : MAXO%=10 : MAXC%=60 : MAXS%=8
 DIM row%(MAXR%,4), pname$(16), pinfo$(16), pstate$(16), pkind$(16)
 DIM frow%(MAXF%), furi$(MAXF%), finfo$(MAXF%)
 DIM orow%(MAXO%,2), okey$(MAXO%), olab$(MAXO%), ocur$(MAXO%), oold$(MAXO%), onc%(MAXO%), oc$(MAXO%,MAXC%), ocl$(MAXO%,MAXC%)
 DIM ic%(40), shown$(60), st$(60), sv$(60)
+DIM srow%(MAXS%,3), sname$(MAXS%), slevel%(MAXS%), scol$(MAXS%), slow%(MAXS%)
 indp%=0 : task%=0 : quit%=FALSE : np%=0 : nst%=0 : hold%=0 : sel%=0
 chosen$="" : want$="" : lastlog$="" : waiting%=FALSE : listed%=FALSE
-nf%=0 : finding%=FALSE : setuphid%=99 : no%=0 : oprinter$="" : opening%=FALSE : menuo%=0
+nf%=0 : finding%=FALSE : setuphid%=99 : no%=0 : oprinter$="" : opening%=FALSE : menuo%=0 : ns%=0
 path$=FNvar("LinuxPrint$Path")
 IF path$="" THEN path$="IXFS:$.riscos.print."
 SYS "Wimp_Initialise",380,&4B534154,"Linux printing",0 TO ,task%
@@ -232,18 +233,54 @@ FOR r%=1 TO MAXO%
   orow%(r%,2)=FNpopup(owin%,OW%-90,y%)
   y%-=60
 NEXT
+REM ink, toner and so on: name, a gauge with how full it is, and how much
+REM (placed by PROCoptions_fit, under the settings)
+sg%=FNgroup(owin%,OW%,y%,"Ink and toner")
+FOR r%=1 TO MAXS%
+  srow%(r%,0)=FNrlabel(owin%,32,372,y%,"")
+  srow%(r%,1)=FNicon(owin%,384,y%-40,OW%-220,y%-8,&07000025,"","",0)
+  srow%(r%,2)=FNicon(owin%,388,y%-36,OW%-224,y%-12,&70000020,"","",0)
+  srow%(r%,3)=FNlabel(owin%,OW%-210,OW%-40,y%,"")
+NEXT
 ic%(31)=FNbutton(owin%,OW%-460,OW%-260,y%,"Cancel",FALSE)
 ic%(32)=FNbutton(owin%,OW%-240,OW%-24,y%,"Set",TRUE)
 PROCoptions_fit(MAXO%)
 ENDPROC
 
-REM the settings window as tall as its N% settings
+REM the settings window as tall as its N% settings and the NS% supplies
 DEF PROCoptions_fit(n%)
-LOCAL y%
+LOCAL y%,r%,k%,top%,w%
 IF n%<1 THEN n%=1
 y%=-80-n%*60-12
 PROCgroup_end(owin%,og%,OW%,-24,y%)
 y%-=32
+IF ns%>0 THEN
+  y%-=24 : top%=y%
+  PROCgroup_end(owin%,sg%,OW%,top%,top%-100)
+  SYS "Wimp_ResizeIcon",owin%,sg%+1,48,top%-24,48+13*16+24,top%+24
+  PROChide(owin%,sg%,FALSE) : PROChide(owin%,sg%+1,FALSE)
+  y%-=40
+  FOR r%=1 TO MAXS%
+    IF r%<=ns% THEN
+      SYS "Wimp_ResizeIcon",owin%,srow%(r%,0),32,y%-48,372,y%
+      SYS "Wimp_ResizeIcon",owin%,srow%(r%,1),384,y%-44,OW%-220,y%-4
+      w%=0 : IF slevel%(r%)>0 THEN w%=(OW%-232-388)*slevel%(r%) DIV 100
+      SYS "Wimp_ResizeIcon",owin%,srow%(r%,2),388,y%-40,388+w%,y%-8
+      SYS "Wimp_ResizeIcon",owin%,srow%(r%,3),OW%-210,y%-48,OW%-40,y%
+      FOR k%=0 TO 3 : PROChide(owin%,srow%(r%,k%),FALSE) : NEXT
+      IF w%=0 THEN PROChide(owin%,srow%(r%,2),TRUE)
+      y%-=56
+    ELSE
+      FOR k%=0 TO 3 : PROChide(owin%,srow%(r%,k%),TRUE) : NEXT
+    ENDIF
+  NEXT
+  y%-=12
+  PROCgroup_end(owin%,sg%,OW%,top%,y%)
+  y%-=32
+ELSE
+  PROChide(owin%,sg%,TRUE) : PROChide(owin%,sg%+1,TRUE)
+  FOR r%=1 TO MAXS% : FOR k%=0 TO 3 : PROChide(owin%,srow%(r%,k%),TRUE) : NEXT : NEXT
+ENDIF
 SYS "Wimp_ResizeIcon",owin%,ic%(31),OW%-460,y%-60,OW%-260,y%-8
 SYS "Wimp_ResizeIcon",owin%,ic%(32),OW%-240,y%-68,OW%-24,y%
 OH%=-(y%-84)
@@ -448,7 +485,13 @@ REM CUPS's own pages (every setting it has), in the browser
 DEF PROCweb
 SYS "XOS_CLI","URIdispatch http://localhost:631/" TO ;fl%
 IF fl% AND 1 THEN SYS "XOS_CLI","Filer_Run http://localhost:631/" TO ;fl%
-PROCnote("CUPS's pages: http://localhost:631/ (changes there ask for root's password)")
+REM (a browser that isn't running opens it only if it has said it opens
+REM web pages, Alias$URLOpen_HTTP, as most do once Filer has seen them)
+IF FNvar("Alias$URLOpen_HTTP")="" THEN
+  PROCnote("If no page opens: start your web browser, then click CUPS web page again")
+ELSE
+  PROCnote("CUPS's pages: http://localhost:631/ (changes there ask for root's password)")
+ENDIF
 ENDPROC
 
 DEF PROCkey(w%,k%)
@@ -676,11 +719,16 @@ DEF PROCoptions_read
 LOCAL o%,f%,l$,r%,k%,e$,t$
 SYS "XOS_File",17,path$+"Options" TO o%
 IF o%<>1 THEN ENDPROC
-opening%=FALSE : no%=0 : e$=""
+opening%=FALSE : no%=0 : e$="" : ns%=0
 f%=OPENIN(path$+"Options")
 WHILE NOT EOF#f%
   l$=GET$#f%
   IF LEFT$(l$,6)="error=" THEN e$=MID$(l$,7)
+  IF LEFT$(l$,7)="supply=" AND ns%<MAXS% THEN
+    ns%+=1 : l$=MID$(l$,8)
+    sname$(ns%)=FNfield(l$,1) : slevel%(ns%)=VAL(FNfield(l$,2))
+    scol$(ns%)=FNfield(l$,3) : slow%(ns%)=VAL(FNfield(l$,4))
+  ENDIF
   IF LEFT$(l$,7)="option=" AND no%<MAXO% THEN
     no%+=1 : l$=MID$(l$,8)
     okey$(no%)=FNfield(l$,1) : olab$(no%)=FNfield(l$,2) : ocur$(no%)=FNfield(l$,3)
@@ -707,12 +755,41 @@ FOR r%=1 TO MAXO%
   ENDIF
 NEXT
 PROCsettext(owin%,ic%(30),"")
+FOR r%=1 TO ns%
+  PROCsettext(owin%,srow%(r%,0),sname$(r%))
+  PROCsettext(owin%,srow%(r%,3),FNlevel(r%))
+  blk%!0=owin% : blk%!4=srow%(r%,2) : blk%!8=FNcolour(scol$(r%))<<28 : blk%!12=&F0000000
+  SYS "Wimp_SetIconState",,blk%
+NEXT
 SYS "Wimp_CloseWindow",,FNblkw(owin%)
 PROCoptions_fit(no%)
 PROCtitle(owin%,"Settings: "+pinfo$(sel%))
 PROCnote("")
 PROCopen(owin%,OW%,OH%)
 ENDPROC
+
+REM how much of supply R% is left, as IPP says it: 0-100, -3 some, -1 or
+REM -2 not known
+DEF FNlevel(r%)
+LOCAL l%
+l%=slevel%(r%)
+IF l%=-3 THEN ="Some left"
+IF l%<0 THEN ="Not known"
+IF l%<=slow%(r%) THEN =STR$l%+"% (low)"
+=STR$l%+"%"
+
+REM the Wimp colour nearest a supply's #RRGGBB (black, cyan, magenta,
+REM yellow; grey for anything else)
+DEF FNcolour(c$)
+LOCAL r%,g%,b%
+IF LEFT$(c$,1)<>"#" OR LEN(c$)<7 THEN =4
+r%=EVAL("&"+MID$(c$,2,2)) : g%=EVAL("&"+MID$(c$,4,2)) : b%=EVAL("&"+MID$(c$,6,2))
+IF r%<64 AND g%<64 AND b%<64 THEN =7
+IF r%>192 AND g%>192 AND b%<64 THEN =9
+IF r%<64 AND g%>128 AND b%>128 THEN =15
+IF r%>128 AND g%<96 AND b%>128 THEN =11
+IF r%>192 AND g%<96 AND b%<96 THEN =11
+=4
 
 REM the label of option R%'s choice C$
 DEF FNchoice(r%,c$)

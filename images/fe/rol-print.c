@@ -60,6 +60,8 @@
 /* the printers added through the plug-in (CUPS's own temporary queues,
    for printers it found, look the same in lpstat -v) */
 #define ADDED "/var/lib/riscos/print-added"
+#define IPPTOOL "/usr/bin/ipptool"
+#define SUPPLIES "/usr/share/riscos/print/supplies.test"
 
 static int
 was_added (const char *name)
@@ -259,13 +261,14 @@ read_config (void)
        itself (DNS-SD through avahi: network printers, and USB ones
        through ipp-usb) and the ones added;
      - ippfind: what each found one is (its service name and "ty", the
-       model), and its host (localhost: ipp-usb, so USB);
+       model), its host (localhost: ipp-usb, so USB) and its address
+       (for its ink levels, and to keep the one chosen);
      - lpstat -v and the plug-in's own list: the ones added, and where;
      - lpstat -p: the state of each queue CUPS has made. */
 #define MAXPR 16
 static struct printer
 {
-  char name[128], info[160], state[16], kind[16];
+  char name[128], info[160], state[16], kind[16], uri[256];
 } prs[MAXPR];
 static int nprs;
 
@@ -309,6 +312,7 @@ read_printers (void)
 		struct printer *p = &prs[nprs++];
 		snprintf (p->name, sizeof p->name, "%s", l);
 		snprintf (p->info, sizeof p->info, "%s", l);
+		p->uri[0] = 0;
 		strcpy (p->state, "Ready");
 		strcpy (p->kind, "Network");
 	      }
@@ -318,14 +322,15 @@ read_printers (void)
   if (!access ("/usr/bin/ippfind", X_OK))
     {
       char *a[] = { "ippfind", "-T", "2", "_ipp._tcp", "_ipps._tcp", "-x", "/bin/echo",
-		    "{service_name}", "@@", "{txt_ty}", "@@", "{service_hostname}", ";", NULL };
+		    "{service_name}", "@@", "{txt_ty}", "@@", "{service_hostname}", "@@", "{service_uri}", ";", NULL };
       if (run (o, sizeof o, "/usr/bin/ippfind", a) == 0 || o[0])
 	for (char *l = strtok (o, "\n"); l; l = strtok (NULL, "\n"))
 	  {
 	    char *f1 = strstr (l, " @@ "), *f2 = f1 ? strstr (f1 + 4, " @@ ") : NULL;
-	    if (!f2)
+	    char *f3 = f2 ? strstr (f2 + 4, " @@ ") : NULL;
+	    if (!f3)
 	      continue;
-	    *f1 = *f2 = 0;
+	    *f1 = *f2 = *f3 = 0;
 	    char q[128];
 	    queue_name (l, q, sizeof q);
 	    for (int i = 0; i < nprs; i++)
@@ -335,6 +340,11 @@ read_printers (void)
 		  snprintf (prs[i].info, sizeof prs[i].info, "%s", *ty ? ty : l);
 		  if (!strncmp (f2 + 4, "localhost", 9))
 		    strcpy (prs[i].kind, "USB");
+		  /* (ipp:// rather than ipps://, when it has both: ipptool
+		     would refuse a printer's own certificate) */
+		  const char *u = f3 + 4;
+		  if (!prs[i].uri[0] || (!strncmp (prs[i].uri, "ipps:", 5) && !strncmp (u, "ipp:", 4)))
+		    snprintf (prs[i].uri, sizeof prs[i].uri, "%s", u);
 		}
 	  }
     }
@@ -349,6 +359,9 @@ read_printers (void)
 	    char *c = strstr (l, ": ");
 	    char nm[256];
 	    snprintf (nm, sizeof nm, "%.*s", c ? (int) (c - l - 11) : 0, l + 11);
+	    for (int i = 0; c && i < nprs; i++)
+	      if (!strcmp (prs[i].name, nm) && !prs[i].uri[0])
+		snprintf (prs[i].uri, sizeof prs[i].uri, "%s", c + 2);
 	    if (c && was_added (nm))
 	      {
 		if (n + strlen (l) < sizeof added - 2)
@@ -526,6 +539,156 @@ ppd_label (const char *ppd, const char *key, const char *choice, char *out, size
 
 /* Options: "printer=NAME", then for each setting
    "option=KEY<tab>Label<tab>CURRENT<tab>CHOICE<tab>Label<tab>..." */
+/* the values of attribute KEY in ipptool's report O ("KEY (type) = a,b"),
+   into V (up to 16) */
+static int
+ipp_values (const char *o, const char *key, char v[][64])
+{
+  char k[80];
+  snprintf (k, sizeof k, "%s (", key);
+  const char *p = strstr (o, k);
+  if (!p || !(p = strstr (p, " = ")))
+    return 0;
+  p += 3;
+  int n = 0;
+  while (n < 16 && *p && *p != '\n')
+    {
+      size_t l = strcspn (p, ",\n");
+      snprintf (v[n++], 64, "%.*s", (int) l, p);
+      p += l;
+      if (*p == ',')
+	p++;
+    }
+  return n;
+}
+
+/* the value of FIELD ("level=", ...) in one of printer-supply's entries */
+static const char *
+supply_field (const char *e, const char *field, char *v, size_t vn)
+{
+  const char *p = strstr (e, field);
+  v[0] = 0;
+  if (p)
+    snprintf (v, vn, "%.*s", (int) strcspn (p + strlen (field), ";"), p + strlen (field));
+  return v;
+}
+
+/* PWG's printer-supply, which printers give when they don't give marker-*:
+   "index=1;class=...;type=toner;unit=percent;maxcapacity=100;level=75;
+   colorantname=black;,index=2;..." with printer-supply-description's names */
+static int
+pwg_supplies (const char *o, char *s, size_t sn)
+{
+  const char *p = strstr (o, "printer-supply (");
+  if (!p || !(p = strstr (p, " = ")))
+    return snprintf (s, sn, "supplies=none\n");
+  p += 3;
+  char ds[16][64];
+  int kd = ipp_values (o, "printer-supply-description", ds), n = 0, i = 0;
+  while (*p && *p != '\n' && i < 16 && n < (int) sn - 200)
+    {
+      /* (an entry ends ";," or at the end of the line) */
+      const char *e = strstr (p, ";,"), *nl = strchr (p, '\n');
+      if (!e || (nl && e > nl))
+	e = nl ? nl : p + strlen (p);
+      char ent[512], lv[16], mx[16], col[32], ty[32], name[96];
+      snprintf (ent, sizeof ent, "%.*s;", (int) (e - p), p);
+      supply_field (ent, "level=", lv, sizeof lv);
+      supply_field (ent, "maxcapacity=", mx, sizeof mx);
+      supply_field (ent, "colorantname=", col, sizeof col);
+      supply_field (ent, "type=", ty, sizeof ty);
+      int l = lv[0] ? atoi (lv) : -1, m = atoi (mx);
+      if (l >= 0 && m > 0)
+	l = l * 100 / m;
+      if (i < kd)
+	snprintf (name, sizeof name, "%s", ds[i]);
+      else
+	snprintf (name, sizeof name, "%s %s", strcmp (col, "unknown") ? col : "", ty);
+      const char *rgb = !strcmp (col, "black") ? "#000000" : !strcmp (col, "cyan") ? "#00FFFF"
+	: !strcmp (col, "magenta") ? "#FF00FF" : !strcmp (col, "yellow") ? "#FFFF00" : "";
+      n += snprintf (s + n, sn - n, "supply=%s\t%d\t%s\t\n", name, l, rgb);
+      i++;
+      p = *e == ';' ? e + 2 : e;
+    }
+  return n ? n : snprintf (s, sn, "supplies=none\n");
+}
+
+/* Printer NAME's ink, toner and other supplies, asked of the printer
+   itself (IPP's marker-names, -levels, -colors and -low-levels), as
+   "supply=NAME<tab>LEVEL<tab>COLOUR<tab>LOW" lines into S: LEVEL is 0-100,
+   or -3 (some left), -2 or -1 (unknown); COLOUR #RRGGBB. Printers that
+   aren't IPP, or don't say, give "supplies=none". The printer's address
+   is ippfind's for a printer found on the network, else its queue's
+   (lpstat -v); one CUPS reaches some other way is asked through CUPS. */
+static int
+supplies (const char *name, char *s, size_t sn)
+{
+  static char o[16384];
+  char uri[300] = "";
+  for (int i = 0; i < nprs; i++)
+    if (!strcmp (prs[i].name, name))
+      snprintf (uri, sizeof uri, "%s", prs[i].uri);
+  if (strncmp (uri, "ipp://", 6) && strncmp (uri, "ipps://", 7))
+    snprintf (uri, sizeof uri, "ipp://localhost:631/printers/%s", name);
+  if (access (IPPTOOL, X_OK) || access (SUPPLIES, R_OK))
+    return snprintf (s, sn, "supplies=none\n");
+  char *a[] = { "ipptool", "-tv", "-T", "8", uri, SUPPLIES, NULL };
+  run_quiet = 1;
+  run (o, sizeof o, IPPTOOL, a);
+  run_quiet = 0;
+  char nm[16][64], lv[16][64], co[16][64], lo[16][64];
+  int k = ipp_values (o, "marker-names", nm), kl = ipp_values (o, "marker-levels", lv);
+  int kc = ipp_values (o, "marker-colors", co), kw = ipp_values (o, "marker-low-levels", lo);
+  if (!k || kl < k)
+    return pwg_supplies (o, s, sn);
+  int n = 0;
+  for (int i = 0; i < k && n < (int) sn - 200; i++)
+    n += snprintf (s + n, sn - n, "supply=%s\t%s\t%s\t%s\n", nm[i], lv[i],
+		   i < kc ? co[i] : "", i < kw ? lo[i] : "");
+  return n;
+}
+
+/* The printer chosen in the plug-in (config "default=") kept as a queue of
+   its own: CUPS makes a queue for a printer it found only while it's in
+   use, and takes it away after a minute, so CUPS's own web pages lost it.
+   Made with IPP Everywhere, at the address ippfind gave. */
+static void
+keep_chosen (void)
+{
+  read_config ();
+  if (!chosen[0] || access (LPADMIN, X_OK))
+    return;
+  read_printers ();
+  for (int i = 0; i < nprs; i++)
+    if (!strcmp (prs[i].name, chosen) && strcmp (prs[i].kind, "Added")
+	&& (!strncmp (prs[i].uri, "ipp://", 6) || !strncmp (prs[i].uri, "ipps://", 7)))
+      {
+	/* (a queue of its own is in printers.conf; one CUPS made for a while
+	   isn't, though lpstat shows it while it's there) */
+	static char o[4096];
+	char want[300], line[400];
+	int kept = 0;
+	FILE *f = fopen ("/etc/cups/printers.conf", "r");
+	snprintf (want, sizeof want, "Printer %s>", chosen);
+	while (f && fgets (line, sizeof line, f))
+	  if (line[0] == '<' && strstr (line, want))
+	    kept = 1;
+	if (f)
+	  fclose (f);
+	if (kept)
+	  return;
+	char *argv[] = { "lpadmin", "-p", chosen, "-E", "-v", prs[i].uri, "-m", "everywhere", NULL };
+	int r = run (o, sizeof o, LPADMIN, argv);
+	o[strcspn (o, "\n")] = 0;
+	if (r == 0)
+	  log_job ("kept %s as a printer of its own (%s)", prs[i].info, prs[i].uri);
+	else
+	  log_job ("couldn't keep %s: %s", prs[i].info, o[0] ? o : "lpadmin failed");
+	sync ();
+	return;
+      }
+}
+
 static void
 write_options (const char *name)
 {
@@ -581,6 +744,7 @@ write_options (const char *name)
       }
   if (r == 0 && !found)
     n += snprintf (s + n, sizeof s - n, "error=CUPS has no settings for it\n");
+  n += supplies (name, s + n, sizeof s - n);
   write_file ("Options", s);
 }
 
@@ -799,7 +963,11 @@ job (const char *leaf)
   if (leaf[0] == '.' || !strcmp (leaf, "Printers") || !strcmp (leaf, "Log")
       || !strcmp (leaf, "Options") || !strcmp (leaf, "Found")
       || !strncmp (leaf, "config", 6))
-    return;
+    {
+      if (!strcmp (leaf, "config"))
+	keep_chosen ();
+      return;
+    }
   if (!strncmp (leaf, "request", 7))
     {
       request (leaf);
