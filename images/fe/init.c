@@ -1393,6 +1393,24 @@ cmd_up (void)
       execl ("/opt/riscos/rol-3d", "rol-3d", (char *) NULL);
       _exit (127);
     }
+  /* init-guard (riscos-support, from 1.0.0087-1): if systemd, sysvinit
+     or udev got in, or /usr/sbin/init was replaced and put back, they're
+     removed now and riscos-support installed again (apt, so after the
+     network is up); nothing to do otherwise */
+  {
+    const char *g = access ("/var/lib/riscos/init-guard", X_OK) == 0 ? "/var/lib/riscos/init-guard"
+      : access ("/usr/lib/riscos/init-guard", X_OK) == 0 ? "/usr/lib/riscos/init-guard" : NULL;
+    if (g && fork () == 0)
+      {
+	int null = open ("/dev/null", O_RDWR);
+	dup2 (null, 0);
+	dup2 (null, 1);
+	dup2 (null, 2);
+	setsid ();
+	execl (g, "init-guard", "repair", (char *) NULL);
+	_exit (127);
+      }
+  }
   /* rol-print: printing through Linux's CUPS (riscos-print, from
      riscos-support 1.0.0086-1); it starts dbus, avahi, cupsd and ipp-usb */
   if (access ("/opt/riscos/rol-print", X_OK) == 0 && fork () == 0)

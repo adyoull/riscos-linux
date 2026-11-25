@@ -785,7 +785,7 @@ send (const char *work, const char *queue, const char *dest, long size)
   int r = run (out, sizeof out, LP, argv);
   out[strcspn (out, "\n")] = 0;
   if (r == 0)
-    log_job ("printed on %s (%ld bytes): %s", dest, size, out);
+    log_job ("printed on %s (%ld bytes)", dest, size);
   else
     log_job ("not printed on %s (%ld bytes): %s", dest, size, out[0] ? out : "lp failed");
   unlink (work);

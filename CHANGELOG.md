@@ -8,6 +8,44 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### ROL's own init kept (25 Nov 2026; riscos-support 1.0.0087-1)
+
+The owner: "Can we add a guard that uninstalls systemd / udev and
+reinstalled our initial if it occurs?"
+
+- **riscos-support** conflicts with systemd, systemd-sysv, sysvinit-core
+  and udev.
+- **init-guard** (/usr/lib/riscos/init-guard; postinst's `setup` copies it
+  and ROL's init to /var/lib/riscos, outside the package):
+  - `check`: apt's DPkg::Pre-Install-Pkgs hook, version 2, run through
+    `sh -c` so that it does nothing while there's no copy (apt keys a
+    hook's Version option by its first word, hence
+    `DPkg::Tools::Options::sh::Version`). It refuses a run that installs
+    one of the four or removes riscos-support, before dpkg starts.
+    `ROL_INIT_GUARD=off` lets it through and leaves
+    /var/lib/riscos/init-guard-off, which turns the guard off.
+  - `restore`: dpkg's post-invoke (/etc/dpkg/dpkg.cfg.d). ROL's init is a
+    file, not a link, containing /opt/riscos/rol-fb (as every ROL init
+    has). While /usr/sbin/init is ROL's, it refreshes the copy. When it
+    isn't, the copy is put back and /var/lib/riscos/init-replaced is
+    left. It never fails dpkg.
+  - `repair`: run by init at each start, after cmd_up. With
+    init-replaced, any of the four installed, or riscos-support not
+    installed: `apt-get --allow-remove-essential purge` them (systemd-sysv
+    is Essential in Debian), put the init back, then `apt-get install
+    --reinstall riscos-support` (apt update is tried for up to two
+    minutes, for DHCP). Otherwise it's retried at the next start. Logs
+    "rol-init-guard: ..." to the kernel log.
+- Tested in a chroot of a ROL disc copy (t10):
+  - apt install systemd-sysv and udev: refused, nothing changed.
+  - `dpkg -i --force-depends --force-conflicts --force-overwrite
+    systemd-sysv`: init put back at once.
+  - `repair`: systemd-sysv purged, riscos-support reinstalled;
+    `dpkg -S /usr/sbin/init` is riscos-support again.
+  - Then the disc started RISC OS under QEMU.
+- rol-print's "printed" Log line no longer has CUPS's request id (it ran
+  off the plug-in's line).
+
 ### Printing through Linux's CUPS (25 Nov 2026; riscos-support 1.0.0086-1, riscos-print 1.0.0086-1, riscos-harddisc 1.0.0074-1)
 
 The owner: "Implement cups", then "an interface so you can configure the
