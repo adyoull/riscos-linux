@@ -10,7 +10,7 @@ include them.
 
 ### ShareFS's Discs icon with a late network (25 Nov 2026; riscos-harddisc 1.0.0076-1)
 
-David Sharp reported that on his Pi 5 the Discs icon and ShareFS's task were
+David Pitt reported that on his Pi 5 the Discs icon and ShareFS's task were
 missing, while ShareFS worked from the command line.
 
 - **Reproduced under QEMU** by switching the network link off from QEMU
