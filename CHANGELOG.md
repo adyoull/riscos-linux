@@ -8,6 +8,61 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Printing through Linux's CUPS (25 Nov 2026; riscos-support 1.0.0086-1, riscos-print 1.0.0086-1, riscos-harddisc 1.0.0074-1)
+
+The owner: "Implement cups", then "an interface so you can configure the
+Linux cups printer", the printer list design, and "a cups like
+configuration option so we can change the settings like on cups".
+
+- **rol-print** (images/fe/rol-print.c, started by init after rol-3d when
+  it's there): starts dbus-daemon, avahi-daemon, cupsd and ipp-usb (no
+  systemd; each restarted at most every 10 s) and watches /riscos/print
+  (owned by HardDisc4's user) with inotify. A file written there is a
+  job: `lp -d NAME` with NAME its leaf (",xxx" taken off); "Default" goes
+  to the plug-in's choice (config "default="), else CUPS's default, else
+  the first printer. A "Default" job with no printer yet (CUPS and avahi
+  just started: switching on with a job left, or a network printer not
+  yet found) waits as .wait-TIME-N-QUEUE, tried again every few seconds
+  and given up after two minutes. Its own files (Printers, Log, Options, Found,
+  config*, dot files) are never jobs. "request" files are the plug-in's
+  verbs: setup, find (lpinfo, non-IPP devices), add NAME URI (lpadmin -m
+  everywhere, else the generic PostScript PPD; a bare address becomes
+  ipp://ADDR/ipp/print), remove, options NAME (lpoptions -l, labels from
+  the PPD's English translations), set NAME K=V... (lpoptions -o), test.
+  Printers: the queues (lpstat -e, named from ippfind's TXT ty, "USB"
+  when the service is on localhost, "Added" with the queue name and host
+  for the plug-in's), their states, CUPS's default and whether !Printers
+  has Linux printer. Files are written whole, fsynced and renamed; CUPS's
+  files are synced after a change (a Pi can be switched off at once).
+- **Configure plug-in !LinuxPrint** ("Linux printing"): the printer list
+  (name, state, connection; the radio is the one Linux printer uses) with
+  Make default, Options..., Test page, Remove and Add...; an Add window
+  (printers Linux found that need a driver, or an address and a name); an
+  Options window with one pop-up menu per CUPS option, as tall as the
+  printer's options, sending only the ones changed; Set up (when !Printers
+  has no Linux printer), CUPS web page, Cancel and Set. Found in testing:
+  a text line made after the rows took their clicks (the Wimp gives a
+  click to the last icon made there), and BASIC's FOR runs once even for
+  "FOR i%=2 TO 1", so the first tab field came back as the second.
+- **riscos-print**: Depends on cups (its pstops, which the PostScript
+  driver's jobs need: "Filter pstops not found" without it), cups-daemon,
+  cups-client, cups-filters, ghostscript, avahi-daemon, dbus-daemon and
+  ipp-usb; Conflicts with systemd, systemd-sysv, sysvinit-core and udev,
+  which apt would otherwise bring as Recommends. Its postinst runs
+  setup-linux-printer: ready-made !Printers choices (PostScript Level 2,
+  File connection to IXFS:$.riscos.print.Default, as !Printers 1.95 saves
+  them) when there are none, Linux printer added to choices that already
+  have the PostScript Level 2 definition, else a message.
+- **Tested in QEMU** (an ippeveprinter as the network printer): !Printers'
+  Linux printer printed a text file, which reached the printer as a PDF;
+  a PostScript job left in /riscos/print at switching on waited for the
+  printer and was printed (the PDF has its text); CUPS's test page;
+  the plug-in's list, row choice, Options (Media Type changed, kept,
+  shown again), Add by address (ipp://localhost:8631/ipp/print as
+  Office), Make default + Set (config default=Office, Printers
+  chosen=Office), Remove and Test page. Not yet with a real printer, or
+  on a Pi.
+
 ### Joysticks, ping, ShareFS, RISC3D 0.10 (25 Nov 2026; riscos-rom 5.31-32, riscos-support 1.0.0085-1, riscos-harddisc 1.0.0073-1)
 
 From David Sharp's RoMac report, checked here first, then the owner: "Yes"

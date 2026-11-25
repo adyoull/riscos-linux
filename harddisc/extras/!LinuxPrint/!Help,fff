@@ -1,0 +1,47 @@
+Linux printing
+==============
+
+RISC OS on Linux prints through Linux's CUPS. In !Printers, "Linux" is a
+PostScript Level 2 printer whose connection is the file
+IXFS:$.riscos.print.Default; each job written there is printed by CUPS
+(riscos-print, from Updates), which turns the PostScript into what the
+printer takes.
+
+The list
+  The printers CUPS can print on, with their state and how they're
+  connected. Network printers that need no driver (IPP Everywhere,
+  AirPrint: most made since about 2012) appear by themselves when they're
+  switched on, as do USB printers that speak IPP over USB ("USB"); the
+  ones added here say "Added".
+
+  Click a printer to choose it for the buttons below the list. The radio
+  button beside it is the one "Linux" prints on: Make default (or click
+  the radio button), then Set. With none ticked, CUPS chooses (its
+  default, or the first it found).
+
+  Options...  The printer's settings, as CUPS has them (paper size, paper
+              source, quality, colour and the rest): choose from each
+              menu, then Set.
+  Test page   CUPS's test page on that printer.
+  Remove      Takes away a printer added here (the ones found by
+              themselves go when they're switched off).
+  Add...      A printer that doesn't appear by itself: one Linux has found
+              that needs a driver, or its address (192.168.0.50, a host
+              name, or ipp://, ipps://, socket://, lpd:// ...) and, if you
+              like, a name. Linux asks the printer what it can do; a
+              printer that isn't IPP (socket://, lpd://) is given the
+              PostScript as it is.
+
+CUPS web page
+  CUPS's own pages (http://localhost:631/) in the web browser, with every
+  setting it has. Changes there ask for root's user name and password.
+
+Status
+  The last job, whether CUPS is running, and whether !Printers has
+  "Linux" (Set up puts it there: quit !Printers and run it again to see
+  it).
+
+Other printers: printing to IXFS:$.riscos.print.NAME (a File connection)
+prints on the one called NAME.
+
+Andrew Youll, 2026. MIT licence.

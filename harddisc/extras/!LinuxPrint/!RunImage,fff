@@ -1,0 +1,784 @@
+REM >!RunImage
+REM LinuxPrint: Configure's plug-in for printing on RISC OS on Linux.
+REM RISC OS prints with its own PostScript driver to "Linux" in !Printers,
+REM whose jobs go to Linux's CUPS through rol-print (the Linux side). This
+REM shows the printers CUPS can use (<LinuxPrint$Path>Printers, which
+REM rol-print keeps up to date), chooses the one Linux prints on
+REM (<LinuxPrint$Path>config), and asks rol-print (<LinuxPrint$Path>request)
+REM to add or remove a printer, print a test page, change a printer's
+REM settings (as CUPS has them: <LinuxPrint$Path>Options) or set up Linux
+REM in !Printers.
+REM Copyright (c) 2026 Andrew Youll. MIT licence.
+ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
+DIM blk% 4096, ind% 24576, menu% 28+24*64, mtext% 64*64
+MAXR%=6 : MAXF%=6 : MAXO%=10 : MAXC%=60
+DIM row%(MAXR%,4), pname$(16), pinfo$(16), pstate$(16), pkind$(16)
+DIM frow%(MAXF%), furi$(MAXF%), finfo$(MAXF%)
+DIM orow%(MAXO%,2), okey$(MAXO%), olab$(MAXO%), ocur$(MAXO%), oold$(MAXO%), onc%(MAXO%), oc$(MAXO%,MAXC%), ocl$(MAXO%,MAXC%)
+DIM ic%(40), shown$(60), st$(60), sv$(60)
+indp%=0 : task%=0 : quit%=FALSE : np%=0 : nst%=0 : hold%=0 : sel%=0
+chosen$="" : want$="" : lastlog$="" : waiting%=FALSE : listed%=FALSE
+nf%=0 : finding%=FALSE : setuphid%=99 : no%=0 : oprinter$="" : opening%=FALSE : menuo%=0
+path$=FNvar("LinuxPrint$Path")
+IF path$="" THEN path$="IXFS:$.riscos.print."
+SYS "Wimp_Initialise",380,&4B534154,"Linux printing",0 TO ,task%
+PROCmain_window
+PROCadd_window
+PROCoptions_window
+PROCload
+PROCstatus
+PROCopen(win%,W%,H%)
+ON ERROR PROCerror
+REPEAT
+  SYS "OS_ReadMonotonicTime" TO t%
+  IF finding% OR opening% OR waiting% THEN wait%=25 ELSE wait%=100
+  SYS "Wimp_PollIdle",&3830,blk%,t%+wait% TO reason%
+  CASE reason% OF
+    WHEN 0 : PROCstatus : IF finding% THEN PROCfound
+      IF opening% THEN PROCoptions_read
+    WHEN 2 : SYS "Wimp_OpenWindow",,blk%
+    WHEN 3 : IF blk%!0=win% THEN quit%=TRUE ELSE SYS "Wimp_CloseWindow",,blk%
+    WHEN 6 : PROCclick(blk%!8,blk%!12,blk%!16)
+    WHEN 8 : PROCkey(blk%!0,blk%!24)
+    WHEN 9 : PROCmenu_choice(blk%!0)
+    WHEN 17,18 : IF blk%!16=0 THEN quit%=TRUE
+  ENDCASE
+UNTIL quit%
+SYS "Wimp_CloseDown",task%,&4B534154
+END
+
+DEF PROCerror
+LOCAL e%,r%
+e%=blk%+3000
+!e%=0 : $(e%+4)=REPORT$+" (line "+STR$ERL+")"+CHR$0
+SYS "Wimp_ReportError",e%,%10011,"Linux printing" TO ,r%
+IF r%=2 THEN SYS "Wimp_CloseDown",task%,&4B534154 : END
+ENDPROC
+
+REM --- making windows and icons --------------------------------------------
+
+DEF FNstr(s$,len%)
+LOCAL p%
+p%=ind%+indp%
+IF len%<LEN(s$)+1 THEN len%=LEN(s$)+1
+$p%=s$
+indp%+=(len%+3) AND NOT 3
+=p%
+
+REM a window W% wide, titled T$
+DEF FNwindow(w%,t$)
+LOCAL b%,h%
+b%=blk%+1024
+b%!0=0 : b%!4=0 : b%!8=w% : b%!12=1000
+b%!16=0 : b%!20=0 : b%!24=-1
+b%!28=&87000012
+b%?32=7 : b%?33=2 : b%?34=7 : b%?35=1 : b%?36=3 : b%?37=1 : b%?38=12 : b%?39=0
+b%!40=0 : b%!44=-1400 : b%!48=w% : b%!52=0
+b%!56=&13D : b%!60=0 : b%!64=1 : b%!68=0
+b%!72=FNstr(t$,40) : b%!76=-1 : b%!80=40
+b%!84=0
+SYS "Wimp_CreateWindow",,b% TO h%
+=h%
+
+DEF PROCextent(w%,width%,height%)
+LOCAL e%
+e%=blk%+2000
+e%!0=0 : e%!4=-height% : e%!8=width% : e%!12=0
+SYS "Wimp_SetExtent",w%,e%
+ENDPROC
+
+DEF FNicon(w%,x0%,y0%,x1%,y1%,fl%,t$,v$,len%)
+LOCAL i%
+blk%!0=w% : blk%!4=x0% : blk%!8=y0% : blk%!12=x1% : blk%!16=y1%
+blk%!20=fl%
+IF len%<LEN(t$)+1 THEN len%=LEN(t$)+1
+blk%!24=FNstr(t$,len%)
+IF v$="" THEN blk%!28=-1 ELSE blk%!28=FNstr(v$,0)
+blk%!32=len%
+SYS "Wimp_CreateIcon",,blk% TO i%
+=i%
+
+DEF FNlabel(w%,x0%,x1%,y%,t$)
+=FNicon(w%,x0%,y%-48,x1%,y%,&17000111,t$,"",80)
+
+DEF FNrlabel(w%,x0%,x1%,y%,t$)
+=FNicon(w%,x0%,y%-48,x1%,y%,&17000311,t$,"",80)
+
+DEF FNwritable(w%,x0%,x1%,y%,len%,v$)
+IF v$="" THEN v$="Ktar;Pptr_write" ELSE v$+=";Ktar;Pptr_write"
+=FNicon(w%,x0%,y%-52,x1%,y%,&0700F13D,"",v$,len%)
+
+DEF FNdisplay(w%,x0%,x1%,y%)
+=FNicon(w%,x0%,y%-52,x1%,y%,&1700013D,"","R2",120)
+
+DEF FNradio(w%,x0%,x1%,y%,esg%,t$)
+=FNicon(w%,x0%,y%-48,x1%,y%,&1700B113 OR (esg%<<16),t$,"Sradiooff,radioon",80)
+
+DEF FNbutton(w%,x0%,x1%,y%,t$,def%)
+IF def% THEN =FNicon(w%,x0%,y%-68,x1%,y%,&1700313D,t$,"R6,3",0)
+=FNicon(w%,x0%,y%-60,x1%,y%-8,&1700313D,t$,"R5,3",0)
+
+REM one cell of a list's row: white, black text, picked out when selected
+REM (a radio-type icon, group 3: the Wimp reports its clicks; PROCpick picks
+REM out the whole row)
+DEF FNcell(w%,x0%,x1%,y%)
+=FNicon(w%,x0%,y%-52,x1%,y%,&0703B131,"","",100)
+
+REM the pop-up menu button beside a display field
+DEF FNpopup(w%,x0%,y%)
+=FNicon(w%,x0%,y%-48,x0%+44,y%-4,&1700311B,"","Sgright,pgright",1)
+
+DEF FNgroup(w%,width%,top%,t$)
+LOCAL i%,j%
+i%=FNicon(w%,16,top%-100,width%-16,top%,&1700011D,"","R4",0)
+j%=FNicon(w%,48,top%-24,48+LEN(t$)*16+24,top%+24,&17000139,t$,"",0)
+=i%
+
+DEF PROCgroup_end(w%,i%,width%,top%,bot%)
+SYS "Wimp_ResizeIcon",w%,i%,16,bot%,width%-16,top%
+ENDPROC
+
+REM the printers, with what to do with them
+DEF PROCmain_window
+LOCAL y%,top%,i%,g%,x%
+W%=1120
+win%=FNwindow(W%,"Linux printing")
+y%=-40 : top%=y%+16 : g%=FNgroup(win%,W%,top%,"Printers")
+y%-=36
+i%=FNlabel(win%,32,100,y%,"Use")
+i%=FNlabel(win%,104,600,y%,"Printer")
+i%=FNlabel(win%,620,800,y%,"State")
+i%=FNlabel(win%,820,W%-40,y%,"Connection")
+y%-=48
+REM the list: its rows make a white block (no box under them: the Wimp
+REM gave a box the clicks meant for the rows); radio: the one Linux prints on.
+REM The Wimp gives a click to the last icon made at that place, even one
+REM that only shows text, so the empty rows are made first, and the line
+REM shown when the list is empty is hidden when it isn't.
+FOR r%=1 TO MAXR%
+  REM (an empty row: white, so the list keeps its shape)
+  row%(r%,4)=FNicon(win%,32,y%-52,W%-32,y%,&00000020,"","",0)
+  row%(r%,0)=FNicon(win%,32,y%-52,96,y%,&0701B133,"","Sradiooff,radioon",1)
+  row%(r%,1)=FNcell(win%,96,600,y%)
+  row%(r%,2)=FNcell(win%,600,800,y%)
+  row%(r%,3)=FNcell(win%,800,W%-32,y%)
+  y%-=52
+NEXT
+ic%(1)=FNlabel(win%,96,W%-40,y%+MAXR%*52-4,"")
+y%-=28
+x%=32
+ic%(2)=FNbutton(win%,x%,x%+220,y%,"Make default",FALSE) : x%+=236
+ic%(3)=FNbutton(win%,x%,x%+200,y%,"Options...",FALSE) : x%+=216
+ic%(4)=FNbutton(win%,x%,x%+200,y%,"Test page",FALSE) : x%+=216
+ic%(5)=FNbutton(win%,x%,x%+180,y%,"Remove",FALSE) : x%+=196
+ic%(6)=FNbutton(win%,x%,W%-32,y%,"Add...",FALSE)
+y%-=80
+PROCgroup_end(win%,g%,W%,top%,y%)
+y%-=24
+ic%(7)=FNlabel(win%,32,W%-32,y%,"")
+y%-=52
+ic%(8)=FNlabel(win%,32,W%-232,y%,"")
+ic%(9)=FNbutton(win%,W%-220,W%-32,y%+6,"Set up",FALSE)
+y%-=72
+ic%(10)=FNbutton(win%,32,332,y%,"CUPS web page",FALSE)
+ic%(11)=FNbutton(win%,W%-460,W%-260,y%,"Cancel",FALSE)
+ic%(12)=FNbutton(win%,W%-240,W%-24,y%,"Set",TRUE)
+H%=-(y%-84)
+PROCextent(win%,W%,H%)
+ENDPROC
+
+REM Add a printer: the ones Linux found, or an address
+DEF PROCadd_window
+LOCAL y%,i%,top%,g%
+AW%=1000
+awin%=FNwindow(AW%,"Add a printer")
+y%=-40 : top%=y%+16 : g%=FNgroup(awin%,AW%,top%,"Found by Linux")
+y%-=40
+FOR r%=1 TO MAXF%
+  frow%(r%)=FNradio(awin%,40,AW%-40,y%,2,"")
+  y%-=52
+NEXT
+ic%(20)=FNlabel(awin%,40,AW%-40,y%+MAXF%*52,"")
+y%-=8
+ic%(21)=FNradio(awin%,40,300,y%,2,"Other address")
+ic%(22)=FNwritable(awin%,310,AW%-40,y%,120,"")
+y%-=52
+i%=FNlabel(awin%,96,AW%-40,y%,"(an IP address or host name, or ipp://, socket://...)")
+y%-=72
+PROCgroup_end(awin%,g%,AW%,top%,y%)
+y%-=40
+i%=FNrlabel(awin%,32,220,y%,"Name")
+ic%(23)=FNwritable(awin%,232,632,y%,40,"A0-9a-zA-Z\-_")
+i%=FNlabel(awin%,648,AW%-32,y%,"(made up if blank)")
+y%-=84
+ic%(24)=FNbutton(awin%,AW%-460,AW%-260,y%,"Cancel",FALSE)
+ic%(25)=FNbutton(awin%,AW%-240,AW%-24,y%,"Add",TRUE)
+AH%=-(y%-84)
+PROCextent(awin%,AW%,AH%)
+ENDPROC
+
+REM a printer's settings, as CUPS has them
+DEF PROCoptions_window
+LOCAL y%,top%,g%
+OW%=1000
+owin%=FNwindow(OW%,"Printer settings")
+y%=-40 : top%=y%+16 : og%=FNgroup(owin%,OW%,top%,"Settings")
+y%-=40
+REM (a line for what went wrong: made first, as it's where the rows are)
+ic%(30)=FNlabel(owin%,40,OW%-40,y%,"")
+FOR r%=1 TO MAXO%
+  orow%(r%,0)=FNrlabel(owin%,32,372,y%,"")
+  orow%(r%,1)=FNdisplay(owin%,384,OW%-100,y%)
+  orow%(r%,2)=FNpopup(owin%,OW%-90,y%)
+  y%-=60
+NEXT
+ic%(31)=FNbutton(owin%,OW%-460,OW%-260,y%,"Cancel",FALSE)
+ic%(32)=FNbutton(owin%,OW%-240,OW%-24,y%,"Set",TRUE)
+PROCoptions_fit(MAXO%)
+ENDPROC
+
+REM the settings window as tall as its N% settings
+DEF PROCoptions_fit(n%)
+LOCAL y%
+IF n%<1 THEN n%=1
+y%=-80-n%*60-12
+PROCgroup_end(owin%,og%,OW%,-24,y%)
+y%-=32
+SYS "Wimp_ResizeIcon",owin%,ic%(31),OW%-460,y%-60,OW%-260,y%-8
+SYS "Wimp_ResizeIcon",owin%,ic%(32),OW%-240,y%-68,OW%-24,y%
+OH%=-(y%-84)
+PROCextent(owin%,OW%,OH%)
+ENDPROC
+
+REM a window opened in the middle (the main one where Configure says)
+DEF PROCopen(w%,width%,height%)
+LOCAL b%,sw%,sh%,x%,y%,a$,i%
+SYS "OS_ReadModeVariable",-1,11 TO ,,sw%
+SYS "OS_ReadModeVariable",-1,12 TO ,,sh%
+SYS "OS_ReadModeVariable",-1,4 TO ,,ex%
+SYS "OS_ReadModeVariable",-1,5 TO ,,ey%
+sw%=(sw%+1)<<ex% : sh%=(sh%+1)<<ey%
+x%=(sw%-width%)DIV2 : y%=(sh%+height%)DIV2
+IF y%>sh%-48 THEN y%=sh%-48
+IF w%=win% THEN
+  SYS "OS_GetEnv" TO a$
+  i%=INSTR(a$,"-openat ")
+  IF i% THEN a$=MID$(a$,i%+8) : x%=VAL(a$) : a$=MID$(a$,INSTR(a$," ")+1) : y%=VAL(a$)
+ENDIF
+b%=blk%
+b%!0=w% : b%!4=x% : b%!8=y%-height% : b%!12=x%+width% : b%!16=y%
+b%!20=0 : b%!24=0 : b%!28=-1
+SYS "Wimp_OpenWindow",,b%
+ENDPROC
+
+REM --- icons --------------------------------------------------------------
+
+DEF FNtext(w%,i%)
+LOCAL p%,s$
+blk%!0=w% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+p%=blk%!28
+WHILE ?p%>=32 : s$+=CHR$?p% : p%+=1 : ENDWHILE
+=s$
+
+DEF PROCsettext(w%,i%,s$)
+LOCAL p%,n%
+blk%!0=w% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+p%=blk%!28 : n%=blk%!36
+s$=LEFT$(s$,n%-1)
+$p%=s$ : p%?LEN(s$)=0
+blk%!0=w% : blk%!4=i% : blk%!8=0 : blk%!12=0
+SYS "Wimp_SetIconState",,blk%
+SYS "Wimp_GetCaretPosition",,blk%+64
+IF blk%!64=w% AND blk%!68=i% THEN SYS "Wimp_SetCaretPosition",w%,i%,-1,-1,-1,LEN(s$)
+ENDPROC
+
+DEF FNon(w%,i%)
+blk%!0=w% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+=(blk%!24 AND &200000)<>0
+
+DEF PROCflag(w%,i%,bit%,on%)
+blk%!0=w% : blk%!4=i%
+IF on% THEN blk%!8=bit% ELSE blk%!8=0
+blk%!12=bit%
+SYS "Wimp_SetIconState",,blk%
+ENDPROC
+
+DEF PROCselect(w%,i%,on%) : PROCflag(w%,i%,&200000,on%) : ENDPROC
+DEF PROCfade(w%,i%,on%) : PROCflag(w%,i%,&400000,on%) : ENDPROC
+
+REM an icon hidden (deleted flag) or shown, and its place redrawn
+DEF PROChide(w%,i%,on%)
+PROCflag(w%,i%,&800000,on%)
+blk%!0=w% : blk%!4=i%
+SYS "Wimp_GetIconState",,blk%
+SYS "Wimp_ForceRedraw",w%,blk%!8,blk%!12,blk%!16,blk%!20
+ENDPROC
+
+REM the main window's text icons, only when they change
+DEF PROCshow(n%,i%,s$)
+IF s$=shown$(n%) THEN ENDPROC
+shown$(n%)=s$
+PROCsettext(win%,i%,s$)
+ENDPROC
+
+REM --- settings and requests ---------------------------------------------
+
+DEF FNvar(n$)
+LOCAL l%,b%
+b%=blk%+3500
+SYS "XOS_ReadVarVal",n$,b%,255,0,3 TO ,,l%
+IF l%<0 OR l%>255 THEN =""
+b%?l%=13
+=$b%
+
+REM the printer Linux prints on (config: default=NAME; none: CUPS's choice)
+DEF PROCload
+LOCAL f%,fl%,l$
+chosen$=""
+f%=0 : SYS "XOS_Find",&4F,path$+"config" TO f% ;fl%
+IF fl% AND 1 THEN f%=0
+IF f% THEN
+  WHILE NOT EOF#f%
+    l$=GET$#f%
+    IF LEFT$(l$,8)="default=" THEN chosen$=MID$(l$,9)
+  ENDWHILE
+  CLOSE#f%
+ENDIF
+want$=chosen$
+ENDPROC
+
+DEF PROCsave
+LOCAL f%
+f%=OPENOUT(path$+"config")
+IF f%=0 THEN ERROR 1,"Can't write "+path$+"config (is riscos-support 1.0.0086-1 or later installed?)"
+BPUT#f%,"default="+want$
+CLOSE#f%
+SYS "XOS_File",18,path$+"config",&FFF
+chosen$=want$
+ENDPROC
+
+REM one line for rol-print
+DEF PROCrequest(r$,wait$)
+LOCAL f%
+f%=OPENOUT(path$+"request")
+IF f%=0 THEN ERROR 1,"Can't write "+path$+"request"
+BPUT#f%,r$
+CLOSE#f%
+IF wait$<>"" THEN PROCnote(wait$) : waiting%=TRUE
+ENDPROC
+
+REM --- the main window's events --------------------------------------------
+
+DEF PROCclick(b%,w%,i%)
+LOCAL r%,c%
+CASE w% OF
+  WHEN win%
+    r%=0
+    WHILE r%<np%
+      r%+=1
+      FOR c%=1 TO 3
+        IF i%=row%(r%,c%) THEN PROCpick(r%)
+      NEXT
+      IF i%=row%(r%,0) THEN PROCpick(r%) : want$=pname$(r%) : PROCmarks
+    ENDWHILE
+    CASE i% OF
+      WHEN ic%(2) : IF sel% THEN want$=pname$(sel%) : PROCmarks
+      WHEN ic%(3) : IF sel% THEN PROCoptions_open ELSE PROCnote("Choose a printer first")
+      WHEN ic%(4) : IF sel% THEN PROCrequest("test "+pname$(sel%),"Sending CUPS's test page to "+pinfo$(sel%)+"...") ELSE PROCnote("Choose a printer first")
+      WHEN ic%(5) : PROCremove
+      WHEN ic%(6) : PROCadd_open
+      WHEN ic%(9) : PROCrequest("setup","Setting up Linux in !Printers...")
+      WHEN ic%(10) : PROCweb
+      WHEN ic%(11)
+        IF b% AND 4 THEN quit%=TRUE
+        IF b% AND 1 THEN PROCload : PROCmarks
+      WHEN ic%(12)
+        IF b% AND 5 THEN PROCsave : PROCnote("Saved: RISC OS's Linux printer prints on "+FNwhere)
+        IF b% AND 4 THEN quit%=TRUE
+    ENDCASE
+  WHEN awin% : PROCadd_click(b%,i%)
+  WHEN owin% : PROCoptions_click(b%,i%)
+ENDCASE
+ENDPROC
+
+DEF FNwhere
+LOCAL r%
+IF want$="" THEN ="CUPS's own choice"
+r%=0
+WHILE r%<np%
+  r%+=1 : IF pname$(r%)=want$ THEN =pinfo$(r%)
+ENDWHILE
+=want$
+
+REM a row picked out (selected)
+DEF PROCpick(r%)
+LOCAL j%,c%
+sel%=r%
+FOR j%=1 TO MAXR%
+  FOR c%=1 TO 3 : PROCselect(win%,row%(j%,c%),j%=r% AND j%<=np%) : NEXT
+NEXT
+PROCbuttons
+ENDPROC
+
+REM the radio buttons: the printer Linux prints on
+DEF PROCmarks
+LOCAL j%
+FOR j%=1 TO MAXR%
+  PROCselect(win%,row%(j%,0),j%<=np% AND pname$(j%)=want$)
+NEXT
+ENDPROC
+
+DEF PROCbuttons
+LOCAL f%
+f%=(sel%=0)
+PROCfade(win%,ic%(2),f%) : PROCfade(win%,ic%(3),f%) : PROCfade(win%,ic%(4),f%)
+IF sel% THEN PROCfade(win%,ic%(5),pkind$(sel%)<>"Added") ELSE PROCfade(win%,ic%(5),TRUE)
+ENDPROC
+
+DEF PROCremove
+IF sel%=0 THEN ENDPROC
+IF pkind$(sel%)<>"Added" THEN PROCnote(pinfo$(sel%)+" was found by Linux: it goes when it's switched off") : ENDPROC
+PROCrequest("remove "+pname$(sel%),"Removing "+pinfo$(sel%)+"...")
+ENDPROC
+
+REM CUPS's own pages (every setting it has), in the browser
+DEF PROCweb
+SYS "XOS_CLI","URIdispatch http://localhost:631/" TO ;fl%
+IF fl% AND 1 THEN SYS "XOS_CLI","Filer_Run http://localhost:631/" TO ;fl%
+PROCnote("CUPS's pages: http://localhost:631/ (changes there ask for root's password)")
+ENDPROC
+
+DEF PROCkey(w%,k%)
+CASE k% OF
+  WHEN 13
+    CASE w% OF
+      WHEN win% : PROCsave : quit%=TRUE
+      WHEN awin% : PROCadd_do
+      WHEN owin% : PROCoptions_set
+    ENDCASE
+  WHEN 27
+    IF w%=win% THEN quit%=TRUE ELSE SYS "Wimp_CloseWindow",,FNblkw(w%)
+  OTHERWISE : SYS "Wimp_ProcessKey",k%
+ENDCASE
+ENDPROC
+
+DEF FNblkw(w%)
+!blk%=w%
+=blk%
+
+REM a message on the bottom line for a few seconds
+DEF PROCnote(s$)
+PROCshow(7,ic%(7),s$)
+SYS "OS_ReadMonotonicTime" TO hold%
+hold%+=600
+ENDPROC
+
+REM --- the status -------------------------------------------------------
+
+DEF FNs(k$)
+LOCAL i%
+i%=0
+WHILE i%<nst%
+  i%+=1 : IF st$(i%)=k$ THEN =sv$(i%)
+ENDWHILE
+=""
+
+REM field N% (from 1) of a tab-separated line
+DEF FNfield(l$,n%)
+LOCAL j%
+REM (not FOR: a FOR loop runs once even when there's nothing to do)
+WHILE n%>1
+  j%=INSTR(l$,CHR$9) : IF j%=0 THEN =""
+  l$=MID$(l$,j%+1) : n%-=1
+ENDWHILE
+j%=INSTR(l$+CHR$9,CHR$9)
+=LEFT$(l$,j%-1)
+
+REM the list, from Printers' printer=NAME<tab>WHAT<tab>STATE<tab>HOW lines
+DEF PROClist
+LOCAL i%,r%,c%,old$
+IF sel% THEN old$=pname$(sel%)
+np%=0
+i%=0
+WHILE i%<nst%
+  i%+=1
+  IF st$(i%)="printer" AND np%<MAXR% THEN
+    np%+=1
+    pname$(np%)=FNfield(sv$(i%),1) : pinfo$(np%)=FNfield(sv$(i%),2)
+    pstate$(np%)=FNfield(sv$(i%),3) : pkind$(np%)=FNfield(sv$(i%),4)
+    IF pinfo$(np%)="" THEN pinfo$(np%)=pname$(np%)
+  ENDIF
+ENDWHILE
+sel%=0
+FOR r%=1 TO MAXR%
+  IF r%<=np% THEN
+    FOR c%=0 TO 3 : PROChide(win%,row%(r%,c%),FALSE) : NEXT
+    PROChide(win%,row%(r%,4),TRUE)
+    PROCsettext(win%,row%(r%,1),pinfo$(r%))
+    PROCsettext(win%,row%(r%,2),pstate$(r%))
+    PROCsettext(win%,row%(r%,3),pkind$(r%))
+    IF pname$(r%)=old$ THEN sel%=r%
+  ELSE
+    FOR c%=0 TO 3 : PROChide(win%,row%(r%,c%),TRUE) : NEXT
+    PROChide(win%,row%(r%,4),FALSE)
+  ENDIF
+NEXT
+PROCpick(sel%)
+PROCmarks
+IF np%=0 THEN
+  PROCsettext(win%,ic%(1),"None yet: printers on the network appear when they're switched on")
+  PROChide(win%,ic%(1),FALSE)
+ELSE
+  PROChide(win%,ic%(1),TRUE)
+ENDIF
+ENDPROC
+
+DEF PROCstatus
+LOCAL f%,fl%,l$,k$,s$,t%,old$
+old$="" : IF nst% THEN FOR f%=1 TO nst% : old$+=st$(f%)+sv$(f%) : NEXT
+nst%=0 : f%=0
+SYS "XOS_Find",&4F,path$+"Printers" TO f% ;fl%
+IF fl% AND 1 THEN f%=0
+IF f%=0 THEN
+  PROCshow(8,ic%(8),"No word from Linux: is riscos-support 1.0.0086-1 installed?")
+  ENDPROC
+ENDIF
+WHILE NOT EOF#f% AND nst%<60
+  l$=GET$#f%
+  IF LEFT$(l$,1)<>"#" THEN
+    k$=LEFT$(l$,INSTR(l$+"=","=")-1)
+    nst%+=1 : st$(nst%)=k$ : sv$(nst%)=MID$(l$,LEN(k$)+2)
+  ENDIF
+ENDWHILE
+CLOSE#f%
+s$="" : IF nst% THEN FOR f%=1 TO nst% : s$+=st$(f%)+sv$(f%) : NEXT
+IF s$<>old$ OR NOT listed% THEN PROClist : listed%=TRUE
+REM the line under the list: CUPS, or !Printers if it has no Linux printer
+CASE TRUE OF
+  WHEN FNs("cups")="missing" : s$="Linux has no CUPS: install riscos-print with Updates"
+  WHEN FNs("cups")="starting" : s$="Linux's CUPS is starting..."
+  WHEN FNs("riscos")<>"linux" : s$="!Printers has no Linux printer yet"
+  OTHERWISE : s$=""
+ENDCASE
+PROCshow(8,ic%(8),s$)
+f%=(FNs("riscos")="linux" OR FNs("cups")<>"running")
+IF f%<>setuphid% THEN setuphid%=f% : PROChide(win%,ic%(9),f%)
+REM the last job (Log's newest line)
+f%=0 : SYS "XOS_Find",&4F,path$+"Log" TO f% ;fl%
+IF fl% AND 1 THEN f%=0
+l$=""
+IF f% THEN
+  IF NOT EOF#f% THEN l$=GET$#f%
+  CLOSE#f%
+ENDIF
+IF waiting% AND l$<>lastlog$ AND lastlog$<>"" THEN waiting%=FALSE : PROCnote(MID$(l$,22))
+lastlog$=l$ : IF lastlog$="" THEN lastlog$=" "
+SYS "OS_ReadMonotonicTime" TO t%
+IF t%-hold%>=0 AND NOT waiting% THEN
+  IF l$<>"" THEN PROCshow(7,ic%(7),"Last: "+MID$(l$,22)+" ("+MID$(l$,13,5)+")") ELSE PROCshow(7,ic%(7),"")
+ENDIF
+ENDPROC
+
+REM --- Add a printer -------------------------------------------------------
+
+DEF PROCadd_open
+LOCAL r%
+FOR r%=1 TO MAXF% : PROChide(awin%,frow%(r%),TRUE) : NEXT
+PROCsettext(awin%,ic%(20),"Looking for printers (about 10 seconds)...")
+PROCselect(awin%,ic%(21),TRUE)
+SYS "XOS_File",6,path$+"Found"
+PROCrequest("find","")
+finding%=TRUE : nf%=0
+PROCopen(awin%,AW%,AH%)
+SYS "Wimp_SetCaretPosition",awin%,ic%(22),-1,-1,-1,LEN(FNtext(awin%,ic%(22)))
+ENDPROC
+
+DEF PROCfound
+LOCAL o%,f%,l$,r%
+SYS "XOS_File",17,path$+"Found" TO o%
+IF o%<>1 THEN ENDPROC
+finding%=FALSE : nf%=0
+f%=OPENIN(path$+"Found")
+WHILE NOT EOF#f% AND nf%<MAXF%
+  l$=GET$#f%
+  IF LEFT$(l$,6)="found=" THEN nf%+=1 : furi$(nf%)=FNfield(MID$(l$,7),1) : finfo$(nf%)=FNfield(MID$(l$,7),2)
+ENDWHILE
+CLOSE#f%
+FOR r%=1 TO MAXF%
+  IF r%<=nf% THEN PROCsettext(awin%,frow%(r%),finfo$(r%)) : PROChide(awin%,frow%(r%),FALSE)
+NEXT
+IF nf%=0 THEN
+  PROCsettext(awin%,ic%(20),"No others found (the ones that need no driver are listed)")
+ELSE
+  PROCsettext(awin%,ic%(20),"")
+ENDIF
+ENDPROC
+
+DEF PROCadd_click(b%,i%)
+LOCAL r%
+r%=0
+WHILE r%<nf%
+  r%+=1 : IF i%=frow%(r%) THEN PROCselect(awin%,ic%(21),FALSE)
+ENDWHILE
+CASE i% OF
+  WHEN ic%(21) : FOR r%=1 TO MAXF% : PROCselect(awin%,frow%(r%),FALSE) : NEXT
+  WHEN ic%(22) : PROCselect(awin%,ic%(21),TRUE) : FOR r%=1 TO MAXF% : PROCselect(awin%,frow%(r%),FALSE) : NEXT
+  WHEN ic%(24) : SYS "Wimp_CloseWindow",,FNblkw(awin%)
+  WHEN ic%(25) : PROCadd_do
+ENDCASE
+ENDPROC
+
+DEF PROCadd_do
+LOCAL r%,u$,n$,what$
+r%=0
+WHILE r%<nf%
+  r%+=1 : IF FNon(awin%,frow%(r%)) THEN u$=furi$(r%) : what$=finfo$(r%)
+ENDWHILE
+IF u$="" THEN u$=FNtext(awin%,ic%(22)) : what$=u$
+IF u$="" THEN PROCnote("Choose a printer, or give its address") : ENDPROC
+n$=FNtext(awin%,ic%(23))
+IF n$="" THEN n$=FNname(what$)
+PROCrequest("add "+n$+" "+u$,"Adding "+what$+" (Linux asks the printer what it can do)...")
+SYS "Wimp_CloseWindow",,FNblkw(awin%)
+ENDPROC
+
+REM a queue name made from what a printer is: letters, digits, - and _
+DEF FNname(a$)
+LOCAL i%,c$,n$
+i%=INSTR(a$,"://") : IF i% THEN a$=MID$(a$,i%+3)
+FOR i%=1 TO LEN(a$)
+  c$=MID$(a$,i%,1)
+  IF (c$>="0" AND c$<="9") OR (c$>="A" AND c$<="Z") OR (c$>="a" AND c$<="z") OR c$="-" THEN
+    n$+=c$
+  ELSE
+    IF RIGHT$(n$,1)<>"_" THEN n$+="_"
+  ENDIF
+NEXT
+WHILE RIGHT$(n$,1)="_" : n$=LEFT$(n$,LEN(n$)-1) : ENDWHILE
+IF n$="" THEN n$="Printer"
+=LEFT$(n$,40)
+
+REM --- a printer's settings ------------------------------------------------
+
+DEF PROCoptions_open
+IF sel%=0 THEN ENDPROC
+oprinter$=pname$(sel%)
+SYS "XOS_File",6,path$+"Options"
+PROCrequest("options "+oprinter$,"")
+opening%=TRUE
+PROCnote("Asking CUPS for "+pinfo$(sel%)+"'s settings...")
+ENDPROC
+
+DEF PROCoptions_read
+LOCAL o%,f%,l$,r%,k%,e$,t$
+SYS "XOS_File",17,path$+"Options" TO o%
+IF o%<>1 THEN ENDPROC
+opening%=FALSE : no%=0 : e$=""
+f%=OPENIN(path$+"Options")
+WHILE NOT EOF#f%
+  l$=GET$#f%
+  IF LEFT$(l$,6)="error=" THEN e$=MID$(l$,7)
+  IF LEFT$(l$,7)="option=" AND no%<MAXO% THEN
+    no%+=1 : l$=MID$(l$,8)
+    okey$(no%)=FNfield(l$,1) : olab$(no%)=FNfield(l$,2) : ocur$(no%)=FNfield(l$,3)
+    oold$(no%)=ocur$(no%)
+    onc%(no%)=0
+    REPEAT
+      t$=FNfield(l$,4+onc%(no%)*2)
+      IF t$<>"" AND onc%(no%)<MAXC% THEN onc%(no%)+=1 : oc$(no%,onc%(no%))=t$ : ocl$(no%,onc%(no%))=FNfield(l$,5+(onc%(no%)-1)*2)
+    UNTIL t$="" OR onc%(no%)>=MAXC%
+  ENDIF
+ENDWHILE
+CLOSE#f%
+IF no%=0 THEN
+  IF e$="" THEN e$="CUPS has no settings for it"
+  PROCnote(e$) : ENDPROC
+ENDIF
+FOR r%=1 TO MAXO%
+  IF r%<=no% THEN
+    PROCsettext(owin%,orow%(r%,0),olab$(r%))
+    PROCsettext(owin%,orow%(r%,1),FNchoice(r%,ocur$(r%)))
+    FOR k%=0 TO 2 : PROChide(owin%,orow%(r%,k%),FALSE) : NEXT
+  ELSE
+    FOR k%=0 TO 2 : PROChide(owin%,orow%(r%,k%),TRUE) : NEXT
+  ENDIF
+NEXT
+PROCsettext(owin%,ic%(30),"")
+SYS "Wimp_CloseWindow",,FNblkw(owin%)
+PROCoptions_fit(no%)
+PROCtitle(owin%,"Settings: "+pinfo$(sel%))
+PROCnote("")
+PROCopen(owin%,OW%,OH%)
+ENDPROC
+
+REM the label of option R%'s choice C$
+DEF FNchoice(r%,c$)
+LOCAL j%
+FOR j%=1 TO onc%(r%)
+  IF oc$(r%,j%)=c$ THEN =ocl$(r%,j%)
+NEXT
+=c$
+
+DEF PROCtitle(w%,t$)
+blk%!0=w%
+SYS "Wimp_GetWindowInfo",,blk% OR 1
+$(blk%!76)=LEFT$(t$,39)
+SYS "XWimp_ForceRedraw",w%,&4B534154,3
+ENDPROC
+
+DEF PROCoptions_click(b%,i%)
+LOCAL r%
+FOR r%=1 TO no%
+  IF i%=orow%(r%,2) OR i%=orow%(r%,1) THEN PROCoptions_menu(r%)
+NEXT
+CASE i% OF
+  WHEN ic%(31) : SYS "Wimp_CloseWindow",,FNblkw(owin%)
+  WHEN ic%(32) : PROCoptions_set
+ENDCASE
+ENDPROC
+
+REM a menu of option R%'s choices, beside its field
+DEF PROCoptions_menu(r%)
+LOCAL j%,n%,p%,w%,l$,x%,y%
+menuo%=r% : p%=mtext% : w%=LEN(olab$(r%))
+$menu%=LEFT$(olab$(r%),11)+CHR$0
+menu%?12=7 : menu%?13=2 : menu%?14=7 : menu%?15=0
+menu%!20=44 : menu%!24=0
+FOR j%=1 TO onc%(r%)
+  l$=LEFT$(ocl$(r%,j%),60)
+  IF LEN(l$)>w% THEN w%=LEN(l$)
+  n%=menu%+28+24*(j%-1)
+  n%!0=0 : IF oc$(r%,j%)=ocur$(r%) THEN n%!0=1
+  IF j%=onc%(r%) THEN n%!0=n%!0 OR &80
+  n%!4=-1 : n%!8=&07000121
+  $p%=l$ : p%?LEN(l$)=0
+  n%!12=p% : n%!16=-1 : n%!20=LEN(l$)+1
+  p%+=LEN(l$)+1
+NEXT
+menu%!16=w%*16+32
+blk%!0=owin% : blk%!4=orow%(r%,2)
+SYS "Wimp_GetIconState",,blk%
+blk%!100=owin%
+SYS "Wimp_GetWindowState",,blk%+100
+x%=blk%!104-blk%!120+blk%!16 : y%=blk%!116-blk%!124+blk%!20
+SYS "Wimp_CreateMenu",,menu%,x%,y%
+ENDPROC
+
+DEF PROCmenu_choice(i%)
+IF menuo%=0 OR i%<0 OR i%>=onc%(menuo%) THEN ENDPROC
+ocur$(menuo%)=oc$(menuo%,i%+1)
+PROCsettext(owin%,orow%(menuo%,1),ocl$(menuo%,i%+1))
+ENDPROC
+
+REM (only the settings changed: the others stay as CUPS has them)
+DEF PROCoptions_set
+LOCAL r%,s$
+FOR r%=1 TO no%
+  IF ocur$(r%)<>oold$(r%) THEN s$+=" "+okey$(r%)+"="+ocur$(r%)
+NEXT
+IF s$<>"" THEN PROCrequest("set "+oprinter$+s$,"Saving the settings...")
+SYS "Wimp_CloseWindow",,FNblkw(owin%)
+ENDPROC

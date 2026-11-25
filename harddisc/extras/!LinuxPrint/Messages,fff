@@ -1,0 +1,8 @@
+# Messages file for LinuxPrint
+_TaskName:Linux printing
+_Purpose:Printing on RISC OS on Linux, through Linux's CUPS
+_Author:Andrew Youll, 2026
+_Version:1.00 (25-Nov-26)
+_ConfigText:Linux printing
+_ConfigHelp:Click SELECT to choose the printer RISC OS's Linux printer prints on, to add a printer by its address, to print a test page, or to set up Linux printer in !Printers.
+_ConfigSprite:co_linuxprint

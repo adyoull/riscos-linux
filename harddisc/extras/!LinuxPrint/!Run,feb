@@ -1,0 +1,8 @@
+| LinuxPrint: Configure's plug-in for printing on RISC OS on Linux
+| (rol-print, the Linux side, writes <LinuxPrint$Path>Printers and Log, and
+| reads <LinuxPrint$Path>config and request; LinuxPrint$Path is
+| IXFS:$.riscos.print. if unset)
+Set LinuxPrint$Dir <Obey$Dir>
+IconSprites <LinuxPrint$Dir>.!Sprites
+WimpSlot -min 192k -max 192k
+BASIC -quit <LinuxPrint$Dir>.!RunImage %*0

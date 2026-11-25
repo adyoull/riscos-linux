@@ -1,0 +1,3 @@
+| LinuxPrint: Configure's plug-in for printing on RISC OS on Linux
+If "<LinuxPrint$Dir>" = "" then Set LinuxPrint$Dir <Obey$Dir>
+IconSprites <LinuxPrint$Dir>.!Sprites

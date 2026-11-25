@@ -1393,6 +1393,18 @@ cmd_up (void)
       execl ("/opt/riscos/rol-3d", "rol-3d", (char *) NULL);
       _exit (127);
     }
+  /* rol-print: printing through Linux's CUPS (riscos-print, from
+     riscos-support 1.0.0086-1); it starts dbus, avahi, cupsd and ipp-usb */
+  if (access ("/opt/riscos/rol-print", X_OK) == 0 && fork () == 0)
+    {
+      int null = open ("/dev/null", O_RDWR);
+      dup2 (null, 0);
+      dup2 (null, 1);
+      dup2 (null, 2);
+      setsid ();
+      execl ("/opt/riscos/rol-print", "rol-print", (char *) NULL);
+      _exit (127);
+    }
 }
 
 /* The FAT partition checked, and repaired if it needs it, before anything
