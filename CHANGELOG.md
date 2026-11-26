@@ -8,6 +8,41 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Updates updates itself first; printing kept (26 Nov 2026; riscos-harddisc 1.0.0079-1, riscos-support 1.0.0091-1)
+
+The owner asked for a way to make one update install before the others.
+apt can't order packages within one run, so Updates now does it in two
+runs.
+
+- **Updates 1.04 (!ROLUpdate):**
+  - Install updates first runs (mode 5): `apt list --upgradable | grep -qE
+    '^riscos-(support|harddisc)/' || exit 3; apt-get install
+    --only-upgrade riscos-support riscos-harddisc`.
+  - On exit status 0, PROCagain starts `<ROLUpdate$Dir>.!Run -again
+    CLOSING TOKEN -openat X Y` with Wimp_StartTask, then quits.
+  - The new copy (PROCargs) skips the one-Updates check. It waits on null
+    polls until FNcount (Updates tasks) is below 2, shows rol-info, then
+    runs the full-upgrade (PROCrunfull, mode 2), with rol-cmd's token, so
+    no password.
+  - On exit status 3, it runs the full-upgrade at once.
+  - FNbusy covers mode 5 and the wait, so a close or shutdown waits for
+    both passes.
+  - Updates 1.03 and older still do one pass. The two passes start with
+    the update after 1.04 is installed.
+- **riscos-support 1.0.0091-1 (rol-info):** the QEMU test found that the
+  second pass's `autoremove --purge` removed riscos-print. It was
+  Auto-Installed (1.0.0088-1's Recommends; nothing recommends it since
+  1.0.0089-1). The new Updates' rol-info, before the full-upgrade, had
+  already touched print-offered, so printing wasn't put back afterwards.
+  - **Fix:** rol-info (as root) runs `apt-mark manual riscos-print` when it
+    is marked automatic.
+- **Tested** under QEMU from an image with support 1.0.0087-1, harddisc
+  1.0.0074-1 and print 1.0.0086-1 (auto), against a local copy of the
+  repository:
+  - the first pass, the restart in place with no password, and the second pass;
+  - a close during the first pass: it closed after the second;
+  - Install with nothing to update first: one pass.
+
 ### Updates' memory (26 Nov 2026; riscos-harddisc 1.0.0078-1)
 
 David Pitt started a Raspberry Pi 5 from the 0057 image. Its first update

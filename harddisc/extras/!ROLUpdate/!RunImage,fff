@@ -13,6 +13,11 @@ REM and available) needs no password. Changes shows, for each RISC OS on
 REM Linux package, what the versions newer than the one installed change
 REM (and what that one changed): rol-info's "@changes", from the list
 REM Check for updates fetches.
+REM Install updates goes in two passes: when riscos-support (the Linux
+REM side: rol-cmd, the init guard) or riscos-harddisc (this plug-in) has
+REM a new version, those are installed first, and Updates starts itself
+REM again ("-again"), so that the new Updates, and the new Linux side,
+REM install the rest.
 REM Copyright (c) 2026 Andrew Youll. MIT licence.
 ON ERROR ERROR EXT 0,REPORT$+" (line "+STR$ERL+")"
 DIM blk% 4096, ind% 8192, buf% 4100
@@ -32,26 +37,36 @@ nl%=0 : cur$="" : indp%=0 : task%=0 : quit%=FALSE
 job$="" : pos%=0 : mode%=0 : sect$="" : ndeb%=0 : neterr%=FALSE
 busy$="" : crpend%=FALSE : rollback$="" : checked%=0 : ckn%=0 : nowt%=0 : known%=FALSE : debknown%=FALSE
 tok$="" : pendcmd$="" : pendm%=0 : sentpw%=FALSE : pwmode%=0 : pwshow%=FALSE : pwcaps%=-1 : chain%=0
-closing%=FALSE
+closing%=FALSE : again%=FALSE : waitold%=FALSE
 dir$="IXFS:$.riscos.cmd."
 LH%=40 : LW%=1600 : BL%=10
 REM one Updates at a time: if one is already running (it may be finishing
 REM an install after Configure was closed), leave it to show itself
-IF FNalready THEN END
+REM (except the new Updates the old one started: "-again CLOSING TOKEN",
+REM which waits for the old one to go)
+PROCargs
+IF NOT again% THEN IF FNcount>0 THEN END
 SYS "Wimp_Initialise",380,&4B534154,"Updates",0 TO ,task%
 PROClineheight
 PROCwindows
 PROCopen_main
-PROCset(ic%(1),"Reading what's installed...")
+IF again% THEN
+  waitold%=TRUE
+  PROCset(ic%(1),"Updates is up to date: installing the rest...")
+  IF closing% THEN PROCset(ic%(2),"Still installing: Updates will close when the install is done")
+ELSE
+  PROCset(ic%(1),"Reading what's installed...")
+ENDIF
 PROCbuttons
 ON ERROR PROCerror
-PROCinfo
+IF NOT again% THEN PROCinfo
 REPEAT
-  IF job$<>"" OR pwmode%<>0 THEN mask%=&3830 ELSE mask%=&3831
+  IF job$<>"" OR pwmode%<>0 OR waitold% THEN mask%=&3830 ELSE mask%=&3831
   SYS "OS_ReadMonotonicTime" TO t%
   SYS "Wimp_PollIdle",mask%,blk%,t%+25 TO reason%
   CASE reason% OF
     WHEN 0 : IF pwmode%<>0 THEN PROCpwcaps
+      IF waitold% THEN IF FNcount<2 THEN waitold%=FALSE : PROCaddtext("(Updates and the Linux side were updated first: the rest now)"+CHR$10) : PROCinfo
       PROCpoll_job
     WHEN 1 : PROCredraw(blk%!0)
     WHEN 2 : SYS "Wimp_OpenWindow",,blk%
@@ -71,7 +86,7 @@ REM find dpkg locked. So closing the window, Configure closing, or a quit
 REM while installing leaves it open, saying it will close when the install
 REM is done (PROCfinish then quits); the desktop shutting down is refused
 REM (Message_PreQuit acknowledged) until then.
-DEF FNbusy=job$<>"" AND (mode%=2 OR mode%=3)
+DEF FNbusy=(job$<>"" AND (mode%=2 OR mode%=3 OR mode%=5)) OR waitold% OR again%
 
 DEF PROCwantquit
 IF NOT FNbusy THEN quit%=TRUE : ENDPROC
@@ -92,19 +107,35 @@ CASE blk%!16 OF
 ENDCASE
 ENDPROC
 
-REM Is another Updates running? (TaskManager_EnumerateTasks)
-DEF FNalready
-LOCAL b%,n%,e%,i%,f%
+REM How many Updates are running? (TaskManager_EnumerateTasks)
+DEF FNcount
+LOCAL b%,n%,e%,i%,f%,c%
 DIM b% LOCAL 256
-n%=0
+n%=0 : c%=0
 REPEAT
   SYS "XTaskManager_EnumerateTasks",n%,b%,256 TO n%,e%;f%
-  IF f% AND 1 THEN =FALSE
+  IF f% AND 1 THEN =c%
   FOR i%=b% TO e%-16 STEP 16
-    IF FNstr0(i%!4)="Updates" THEN =TRUE
+    IF FNstr0(i%!4)="Updates" THEN c%+=1
   NEXT
 UNTIL n%<0
-=FALSE
+=c%
+
+REM "-again CLOSING TOKEN": started by the Updates that installed the new
+REM Updates (PROCagain); CLOSING 1 when it was to close when done, TOKEN
+REM rol-cmd's token, so the password isn't asked for again
+DEF PROCargs
+LOCAL a$,i%
+SYS "OS_GetEnv" TO a$
+i%=INSTR(a$," -again ")
+IF i%=0 THEN ENDPROC
+again%=TRUE
+a$=MID$(a$,i%+8)
+closing%=(VAL(a$)=1)
+a$=MID$(a$,INSTR(a$+" "," ")+1)
+a$=LEFT$(a$,INSTR(a$+" "," ")-1)
+IF LEN(a$)=32 THEN tok$=a$
+ENDPROC
 
 DEF FNstr0(a%)
 LOCAL s$
@@ -294,7 +325,7 @@ ENDPROC
 
 DEF PROCbuttons
 LOCAL busy%,new%,i%
-busy%=(job$<>"" OR pwmode%<>0)
+busy%=(job$<>"" OR pwmode%<>0 OR waitold% OR again%)
 new%=(ndeb%>0)
 FOR i%=1 TO NP% : IF avail$(i%)<>"" THEN new%=TRUE
 NEXT
@@ -414,7 +445,17 @@ DEF PROCcheck
 PROCrun(FNapt+"update --error-on=any || { ! apt-cache stats >/dev/null && find /var/lib/apt/lists -type f -delete && apt-get update --error-on=any; } && /usr/lib/riscos/rol-info --fetch",1)
 ENDPROC
 
+REM First pass (mode 5): the Linux side and Updates, when either has a new
+REM version (exit status 3 when neither has: then the second pass at
+REM once); Updates then starts itself again (PROCagain) and the new one
+REM runs the second (PROCrunfull, mode 2): everything else
 DEF PROCinstall
+PROCrun("apt list --upgradable 2>/dev/null|grep -qE '^riscos-(support|harddisc)/'||exit 3;"+FNapt+"-y "+FNconf+"install --only-upgrade riscos-support riscos-harddisc",5)
+ENDPROC
+
+DEF FNconf="-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "
+
+DEF PROCrunfull
 PROCrun(FNapt+"-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade && "+FNapt+"-y autoremove --purge && apt-get clean && /usr/lib/riscos/rol-info",2)
 ENDPROC
 
@@ -461,12 +502,13 @@ CLOSE#f%
 h$=STRING$(LEN(h$)," ")
 OSCLI "Rename "+dir$+job$+"/new "+dir$+job$+"/req"
 pos%=0 : mode%=m% : started%=t% : heard%=FALSE : neterr%=FALSE
-IF m%=1 OR m%=2 OR m%=3 OR m%=4 THEN sect$="" : sawinfo%=FALSE
+IF m%>=1 AND m%<=5 THEN sect$="" : sawinfo%=FALSE
 IF m%<>4 THEN PROCaddtext("> "+cmd$+CHR$10)
 CASE m% OF
   WHEN 1 : busy$="Checking for updates"
   WHEN 2 : busy$="Installing updates"
   WHEN 3 : busy$="Putting the earlier RISC OS back"
+  WHEN 5 : busy$="Updating Updates first"
   OTHERWISE : busy$=""
 ENDCASE
 IF busy$<>"" THEN PROCset(ic%(1),busy$+"...")
@@ -546,6 +588,10 @@ IF rc%=79 THEN
   PROCbuttons
   ENDPROC
 ENDIF
+REM the first pass done: the new Updates does the rest; nothing for it to
+REM update first: the second pass now
+IF m%=5 AND rc%=0 THEN PROCaddtext(CHR$10) : PROCagain : ENDPROC
+IF m%=5 AND rc%=3 THEN PROCrunfull : ENDPROC
 IF sawinfo% THEN PROCshow
 CASE TRUE OF
   WHEN rc%=-1 : PROCset(ic%(1),"Linux didn't take the command (is rol-cmd running?)")
@@ -569,7 +615,25 @@ CASE TRUE OF
 ENDCASE
 IF m%<>4 THEN PROCaddtext(CHR$10)
 PROCbuttons
-IF closing% AND (m%=2 OR m%=3) THEN quit%=TRUE
+IF closing% AND (m%=2 OR m%=3 OR m%=5) THEN quit%=TRUE
+REM the new Updates: what's installed shown, then the second pass
+IF m%=4 AND again% THEN
+  again%=FALSE : PROCrunfull
+  IF closing% THEN PROCset(ic%(2),"Still installing: Updates will close when the install is done")
+ENDIF
+ENDPROC
+
+REM Starts the new Updates (it waits for this one to go, then installs
+REM the rest), where this one's window is, and goes
+DEF PROCagain
+LOCAL b%,c$,f%
+b%=blk%+2048 : b%!0=win%
+SYS "Wimp_GetWindowState",,b%
+c$="Run <ROLUpdate$Dir>.!Run -again "+STR$(-closing%)+" "+tok$+" -openat "+STR$(b%!4)+" "+STR$(b%!16)
+PROCset(ic%(1),"Updates is updated: starting it again...")
+SYS "XWimp_StartTask",c$ TO ;f%
+IF f% AND 1 THEN PROCrunfull : ENDPROC
+quit%=TRUE
 ENDPROC
 
 DEF FNago(s%)
