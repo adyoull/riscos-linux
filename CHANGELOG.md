@@ -8,6 +8,19 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Updates' memory (26 Nov 2026; riscos-harddisc 1.0.0078-1)
+
+David Pitt started a Raspberry Pi 5 from the 0057 image. Its first update
+stopped with "No room for function/procedure call (line 266/661)" and "Too
+many nested structures (line 590)", and raising the WimpSlot let it finish.
+
+- **Cause:** !ROLUpdate's BASIC keeps up to 800 detail lines (line$), 600
+  changelog lines (cl$) and 300 change lines (chl$). The detail lines
+  are shifted up as more arrive, which fragments BASIC's string heap.
+  With a long first update (171+ packages with printing), all that
+  outgrew 192K.
+- **Fix:** WimpSlot 1024K; Updates 1.03.
+
 ### Ink and toner levels; the chosen printer kept in CUPS (25 Nov 2026; riscos-support 1.0.0090-1, riscos-print 1.0.0090-1, riscos-harddisc 1.0.0077-1)
 
 A user found that Linux printing picked up an Epson WF-7520, and asked for

@@ -4,5 +4,8 @@
 | Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
 Set ROLUpdate$Dir <Obey$Dir>
 IconSprites <ROLUpdate$Dir>.!Sprites
-WimpSlot -min 192k -max 192k
+| (1 MB: the details keep up to 800 lines, the changes 900 more, and a
+| first update from an old image, with printing, fills them; 192k ran out
+| with "No room for function/procedure call")
+WimpSlot -min 1024k -max 1024k
 BASIC -quit <ROLUpdate$Dir>.!RunImage %*0
