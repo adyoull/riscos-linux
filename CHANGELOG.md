@@ -6,6 +6,17 @@ What each RISC OS on Linux ROM build changed. The ROM reports itself as
 one is and what to watch when maintaining it. ROL installs the ROM as the
 `riscos-rom` package.
 
+## 5.31-33 (built 27 Nov 2026; released as riscos-rom 5.31-33)
+
+- **IXFS: a file whose RISC OS type can't be read** (`mixed/Linux/IXSupport`,
+  `c/fs`; David Sharp). Any error from getxattr of user.RISC_OS.LoadExec
+  now means "no RISC OS type" (the file is typed from its name). Before,
+  only EACCES, ENOENT, ENODATA and EOPNOTSUPP did; anything else (ERANGE
+  for a value of the wrong size; EPERM from macOS for protected items, or
+  from FUSE file systems) failed the read: *FileInfo gave "ERANGE", and a
+  directory listing showed junk for the file (load &0000000D, 4 Gbytes).
+- Built with the DDE 32d in the QEMU build machine.
+
 ## 5.31-32 (built 25 Nov 2026; released as riscos-rom 5.31-32)
 
 - **Ping: raw ICMP sockets** (`mixed/Linux/Internet`, `c/main`; David

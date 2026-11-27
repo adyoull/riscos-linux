@@ -676,9 +676,11 @@ static _kernel_oserror *read_meta(struct ro_dirent *out, int dir_fd, const char 
   attr.attributes = 3;
   if (suffix < 4) {
     r = ix_getxattr(name, "user.RISC_OS.LoadExec", &attr, sizeof(attr));
-    if (r < 0 && r != -ix_EACCES && r != -ix_ENOENT && r != -ix_ENODATA && r != -ix_EOPNOTSUPP) {
-      return fs_error(r);
-    }
+    // Any error reading it: no RISC OS type (the file is there: stat
+    // found it). Not only ENODATA: a file system can refuse xattrs with
+    // EPERM (macOS's protected items, FUSE file systems), and an error
+    // here would fail the whole directory for the Filer.
+    if (r < 0) r = -ix_ENODATA;
   }
   // No RISC OS type: the extension's, if MimeMap knows it
   if (r < 8 && filetype == -1 && mime && name1) {
