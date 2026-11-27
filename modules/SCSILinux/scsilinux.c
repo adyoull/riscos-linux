@@ -22,8 +22,8 @@
    (0.03) Dismount gives the disc back: FileCore's Service_DiscDismounted
    ("SCSI::name", or "SCSI::drive" for a disc with no name) for one of
    rol-usbd's discs (a stick or card) closes it, and asks rol-usbd to
-   release it (/riscos/mediactl/eject-DEV): it is then safe to pull out,
-   and a RISC OS Pi card's Loader is Linux's again. It stays away from
+   release it (/riscos/mediactl/eject-DEV): it is then safe to pull out
+   (rol-usbd leaves it alone, mounting nothing on it). It stays away from
    RISC OS until it is put in again. Not at shutdown (FileCore dismounts
    every disc then too): Service_ShutDown, which comes after those,
    cancels them.

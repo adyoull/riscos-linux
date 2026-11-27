@@ -8,6 +8,27 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### The Loader stays part of the RISC OS disc after Dismount (27 Nov 2026; riscos-support 1.0.0093-1)
+
+The owner: "loader shouldnt appear as a disc of its own"; "its only the
+FAT boot partition that shouldnt be a partition of its own and just live
+inside !Boot.Loader".
+
+- **rol-usbd:** a released whole disc (`is_released`) is never given or
+  mounted whole, and its partitions are mounted only from the FileCore
+  disc's end on (`inside` = the boot block's disc size, via
+  `last_fc_bytes`, set by filecore_disc; /sys/block/DISC/PART/start × 512).
+  A released partition isn't tried as a mount.
+- **SCSILinux's** source comment is changed to match; the module is byte
+  for byte 0.03.
+- **Tested (QEMU, the 1.0.0092 generic image with this rol-usbd):** a
+  256 MB card with a 64 MB FileCore disc, a FAT "LOADER" inside it at 8 MB,
+  &AD to 64 MB and a FAT "DATA" at 128 MB: given whole as `:0`; after
+  Dismount only DATA was mounted; unplugged and plugged in again: `:0`.
+- **Images 1.0.0093** in place of 1.0.0092 (whose GitHub release the
+  owner deleted): `mkroot93.sh`, `mkextras93.sh`, `mkgen93.sh`,
+  `mkwdk93.sh` (renamed), with riscos-support 1.0.0093-1.
+
 ### Images 1.0.0092 with RISC3D 0.25 and printing (27 Nov 2026; riscos-harddisc 1.0.0081-1, riscos-risc3d 0.23-1)
 
 The owner: "Build new images including latest RISC3D that we've pushed on
