@@ -151,6 +151,7 @@ static struct
   struct ksigaction old_ill, old_segv, old_bus;
   unsigned midr;
   unsigned last_dfar, last_dfsr;
+  unsigned last_ifar, last_ifsr;	/* (0.50) only what was written to them */
   unsigned sctlr;
   /* code ranges in the ROM emulated as disc code is (the sound modules) */
   unsigned emul_lo[8], emul_hi[8];

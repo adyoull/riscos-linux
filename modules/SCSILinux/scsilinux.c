@@ -19,6 +19,15 @@
    Commands are done at once (foreground), with scatter lists. Writes reach
    the disc before the command ends (rol-usbd opens it O_DSYNC).
 
+   (0.03) Dismount gives the disc back: FileCore's Service_DiscDismounted
+   ("SCSI::name", or "SCSI::drive" for a disc with no name) for one of
+   rol-usbd's discs (a stick or card) closes it, and asks rol-usbd to
+   release it (/riscos/mediactl/eject-DEV): it is then safe to pull out,
+   and a RISC OS Pi card's Loader is Linux's again. It stays away from
+   RISC OS until it is put in again. Not at shutdown (FileCore dismounts
+   every disc then too): Service_ShutDown, which comes after those,
+   cancels them.
+
    Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE). */
 
 #include "cmodule.h"
@@ -46,6 +55,9 @@
 #define O_RDWR		2
 #define O_CLOEXEC	02000000
 #define O_DSYNC		010000
+#define O_WRONLY	1
+#define O_CREAT		0100
+#define O_TRUNC		01000
 #define MSG_CMSG_CLOEXEC 0x40000000
 #define BLKSSZGET	0x1268
 
@@ -61,6 +73,15 @@ streq (const char *a, const char *b)
   while (*a && *a == *b)
     a++, b++;
   return *a == *b;
+}
+
+static int
+prefix (const char *s, const char *p, size_t n)
+{
+  for (size_t i = 0; i < n; i++)
+    if (s[i] != p[i])
+      return 1;
+  return 0;
 }
 
 static int
@@ -88,7 +109,13 @@ struct dev
   int seen;			/* still listed (this poll) */
   unsigned char sense[18];	/* for REQUEST SENSE */
   unsigned reads, writes, errors;
+  int release;			/* (0.03) dismounted: to give back */
+  int internal, test;		/* rol-discd's, or SCSILinux$Test */
 };
+
+/* rol-usbd's discs given back (0.03): not taken again while still listed
+   (rol-usbd takes them off its list, but may not have yet) */
+static char released[MAXDEV][64];
 
 static struct dev devs[MAXDEV];
 static unsigned state[2];	/* the ticker's: [0] callback pending */
@@ -196,6 +223,10 @@ dev_seen (const char *src, const char *name, int test, int removable, int intern
 	dev_register (&devs[i]);	/* (SCSISwitch may have come since) */
 	return;
       }
+  if (!test && !internal)
+    for (int i = 0; i < MAXDEV; i++)
+      if (released[i][0] && streq (released[i], src))
+	return;
   struct dev *d = 0;
   for (int i = 0; i < MAXDEV && !d; i++)
     if (!devs[i].used)
@@ -221,6 +252,8 @@ dev_seen (const char *src, const char *name, int test, int removable, int intern
   d->fd = fd;
   d->ro = ro;
   d->removable = removable;
+  d->internal = internal;
+  d->test = test;
   size_t l = strlen (src);
   if (l >= sizeof d->src)
     l = sizeof d->src - 1;
@@ -287,6 +320,53 @@ list_poll (const char *list, int internal)
     }
 }
 
+/* (0.03) is DEV on that list? (the first field of a line) */
+static int
+listed (const char *list, const char *dev)
+{
+  static char buf[1024];
+  int fd = lsys (NR_open, (unsigned) list, O_CLOEXEC, 0, 0, 0, 0);
+  if (fd < 0)
+    return 0;
+  int n = lsys (NR_read, (unsigned) fd, (unsigned) buf, sizeof buf - 1, 0, 0, 0);
+  lsys (NR_close, (unsigned) fd, 0, 0, 0, 0, 0);
+  buf[n > 0 ? n : 0] = 0;
+  size_t l = strlen (dev);
+  for (char *p = buf; *p; )
+    {
+      if (!prefix (p, dev, l) && p[l] == '\t')
+	return 1;
+      while (*p && *p != '\n')
+	p++;
+      if (*p)
+	p++;
+    }
+  return 0;
+}
+
+/* (0.03) give a dismounted disc back to rol-usbd */
+static void
+dev_release (struct dev *d)
+{
+  char path[96] = "/riscos/mediactl/eject-";
+  size_t l = strlen (path), k = strlen (d->src);
+  if (k > sizeof path - l - 1)
+    k = sizeof path - l - 1;
+  memcpy (path + l, d->src, k);
+  path[l + k] = 0;
+  for (int i = 0; i < MAXDEV; i++)
+    if (!released[i][0])
+      {
+	memcpy (released[i], d->src, sizeof d->src < sizeof released[i] ? sizeof d->src : sizeof released[i]);
+	released[i][sizeof released[i] - 1] = 0;
+	break;
+      }
+  dev_remove (d);			/* (closes it: rol-usbd can have it) */
+  int f = lsys (NR_open, (unsigned) path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644, 0, 0, 0);
+  if (f >= 0)
+    lsys (NR_close, (unsigned) f, 0, 0, 0, 0, 0);
+}
+
 /* every second (a callback): the discs listed, and the test file */
 void
 c_poll (void)
@@ -294,7 +374,13 @@ c_poll (void)
   if (!started)
     return;
   for (int i = 0; i < MAXDEV; i++)
+    if (devs[i].used && devs[i].release)
+      dev_release (&devs[i]);
+  for (int i = 0; i < MAXDEV; i++)
     devs[i].seen = 0;
+  for (int i = 0; i < MAXDEV; i++)
+    if (released[i][0] && !listed ("/riscos/mediactl/filecore", released[i]))
+      released[i][0] = 0;
   list_poll ("/riscos/mediactl/filecore", 0);
   list_poll ("/riscos/mediactl/filecore-internal", 1);
   /* the test file */
@@ -672,7 +758,51 @@ mod_final (int fatal)
 void
 mod_service (regs *r)
 {
-  if (r->r[1] == 0x20100)
+  if (r->r[1] == 0x7D)			/* Service_DiscDismounted */
+    {
+      const char *n = (const char *) r->r[2];
+      if (started != 1 || !n || (n[0] != 'S' && n[0] != 's')
+	  || (prefix (n + 1, "CSI::", 5) && prefix (n + 1, "csi::", 5)))
+	return;
+      n += 6;
+      /* by name (FileCore's: up to 10 characters, case not significant),
+	 or, for a disc with no name, the only unnamed one of ours */
+      int unnamed = n[0] >= '0' && n[0] <= '9' && !n[1], hit = -1, count = 0;
+      int only = -1, eligible = 0;
+      for (int i = 0; i < MAXDEV; i++)
+	{
+	  struct dev *d = &devs[i];
+	  if (!d->used || !d->registered || !d->removable || d->internal || d->test)
+	    continue;
+	  only = i, eligible++;
+	  int m;
+	  if (unnamed)
+	    m = !d->name[0];
+	  else
+	    {
+	      const char *a = d->name, *b = n;
+	      while (*a && *b && (*a | 0x20) == (*b | 0x20))
+		a++, b++;
+	      m = !*a && !*b;
+	    }
+	  if (m)
+	    hit = i, count++;
+	}
+      /* (the name rol-usbd read is the boot block's, which *NameDisc may
+	 not have changed: with no match, the only stick or card there is,
+	 as every SCSIFS disc on RISC OS on Linux is one of ours) */
+      if (count == 0 && eligible == 1)
+	hit = only, count = 1;
+      if (count == 1)
+	devs[hit].release = 1;		/* (the next poll: not in a service call) */
+    }
+  else if (r->r[1] == 0x7E)		/* Service_ShutDown: not those */
+    {
+      for (int i = 0; i < MAXDEV; i++)
+	devs[i].release = 0;
+      started = 2;			/* (c_poll still runs: only 0 stops it) */
+    }
+  else if (r->r[1] == 0x20100)
     {
       for (int i = 0; i < MAXDEV; i++)
 	devs[i].registered = 0;

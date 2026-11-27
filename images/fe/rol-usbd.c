@@ -19,6 +19,13 @@
  * line, in /riscos/mediactl/discs. A disc pulled out without being
  * ejected is unmounted at once (lazily).
  *
+ * A disc in RISC OS's own FileCore format is given to RISC OS whole
+ * (SCSILinux, for SCSIFS), not mounted. When RISC OS dismounts it,
+ * SCSILinux asks for it back (eject-DEV, with the device's name): it is
+ * then taken off the list, and a RISC OS Pi card's partitions (its FAT
+ * Loader) are mounted. It isn't given to RISC OS again until it has been
+ * taken out and put back.
+ *
  * It looks every second (there's no udev on these images).
  *
  * Copyright (c) 2026 Andrew Youll. MIT licence (see LICENSE).
@@ -271,6 +278,18 @@ struct disc
   int removable;		/* Linux's removable flag (of the whole disc) */
 };
 static struct disc discs[MAXD];
+/* FileCore discs RISC OS has given back (dismounted): not given again
+   until taken out (the whole disc gone, or its reader empty) */
+static char released[MAXD][32];
+
+static int
+is_released (const char *dev)
+{
+  for (int i = 0; i < MAXD; i++)
+    if (released[i][0] && !strcmp (released[i], dev))
+      return 1;
+  return 0;
+}
 static dev_t root_disk;		/* the whole disc Linux runs from */
 
 static int
@@ -441,6 +460,33 @@ write_list (void)
    for one on the abstract socket "rol-usbd-discs" ("OPEN sdb") and gets an
    open file for it (read-write, or read-only if write-protected) - RISC OS
    can't open Linux's /dev itself. */
+/* does NODE's MBR have a RISC OS (&AD) partition ending at byte END
+   (within 1 MB: the image's FileCore disc may stop a little short)? */
+static int
+ad_reaches (const char *node, unsigned long long end)
+{
+  unsigned char m[512];
+  int f = open (node, O_RDONLY | O_CLOEXEC);
+  if (f < 0)
+    return 0;
+  ssize_t r = pread (f, m, sizeof m, 0);
+  close (f);
+  if (r != (ssize_t) sizeof m || m[510] != 0x55 || m[511] != 0xAA)
+    return 0;
+  for (int i = 0; i < 4; i++)
+    {
+      const unsigned char *e = m + 0x1BE + i * 16;
+      if (e[4] != 0xAD)
+	continue;
+      unsigned long long lba = e[8] | e[9] << 8 | e[10] << 16 | (unsigned long long) e[11] << 24;
+      unsigned long long n = e[12] | e[13] << 8 | e[14] << 16 | (unsigned long long) e[15] << 24;
+      unsigned long long pend = (lba + n) * 512;
+      if (n && pend <= end + (1u << 20) && pend + (1u << 20) >= end)
+	return 1;
+    }
+  return 0;
+}
+
 static int
 filecore_disc (const char *node, char *name, size_t nsz, int *sector)
 {
@@ -475,7 +521,13 @@ filecore_disc (const char *node, char *name, size_t nsz, int *sector)
     return 0;
   unsigned long long dsize = (unsigned long long) (dr[16] | dr[17] << 8 | dr[18] << 16 | (unsigned) dr[19] << 24)
     | (unsigned long long) (dr[36] | dr[37] << 8 | dr[38] << 16 | (unsigned) dr[39] << 24) << 32;
-  if (dsize == 0 || devsize <= 0 || dsize > (unsigned long long) devsize || dsize < (unsigned long long) devsize / 2)
+  if (dsize == 0 || devsize <= 0 || dsize > (unsigned long long) devsize)
+    return 0;
+  /* Less than half the device: a RISC OS Pi image written to a bigger
+     card and never grown (a 2 GB FileCore disc on a 32 GB card), as
+     native RISC OS uses it, if its partition table says so: a RISC OS
+     (&AD) partition that ends where the FileCore disc does */
+  if (dsize < (unsigned long long) devsize / 2 && !ad_reaches (node, dsize))
     return 0;
   size_t k = 0;
   for (int i = 0; i < 10 && k + 1 < nsz; i++)
@@ -780,12 +832,14 @@ discs_look (void)
 	 partition for the Pi's firmware sits inside it). Then it's given
 	 whole, and none of its partitions is mounted. */
       int whole_fc = 0;
-      for (int k = 0; k < MAXD; k++)
+      int rel = is_released (e->d_name);
+      for (int k = 0; k < MAXD && !rel; k++)
 	if (discs[k].dev[0] && (discs[k].given || discs[k].refused) && !strcmp (discs[k].dev, e->d_name))
 	  whole_fc = 1;
       if (!whole_fc)
 	{
 	  int busy = 0;			/* a partition of it mounted already */
+	  (void) rel;
 	  size_t el = strlen (e->d_name);
 	  for (int k = 0; k < MAXD; k++)
 	    if (discs[k].dev[0] && discs[k].mounted && !strncmp (discs[k].dev, e->d_name, el))
@@ -793,7 +847,7 @@ discs_look (void)
 	  char wn[64], fn[12];
 	  int ss;
 	  snprintf (wn, sizeof wn, "/dev/%s", e->d_name);
-	  if (!busy && filecore_disc (wn, fn, sizeof fn, &ss))
+	  if (!busy && !rel && filecore_disc (wn, fn, sizeof fn, &ss))
 	    whole_fc = 1;
 	}
       for (int pass = whole_fc ? 1 : 0; pass < 2; pass++)
@@ -838,7 +892,7 @@ discs_look (void)
 	      if (!discs[i].mounted && !discs[i].ejected && !discs[i].given && !discs[i].refused && discs[i].tries < 3)
 		{
 		  discs[i].tries++;
-		  if (!give_if_filecore (&discs[i]))
+		  if (is_released (dv) || !give_if_filecore (&discs[i]))
 		    try_mount (&discs[i]);
 		}
 	    }
@@ -848,6 +902,29 @@ discs_look (void)
     }
   if (b)
     closedir (b);
+  /* given back, and since taken out (or its reader is empty): RISC OS
+     can have it again when it's put back */
+  for (int i = 0; i < MAXD; i++)
+    if (released[i][0])
+      {
+	char p[300], t[64];
+	char w[32];
+	snprintf (w, sizeof w, "%s", released[i]);
+	/* (the whole disc: sdb2 -> sdb, mmcblk1p1 -> mmcblk1) */
+	size_t l = strlen (w);
+	if (!strncmp (w, "mmcblk", 6))
+	  {
+	    char *q = strchr (w + 6, 'p');
+	    if (q)
+	      *q = 0;
+	  }
+	else
+	  while (l > 0 && w[l - 1] >= '0' && w[l - 1] <= '9')
+	    w[--l] = 0;
+	snprintf (p, sizeof p, "/sys/block/%s/size", w);
+	if (read_file (p, t, sizeof t) <= 0 || atoll (t) == 0)
+	  released[i][0] = 0;
+      }
   /* gone: pulled out, or the card taken out of its reader */
   for (int i = 0; i < MAXD; i++)
     if (discs[i].dev[0] && !present[i])
@@ -866,6 +943,26 @@ discs_look (void)
     if (!strncmp (e->d_name, "eject-", 6))
       {
 	char p[300];
+	/* a FileCore disc RISC OS has dismounted (SCSILinux, which has
+	   closed it): Linux's again */
+	for (int i = 0; i < MAXD; i++)
+	  if (discs[i].dev[0] && discs[i].given && !strcmp (discs[i].dev, e->d_name + 6))
+	    {
+	      discs[i].given = 0;
+	      for (int k = 0; k < MAXD; k++)
+		if (!released[k][0])
+		  {
+		    snprintf (released[k], sizeof released[k], "%s", discs[i].dev);
+		    break;
+		  }
+	      write_filecore_list ();
+	      char msg[200];
+	      snprintf (msg, sizeof msg, "rol-usbd: %s: FileCore disc \"%s\" dismounted by RISC OS: given back (safe to take out)\n",
+			discs[i].dev, discs[i].fcname);
+	      kmsg (msg);
+	      /* (its partitions, a Pi card's Loader, mounted at the next look) */
+	      discs[i].dev[0] = 0;
+	    }
 	for (int i = 0; i < MAXD; i++)
 	  if (discs[i].dev[0] && discs[i].mounted && !strcasecmp (discs[i].name, e->d_name + 6))
 	    {

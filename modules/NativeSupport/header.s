@@ -24,7 +24,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"NativeSupport"
-help:	.asciz	"NativeSupport\t0.49 (16 Nov 2026) RISC OS for Linux, native"
+help:	.asciz	"NativeSupport\t0.50 (27 Nov 2026) RISC OS for Linux, native"
 	.align	2
 commands:
 	.asciz	"NativeSupport"

@@ -26,7 +26,7 @@ module_start:
 	.word	flags - module_start
 
 title:	.asciz	"SCSILinux"
-help:	.asciz	"SCSILinux\t0.02 (12 Nov 2026) FileCore discs through Linux, for SCSIFS"
+help:	.asciz	"SCSILinux\t0.03 (27 Nov 2026) FileCore discs through Linux, for SCSIFS"
 	.align	2
 commands:
 	.asciz	"SCSILinux"
@@ -37,13 +37,17 @@ commands:
 	.word	cmd_help - module_start
 	.word	0
 cmd_help:
-	.asciz	"*SCSILinux lists the FileCore discs SCSILinux is giving SCSIFS (from Linux: USB sticks and SD cards in RISC OS's own format).\rSyntax: *SCSILinux"
+	.asciz	"*SCSILinux lists the FileCore discs SCSILinux is giving SCSIFS (from Linux: USB sticks and SD cards in RISC OS's own format). Dismount gives a stick or card back to Linux, and then it is safe to pull out.\rSyntax: *SCSILinux"
 	.align	2
 flags:	.word	1				@ 32-bit compatible
 
 	.word	0				@ (no fast table)
-@ Service_SCSIStarting (&20100), Service_SCSIDying (&20101)
+@ Service_SCSIStarting (&20100), Service_SCSIDying (&20101),
+@ Service_DiscDismounted (&7D), Service_ShutDown (&7E)
 service:
+	teq	r1, #0x7D
+	teqne	r1, #0x7E
+	beq	cm_service
 	stmfd	sp!, {r0}
 	ldr	r0, =0x20100
 	teq	r1, r0

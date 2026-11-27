@@ -178,8 +178,23 @@ emulate_priv (unsigned *R, unsigned insn)
 	    v = ns.last_dfar;				/* DFAR */
 	  else if (crn == 5 && crm == 0 && op1 == 0 && op2 == 0)
 	    v = ns.last_dfsr;				/* DFSR */
+	  else if (crn == 6 && crm == 0 && op1 == 0 && op2 == 2)
+	    v = ns.last_ifar;				/* IFAR */
+	  else if (crn == 5 && crm == 0 && op1 == 0 && op2 == 1)
+	    v = ns.last_ifsr;				/* IFSR */
 	  R[rt] = v;
 	}
+      /* (0.50) DFAR, DFSR, IFAR and IFSR are read/write on ARMv7, and an
+	 abort handler that passes a fault on puts them back after a fault
+	 of its own (Rorth's, in front of ARMEABISupport's stack growth) */
+      else if (crn == 6 && crm == 0 && op1 == 0 && op2 == 0)
+	ns.last_dfar = R[rt];
+      else if (crn == 5 && crm == 0 && op1 == 0 && op2 == 0)
+	ns.last_dfsr = R[rt];
+      else if (crn == 6 && crm == 0 && op1 == 0 && op2 == 2)
+	ns.last_ifar = R[rt];
+      else if (crn == 5 && crm == 0 && op1 == 0 && op2 == 1)
+	ns.last_ifsr = R[rt];
       else if (crn == 1 && crm == 0 && op1 == 0 && op2 == 0)
 	ns.sctlr = R[rt];
       else if (crn == 7 && op1 == 0 && crm == 10 && op2 == 5)

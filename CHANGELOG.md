@@ -8,6 +8,50 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### David Sharp's notes: abort registers, big Pi cards, Dismount, IXFS (27 Nov 2026; riscos-support 1.0.0092-1, riscos-harddisc 1.0.0080-1, riscos-rom 5.31-33)
+
+From David Sharp's notes from Runway (RoMac). Each claim checked against
+the source first.
+
+- **NativeSupport 0.50 (psr.c):** an MCR to DFAR, DFSR, IFAR or IFSR
+  (c6,c0,0; c5,c0,0; c6,c0,2; c5,c0,1) is kept, and the MRC reads it back.
+  Before, the MRC answered from the last fault and the MCR was dropped.
+  An abort handler that chains to the next one restores them after a
+  nested fault; with Rorth's handler in front of ARMEABISupport's, GCC 10
+  stack growth read a stale DFAR ("EMT trap"). His `far` test prints
+  "writable" under QEMU (FAR=&12345678 FSR=&F5 read back).
+- **rol-usbd:** filecore_disc() takes a FileCore disc under half the
+  device when ad_reaches(): an MBR &AD entry ending within 1 MB of the
+  disc record's size. (A RISC OS Pi image on a bigger card, never grown.)
+- **Dismount releases the disc (SCSILinux 0.03, rol-usbd):**
+  - SCSILinux handles Service_DiscDismounted (&7D), "SCSI::name" or
+    "SCSI::drive": a matching registered removable rol-usbd disc (by the
+    list's name, case-folded; an unnamed one by being the only unnamed one;
+    with no match, the only removable one, since the list has the boot
+    block's name, which *NameDisc may leave) is marked. The next poll
+    closes it, deregisters it, remembers it as released (not taken again
+    while listed) and creates /riscos/mediactl/eject-DEV.
+  - Service_ShutDown (&7E) clears the marks and stops further ones:
+    FileCore dismounts every disc at shutdown.
+  - SCSIFS itself never sends START STOP UNIT (its `Ejecting` is FALSE),
+    so the service is the trigger.
+  - rol-usbd: eject-DEV for a given disc takes it off the filecore list
+    and into released[]; a released disc isn't given again (and a whole
+    released disc's partitions are mounted) until /sys/block/DISC/size is
+    0 or gone.
+  - Tested under QEMU with a 256 MB USB card: 64 MB FileCore disc
+    (nv512.img) at 0, MBR with a FAT "LOADER" at 8 MB and an &AD partition
+    to 64 MB. Given whole (was refused); Dismount from the icon bar menu
+    (the disc's map is named HardDisc4, its boot block unnamed: the
+    fallback); LOADER mounted; device_del and device_add: given again.
+- **IXFS (riscos-rom 5.31-33, mixed/Linux/IXSupport/c/fs):** any error from
+  getxattr of user.RISC_OS.LoadExec is now ENODATA ("no type"). Before,
+  errors other than EACCES, ENOENT, ENODATA, EOPNOTSUPP failed the read:
+  a file with a 20-byte attribute (ERANGE) gave "ERANGE" for *FileInfo
+  and a junk entry in *Ex (load &0000000D, exec &00000013, 4 Gbytes). On
+  macOS (Runway) getxattr gives EPERM for protected items. Built with the
+  DDE 32d in the QEMU build machine.
+
 ### Updates updates itself first; printing kept (26 Nov 2026; riscos-harddisc 1.0.0079-1, riscos-support 1.0.0091-1)
 
 The owner asked for a way to make one update install before the others.
