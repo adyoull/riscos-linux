@@ -1,4 +1,4 @@
-RISC OS on Linux 1.0.0058 for 64-bit ARM machines (15 November 2026)
+RISC OS on Linux 1.0.0092 for 64-bit ARM machines (27 November 2026)
 ====================================================================
 One image for:
   - Raspberry Pi 3 B / 3 B+ / CM3, Zero 2 W, 4 / 400 / CM4 and 5 / 500 / CM5
@@ -6,14 +6,14 @@ One image for:
   - 64-bit ARM machines that boot from UEFI: the firmware starts
     EFI/BOOT/BOOTAA64.EFI from this partition. That covers virtual
     machines (UTM, QEMU, Parallels: on an Apple Silicon Mac the ready-made
-    "RISC OS 1.0.0058.utm" is easier) and ARM boards and servers with
+    "RISC OS 1.0.0092.utm" is easier) and ARM boards and servers with
     standard UEFI firmware (ACPI, or a device tree from the firmware).
     The Windows Dev Kit 2023 needs its own device tree: use its own image
     (riscos-wdk2023) instead;
   - Pine64's Pinebook (Allwinner A64) and Pinebook Pro (Rockchip RK3399),
     with U-Boot (below) starting EFI/BOOT/BOOTAA64.EFI.
 
-Version 1.0, build 0058: RISC OS 5.31 (5.31-30: RISC OS Open's
+Version 1.0, build 0092: RISC OS 5.31 (5.31-33: RISC OS Open's
 sources merged into Timothy Baldwin's Linux port) with
 RISC OS Open's HardDisc4 5.30, on Debian 13 (the slim base
 Debian's own container images use, about 100 MB: no Linux desktop, no
@@ -24,6 +24,21 @@ run 32-bit ARM programs, otherwise under QEMU (slower). The start-up
 screen says "Starting RISC OS (native)..." when it runs natively.
 *NativeSupport shows what NativeSupport (the module that makes native
 running work) has done.
+
+New in build 0092 (every package update since build 0058): printing
+through Linux's CUPS (Configure, Linux printing: printers on the network
+and USB printers that need no driver, ink and toner levels); RISC3D,
+3D drawing on the GPU for programs built with riscos-mesa (Configure,
+RISC3D: through Linux's Mesa, on the GPU where Linux has a driver for
+it); USB joysticks and gamepads; Ping, ShareFS and
+faster network downloads; sound from a Pi's HDMI screen; NVMe drives in
+RISC OS's own format as on a machine running RISC OS itself; the FAT
+partition the machine starts from as !Boot.Loader; Updates updates itself
+first, and keeps Linux's own start-up safe from systemd; Dismount gives a
+USB stick or card in RISC OS's format back to Linux; a RISC OS Pi card
+written to a bigger card is RISC OS's; RISC OS 5.31-33; the Pi kernel
+6.6.78-18.2 and the generic kernel 7.2.0-10.2. The full list:
+https://github.com/adyoull/riscos-rolpkg/blob/main/CHANGELOG.md
 
 New in build 0058 (every package update since build 0020; the build
 number is now the Linux side's version, which the start-up screen

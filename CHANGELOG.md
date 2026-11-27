@@ -8,6 +8,51 @@ RISC OS 5.31-29 (the `riscos-5.31-source` branch), NativeSupport 0.34 to
 riscos-rolpkg's CHANGELOG lists each package; the next images will
 include them.
 
+### Images 1.0.0092 with RISC3D 0.25 and printing (27 Nov 2026; riscos-harddisc 1.0.0081-1, riscos-risc3d 0.23-1)
+
+The owner: "Build new images including latest RISC3D that we've pushed on
+GitHub" (riscos-risc3d release v0.25: RISC3D-0.11-5.zip).
+
+- **riscos-harddisc 1.0.0081-1:** PackMan's RISC3D 0.11.0.5-1 staged in
+  /usr/share/riscos/packman/RISC3D (the zip's !RISC3D and !RISC3DSetup;
+  Control's version; status; upgrade-from adds 0.10-2, 0.10.0.2-1 and
+  0.11-1 to 0.11.0.4-1). The RISC3D handoffs for 0.21 to 0.25 are taken
+  up by this one (0.25's replaces the others).
+- **riscos-risc3d 0.23-1** in the pool (RISC3D's 19 Nov handoff: shared
+  contexts, rol-3d 0.20).
+- **Image scripts:**
+  - `mkroot92.sh`: mkroot58's, refusing a ROOT with anything mounted in it
+    (`rm -rf --one-file-system`). An `rm -rf` of a root whose /dev was
+    still bind-mounted from a chroot emptied the build machine's /dev.
+  - `mkextras92.sh` (new): in a chroot (qemu-aarch64-static): riscos-support's
+    postinst; riscos-risc3d (dpkg -i, then its trixie-backports sources);
+    `apt-get -f install` (dosfstools, which riscos-support depends on and
+    the 1.0.0020 root lacks); `full-upgrade` (Debian's 12 updates);
+    Debian's Mesa 26.1.6 (backports, as riscos-risc3d pins it) and
+    riscos-print with CUPS (160 packages, --no-install-recommends);
+    qcom-gpu-firmware's pruning on the Dev Kit root (firmware-qcom-soc,
+    which riscos-kernel-wdk2023 depends on, kept to the GPU's two files);
+    then apt-again removed and print-offered made. policy-rc.d stops the
+    packages starting daemons; Debian through the proxy over https.
+    Checks: dpkg --audit, nothing left for full-upgrade, no systemd,
+    sysvinit or udev; `rol-3d --check`: llvmpipe, Mesa 26.1.6.
+  - `mkgen92.sh`, `mkwdk92.sh`: mkgen58's and mkwdk58's.
+  - `utm-config.plist.in`: the UTM bundle's config.plist, @VER@, @ROM@,
+    @UUID@, @DRIVE@ and @MAC@ filled in per release.
+- **Contents:** riscos-rom 5.31-33, riscos-support 1.0.0092-1,
+  riscos-harddisc 1.0.0081-1, riscos-risc3d 0.23-1, riscos-print
+  1.0.0090-1; kernels Pi 6.6.78-18.2 and generic 7.2.0-10.2 (generic and
+  UTM), Dev Kit 7.2.0-7.3; Debian's firmware as before. Roots: generic
+  1.1 GB, Dev Kit 1.0 GB, in the 3072 MB partition.
+- **READMEs:** 1.0.0092, 27 November, 5.31-33, a "New in build 0092"
+  paragraph.
+- **Tested (QEMU):** the generic image from AAVMF UEFI: desktop;
+  `*RISC3D`: Linux3D registered; dpkg shows the versions above; rol-3d,
+  cupsd, avahi-daemon, dbus-daemon, ipp-usb and rol-print running. The
+  Dev Kit image with its own kernel (-kernel BOOTAA64.EFI) on virt:
+  desktop. The UTM qcow2 from AAVMF UEFI: desktop. Nothing on real
+  hardware.
+
 ### David Sharp's notes: abort registers, big Pi cards, Dismount, IXFS (27 Nov 2026; riscos-support 1.0.0092-1, riscos-harddisc 1.0.0080-1, riscos-rom 5.31-33)
 
 From David Sharp's notes from Runway (RoMac). Each claim checked against
